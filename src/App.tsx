@@ -1,1085 +1,1169 @@
-import type { CSSProperties } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Activity,
-  AlertTriangle,
-  BookOpen,
-  Boxes,
-  BrainCircuit,
-  ChevronRight,
-  Cpu,
-  Flame,
-  Gauge,
-  GitCompare,
-  History,
-  Layers,
-  Pause,
   Play,
-  Rocket,
-  RotateCcw,
-  Search,
-  ShieldCheck,
+  Pause,
   SkipBack,
   SkipForward,
-  Sparkles,
-  Target,
+  RotateCcw,
+  Cpu,
   Terminal,
-  Timer,
-  TreePine,
-  TrendingDown,
-  Wand2,
-  Waves,
-  Wrench,
-  X,
+  Layers,
+  Code2,
+  FileCode,
+  Sparkles,
+  ArrowRight,
+  ShieldAlert,
+  GitCommit,
+  Eye,
   Zap,
-  Bomb,
+  ChevronRight,
+  KeyRound,
+  X,
 } from 'lucide-react';
-import clsx from 'clsx';
-import type { TraceFrame } from './core/instrumenter';
 import { runInSandbox } from './core/sandboxRunner';
-import type { AIDiagnosticReport } from './services/aiDiagnostics';
-import { runAIDiagnostics } from './services/aiDiagnostics';
-import { DEFAULT_PRESET, PRESETS } from './presets';
+import { instrumentCode, TraceFrame } from './core/instrumenter';
+import {
+  runAIDiagnostics,
+  analyzeTraceMetrics,
+  AIDiagnosticReport,
+} from './services/aiDiagnostics';
 
-const LINE_H = 22;
-const BASE_TICK = 240;
-const SPEEDS = [0.5, 1, 2, 4];
-const GUTTER = 92;
+interface PresetItem {
+  id: string;
+  title: string;
+  category: string;
+  complexity: string;
+  code: string;
+}
 
-const POINTER_STYLES: Record<string, string> = {
-  left: 'border-cyan-400/60 bg-cyan-500/15 text-cyan-200',
-  right: 'border-rose-400/60 bg-rose-500/15 text-rose-200',
-  low: 'border-sky-400/60 bg-sky-500/15 text-sky-200',
-  high: 'border-orange-400/60 bg-orange-500/15 text-orange-200',
-  mid: 'border-amber-400/60 bg-amber-500/15 text-amber-200',
-  i: 'border-lime-400/60 bg-lime-500/15 text-lime-200',
-  j: 'border-violet-400/60 bg-violet-500/15 text-violet-200',
-  slow: 'border-fuchsia-400/60 bg-fuchsia-500/15 text-fuchsia-200',
-  fast: 'border-emerald-400/60 bg-emerald-500/15 text-emerald-200',
-};
+const PRESETS: PresetItem[] = [
+  {
+    id: 'rainwater',
+    title: 'Trapping Rain Water',
+    category: 'Two Pointers · 1D Water Simulation',
+    complexity: 'O(n)',
+    code: `// 双指针接雨水：O(n) 时间，O(1) 原地空间
+const height = [0, 1, 0, 2, 1, 0, 1, 3, 2, 1, 2, 1];
+let left = 0;
+let right = height.length - 1;
+let leftMax = 0;
+let rightMax = 0;
+let water = 0;
 
-const PRESET_ICONS = { rain: Waves, search: Search, tree: TreePine, bomb: Bomb };
-
-function formatValue(v: unknown): string {
-  if (typeof v === 'string') return v.length > 24 ? `"${v.slice(0, 21)}…"` : `"${v}"`;
-  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(3);
-  if (typeof v === 'boolean' || v === null) return String(v);
-  try {
-    const s = JSON.stringify(v) ?? String(v);
-    return s.length > 28 ? `${s.slice(0, 25)}…` : s;
-  } catch {
-    return String(v);
+while (left < right) {
+  if (height[left] < height[right]) {
+    if (height[left] >= leftMax) {
+      leftMax = height[left];
+    } else {
+      water += leftMax - height[left];
+    }
+    left++;
+  } else {
+    if (height[right] >= rightMax) {
+      rightMax = height[right];
+    } else {
+      water += rightMax - height[right];
+    }
+    right--;
   }
 }
+console.log("Total trapped water =", water);`,
+  },
+  {
+    id: 'dp-matrix',
+    title: 'Min Path Sum (2D DP)',
+    category: '2D Matrix Tabulation · Crosshair',
+    complexity: 'O(M·N)',
+    code: `// 二维动态规划：最小路径和（实时渲染 2D 状态转移矩阵）
+const grid = [
+  [1, 3, 1, 2],
+  [1, 5, 1, 3],
+  [4, 2, 1, 1]
+];
+const dp = [
+  [1, 4, 5, 7],
+  [2, 0, 0, 0],
+  [6, 0, 0, 0]
+];
 
-/** 执行次数越高，热力背景越偏红 */
-function heatTint(hits: number, maxHits: number): string {
-  const t = Math.min(1, hits / Math.max(1, maxHits));
-  return `linear-gradient(90deg, rgba(251,146,60,${(0.08 + t * 0.3).toFixed(3)}) 0%, rgba(239,68,68,${(
-    0.04 + t * 0.22
-  ).toFixed(3)}) 44%, rgba(5,7,13,0) 82%)`;
+for (let r = 1; r < 3; r++) {
+  for (let c = 1; c < 4; c++) {
+    const fromTop = dp[r - 1][c];
+    const fromLeft = dp[r][c - 1];
+    dp[r][c] = Math.min(fromTop, fromLeft) + grid[r][c];
+  }
+}
+console.log("Min path sum =", dp[2][3]);`,
+  },
+  {
+    id: 'binary-search',
+    title: 'Binary Search Bounds',
+    category: 'Divide & Conquer · Interval Shrink',
+    complexity: 'O(log n)',
+    code: `// 二分查找区间折半：观察 low / mid / high 指针收敛
+const nums = [2, 5, 8, 12, 16, 23, 38, 45, 56, 72, 91];
+const target = 23;
+let low = 0;
+let high = nums.length - 1;
+let foundIndex = -1;
+
+while (low <= high) {
+  let mid = Math.floor((low + high) / 2);
+  let guess = nums[mid];
+  if (guess === target) {
+    foundIndex = mid;
+    break;
+  } else if (guess < target) {
+    low = mid + 1;
+  } else {
+    high = mid - 1;
+  }
+}
+console.log("Target index =", foundIndex);`,
+  },
+  {
+    id: 'fib-tree',
+    title: 'Naive Fibonacci Tree',
+    category: 'Recursion Stack · O(2^n) Bottleneck',
+    complexity: 'O(2^n)',
+    code: `// 暴力递归斐波那契：暴露重叠子问题与调用栈反复压栈退栈
+function fib(n) {
+  if (n <= 1) {
+    return n;
+  }
+  let leftBranch = fib(n - 1);
+  let rightBranch = fib(n - 2);
+  return leftBranch + rightBranch;
 }
 
-function heatBadgeClass(hits: number, maxHits: number): string {
-  const t = Math.min(1, hits / Math.max(1, maxHits));
-  if (t > 0.66) return 'border-rose-400/60 bg-rose-500/20 text-rose-100';
-  if (t > 0.33) return 'border-orange-400/60 bg-orange-500/15 text-orange-100';
-  return 'border-amber-400/50 bg-amber-500/10 text-amber-100';
+let result = fib(5);
+console.log("fib(5) =", result);`,
+  },
+  {
+    id: 'infinite-loop',
+    title: 'Infinite Loop Guard',
+    category: 'Safety Fuse · 2000-Step Trap',
+    complexity: 'O(∞) Trap',
+    code: `// 死循环熔断压测：故意省略指针推进，验证 AST __guard 2000步安全拦截
+let count = 0;
+let anomalySum = 1;
+
+while (count < 10) {
+  anomalySum = (anomalySum * 2) % 997;
+  // Bug: count 未递增，控制流陷入死循环自环
 }
+console.log("Unreachable:", anomalySum);`,
+  },
+];
 
-/* ───────────────────── 代码编辑 + 行级执行热力图 ───────────────────── */
+const POINTER_NAMES = new Set([
+  'i',
+  'j',
+  'k',
+  'left',
+  'right',
+  'low',
+  'high',
+  'mid',
+  'r',
+  'c',
+  'slow',
+  'fast',
+  'cursor',
+]);
 
-interface EditorProps {
-  source: string;
-  onChange: (next: string) => void;
-  activeLine: number | null;
-  lineHits?: Record<number, number>;
-  maxHits: number;
-}
+const POINTER_COLORS: Record<string, string> = {
+  left: 'bg-sky-500/20 text-sky-300 border-sky-500/50',
+  right: 'bg-violet-500/20 text-violet-300 border-violet-500/50',
+  low: 'bg-sky-500/20 text-sky-300 border-sky-500/50',
+  high: 'bg-violet-500/20 text-violet-300 border-violet-500/50',
+  mid: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
+  i: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50',
+  j: 'bg-rose-500/20 text-rose-300 border-rose-500/50',
+  r: 'bg-sky-500/20 text-sky-300 border-sky-500/50',
+  c: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
+};
 
-function Editor({ source, onChange, activeLine, lineHits, maxHits }: EditorProps) {
-  const taRef = useRef<HTMLTextAreaElement>(null);
-  const layerRef = useRef<HTMLDivElement>(null);
+export default function App() {
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('rainwater');
+  const [sourceCode, setSourceCode] = useState<string>(PRESETS[0].code);
+  const [codeTab, setCodeTab] = useState<'source' | 'ast'>('source');
+  const [editMode, setEditMode] = useState<boolean>(false);
 
-  const lines = useMemo(() => source.split('\n'), [source]);
+  const [frames, setFrames] = useState<TraceFrame[]>([]);
+  const [currentFrameIdx, setCurrentFrameIdx] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [speed, setSpeed] = useState<number>(1);
+  const [execTimeMs, setExecTimeMs] = useState<number>(0);
+  const [sandboxError, setSandboxError] = useState<string | undefined>(undefined);
 
-  const sync = () => {
-    const ta = taRef.current;
-    const layer = layerRef.current;
-    if (!ta || !layer) return;
-    layer.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
+  const [aiReport, setAiReport] = useState<AIDiagnosticReport | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [apiKey, setApiKey] = useState<string>('');
+  const [showKeyInput, setShowKeyInput] = useState<boolean>(false);
+  const [showArchModal, setShowArchModal] = useState<boolean>(false);
+
+  const activeLineRef = useRef<HTMLDivElement | null>(null);
+
+  const executeCode = async (codeToRun: string) => {
+    setIsPlaying(false);
+    const res = await runInSandbox(codeToRun);
+    setExecTimeMs(res.executionTimeMs);
+    setSandboxError(res.error);
+
+    if (res.frames && res.frames.length > 0) {
+      setFrames(res.frames);
+      setCurrentFrameIdx(0);
+    } else {
+      setFrames([]);
+      setCurrentFrameIdx(0);
+    }
+
+    setIsAnalyzing(true);
+    const report = await runAIDiagnostics(codeToRun, res.frames || [], res.error, apiKey);
+    setAiReport(report);
+    setIsAnalyzing(false);
   };
 
   useEffect(() => {
-    sync();
-  }, [source]);
-
-  useEffect(() => {
-    const ta = taRef.current;
-    if (!ta || activeLine === null) return;
-    const y = (activeLine - 1) * LINE_H;
-    if (y < ta.scrollTop + LINE_H || y > ta.scrollTop + ta.clientHeight - LINE_H * 2) {
-      ta.scrollTop = Math.max(0, y - ta.clientHeight / 2);
-      sync();
-    }
-  }, [activeLine]);
-
-  const pad = `${GUTTER}px`;
-
-  return (
-    <section className="flex min-h-[320px] flex-col rounded-xl border border-ink-700 bg-ink-900/70 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.9)] xl:min-h-0">
-      <header className="flex items-center gap-2 border-b border-ink-700 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-        <Layers className="h-3.5 w-3.5 text-neon-cyan" />
-        <span>源码 · 行级执行热力图</span>
-        <span className="ml-auto flex items-center gap-2 normal-case tracking-normal">
-          <span className="flex items-center gap-1 text-[10px] text-slate-500">
-            冷
-            <span className="inline-block h-2 w-10 rounded-full bg-gradient-to-r from-amber-500/30 via-orange-500/60 to-rose-500/80" />
-            热
-          </span>
-          {activeLine !== null && (
-            <span className="rounded-md border border-cyan-400/40 bg-cyan-500/10 px-2 py-0.5 text-cyan-200">
-              当前 L{activeLine}
-            </span>
-          )}
-        </span>
-      </header>
-
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        <div
-          ref={layerRef}
-          className="pointer-events-none absolute left-0 top-0 pt-3 font-mono text-[13px] will-change-transform"
-        >
-          {lines.map((line, i) => {
-            const no = i + 1;
-            const count = lineHits?.[no] ?? 0;
-            const isCurrent = activeLine === no;
-            return (
-              <div
-                key={no}
-                className={clsx(
-                  'relative h-[22px] whitespace-pre leading-[22px] pr-[420px]',
-                  isCurrent && 'z-[1]'
-                )}
-                style={{
-                  paddingLeft: pad,
-                  background: count > 0 ? heatTint(count, maxHits) : undefined,
-                  boxShadow: isCurrent ? 'inset 0 0 0 1px rgba(96,165,250,0.6)' : undefined,
-                }}
-              >
-                <span
-                  className={clsx(
-                    'absolute left-0 w-[36px] text-right text-[11px]',
-                    isCurrent ? 'font-bold text-cyan-200' : count > 0 ? 'text-slate-400' : 'text-slate-600'
-                  )}
-                >
-                  {no}
-                </span>
-                {count > 0 && (
-                  <span
-                    className={clsx(
-                      'absolute left-[42px] top-[3px] rounded border px-1 text-[9px] font-bold leading-[16px]',
-                      heatBadgeClass(count, maxHits),
-                      isCurrent && 'ring-1 ring-cyan-300/50'
-                    )}
-                  >
-                    🔥{count}x
-                  </span>
-                )}
-                {isCurrent && (
-                  <span className="animate-pulseRing absolute top-0 h-full w-[3px] rounded-full bg-cyan-300 shadow-glow" style={{ left: GUTTER - 8 }} />
-                )}
-                <span className="text-transparent">{line || ' '}</span>
-              </div>
-            );
-          })}
-          <div className="h-24" />
-        </div>
-
-        <textarea
-          ref={taRef}
-          value={source}
-          wrap="off"
-          spellCheck={false}
-          onChange={(e) => onChange(e.target.value)}
-          onScroll={sync}
-          style={{ paddingLeft: pad }}
-          className="scroll-thin absolute inset-0 h-full w-full resize-none overflow-auto whitespace-pre bg-transparent py-3 pr-6 font-mono text-[13px] leading-[22px] text-slate-100 caret-cyan-300 outline-none"
-        />
-      </div>
-    </section>
-  );
-}
-
-/* ───────────────────── 内存显微镜 ───────────────────── */
-
-interface PointerRef {
-  name: string;
-  value: number;
-}
-
-function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers: PointerRef[] }) {
-  const isMatrix = arr.length > 0 && arr.every((row) => Array.isArray(row));
-  const numeric = !isMatrix && arr.every((v) => typeof v === 'number' && Number.isFinite(v));
-  const maxAbs = numeric ? Math.max(1, ...(arr as number[]).map((v) => Math.abs(v))) : 1;
-  const visible = arr.slice(0, 60);
-  const hitsByIndex = new Map<number, PointerRef[]>();
-  pointers.forEach((p) => {
-    if (p.value >= 0 && p.value < visible.length) {
-      hitsByIndex.set(p.value, [...(hitsByIndex.get(p.value) ?? []), p]);
-    }
-  });
-
-  return (
-    <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-3">
-      <div className="mb-2 flex items-center gap-2 text-[11px]">
-        <Boxes className="h-3.5 w-3.5 text-neon-violet" />
-        <span className="font-bold text-slate-200">{name}</span>
-        <span className="text-slate-500">
-          {isMatrix ? `矩阵 ${arr.length}×${(arr[0] as any[])?.length ?? 0}` : `数组 · ${arr.length} 项`}
-        </span>
-        {numeric && (
-          <span className="ml-auto text-slate-500">
-            max <b className="text-neon-cyan">{maxAbs}</b>
-          </span>
-        )}
-      </div>
-
-      <div className="scroll-thin overflow-x-auto pb-1">
-        <div className="flex min-w-max items-end gap-1.5">
-          {visible.map((cell, idx) => {
-            const cellPointers = hitsByIndex.get(idx) ?? [];
-            const highlighted = cellPointers.length > 0;
-            const barPct = numeric ? Math.max(4, (Math.abs(cell as number) / maxAbs) * 100) : 0;
-            return (
-              <div key={idx} className="flex w-[62px] flex-col items-center gap-1">
-                {numeric && (
-                  <div className="flex h-[46px] w-full items-end justify-center">
-                    <div
-                      className="w-[74%] rounded-t-[3px] bg-gradient-to-t from-blue-600/70 to-cyan-300/90 transition-all duration-150"
-                      style={{ height: `${barPct}%` }}
-                    />
-                  </div>
-                )}
-                <div
-                  className={clsx(
-                    'grid h-11 w-full place-items-center rounded-md border px-1 text-[12px] font-bold transition-colors duration-150',
-                    highlighted
-                      ? 'border-cyan-300/80 bg-cyan-400/20 text-cyan-50 shadow-glow'
-                      : isMatrix
-                        ? 'border-ink-600 bg-ink-900 text-[9px] font-normal text-slate-400'
-                        : 'border-ink-600 bg-ink-900 text-slate-200'
-                  )}
-                  title={JSON.stringify(cell)}
-                >
-                  {isMatrix
-                    ? `[${(cell as any[]).slice(0, 4).map((v) => (typeof v === 'number' ? v : formatValue(v))).join(',')}${
-                        (cell as any[]).length > 4 ? '…' : ''
-                      }]`
-                    : formatValue(cell)}
-                </div>
-                <span className="text-[10px] text-slate-500">[{idx}]</span>
-                <div className="flex h-[36px] flex-col items-center gap-[3px]">
-                  {cellPointers.map((p) => (
-                    <span
-                      key={p.name}
-                      className={clsx(
-                        'whitespace-nowrap rounded-full border px-1.5 py-[1px] text-[10px] font-bold shadow-glow',
-                        POINTER_STYLES[p.name]
-                      )}
-                    >
-                      ▲ {p.name}={p.value}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      {arr.length > visible.length && (
-        <p className="mt-1 text-[10px] text-slate-500">
-          仅渲染前 {visible.length} 项，共 {arr.length} 项
-        </p>
-      )}
-    </div>
-  );
-}
-
-function MemoryScope({ frame }: { frame: TraceFrame | null }) {
-  const entries = useMemo(
-    () => Object.entries(frame?.variables ?? {}) as [string, any][],
-    [frame]
-  );
-  const arrays = entries.filter(([, v]) => Array.isArray(v) && v.length > 0);
-  const scalars = entries.filter(([, v]) => !Array.isArray(v));
-  const pointers: PointerRef[] = entries
-    .filter(([k, v]) => POINTER_STYLES[k] && typeof v === 'number' && Number.isInteger(v))
-    .map(([k, v]) => ({ name: k, value: v as number }));
-  const inRange = pointers.filter((p) => arrays.some(([, a]) => p.value >= 0 && p.value < a.length));
-  const outOfRange = pointers.filter((p) => !inRange.includes(p));
-
-  return (
-    <section className="flex min-h-[340px] flex-col rounded-xl border border-ink-700 bg-ink-900/70 xl:min-h-0">
-      <header className="flex items-center gap-2 border-b border-ink-700 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-        <Activity className="h-3.5 w-3.5 text-neon-lime" />
-        <span>内存显微镜</span>
-        <span className="ml-auto flex items-center gap-2 normal-case tracking-normal text-slate-500">
-          <span>{arrays.length} 数组</span>
-          <span>·</span>
-          <span>{inRange.length} 指针</span>
-        </span>
-      </header>
-
-      <div className="scroll-thin min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        {!frame && (
-          <p className="rounded-lg border border-dashed border-ink-600 p-6 text-center text-xs text-slate-500">
-            点击顶部「运行插桩」以采集时间帧
-          </p>
-        )}
-
-        {frame && arrays.length === 0 && scalars.length === 0 && (
-          <p className="rounded-lg border border-dashed border-ink-600 p-6 text-center text-xs text-slate-500">
-            当前帧作用域内无可观测变量
-          </p>
-        )}
-
-        {arrays.map(([name, arr]) => (
-          <ArrayLens key={name} name={name} arr={arr} pointers={inRange} />
-        ))}
-
-        {scalars.length > 0 && (
-          <div className="rounded-lg border border-ink-600 bg-ink-850/60 p-3">
-            <div className="mb-2 flex items-center gap-2 text-[11px] text-slate-400">
-              <Layers className="h-3.5 w-3.5 text-neon-cyan" />
-              标量与对象快照
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {scalars.map(([k, v]) => {
-                const isPointer = Boolean(POINTER_STYLES[k]);
-                return (
-                  <span
-                    key={k}
-                    className={clsx(
-                      'rounded-md border px-2 py-1 font-mono text-[11px]',
-                      isPointer
-                        ? clsx(POINTER_STYLES[k], 'font-bold')
-                        : 'border-ink-600 bg-ink-900 text-slate-300'
-                    )}
-                  >
-                    <b className="text-slate-100">{k}</b>
-                    <span className="mx-1 text-slate-500">=</span>
-                    {formatValue(v)}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {outOfRange.length > 0 && (
-          <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3 text-[11px] text-amber-200">
-            <div className="mb-1 flex items-center gap-2">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              指针已越出数组边界，不再渲染在方格下方
-            </div>
-            <div className="flex flex-wrap gap-1.5 font-mono">
-              {outOfRange.map((p) => (
-                <span key={p.name} className={clsx('rounded-full border px-2 py-[2px]', POINTER_STYLES[p.name])}>
-                  {p.name}={p.value}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="grid shrink-0 grid-cols-2 gap-3 border-t border-ink-700 p-3">
-        <div className="min-h-[92px]">
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-slate-500">
-            <ChevronRight className="h-3 w-3 text-neon-violet" />
-            调用栈
-          </div>
-          <div className="scroll-thin flex h-[64px] flex-wrap content-start gap-1 overflow-y-auto">
-            {(frame?.callStack ?? ['main()']).map((fn, i) => (
-              <span
-                key={`${fn}-${i}`}
-                className={clsx(
-                  'rounded border px-1.5 py-[2px] text-[10px]',
-                  i === (frame?.callStack.length ?? 1) - 1
-                    ? 'border-violet-400/60 bg-violet-500/15 text-violet-200'
-                    : 'border-ink-600 bg-ink-900 text-slate-400'
-                )}
-              >
-                {fn}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="min-h-[92px]">
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-slate-500">
-            <Terminal className="h-3 w-3 text-neon-lime" />
-            stdout
-          </div>
-          <div className="scroll-thin h-[64px] overflow-y-auto rounded border border-ink-600 bg-black/50 p-1.5 font-mono text-[10px] leading-[16px] text-lime-300">
-            {(frame?.stdout ?? []).length === 0 ? (
-              <span className="text-slate-600">// 暂无输出</span>
-            ) : (
-              frame!.stdout.map((log, i) => <div key={i}>$ {log}</div>)
-            )}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/* ───────────────────── AI 帧级复杂度手术刀 ───────────────────── */
-
-interface AiPanelProps {
-  report: AIDiagnosticReport | null;
-  loading: boolean;
-  running: boolean;
-  hasFrames: boolean;
-  framesCount: number;
-  apiKey: string;
-  comparison: { from: number; to: number } | null;
-  onApiKey: (v: string) => void;
-  onDiagnose: () => void;
-  onJump: (frameIndex: number) => void;
-  onApply: (code: string) => void;
-}
-
-function AiPanel({
-  report,
-  loading,
-  running,
-  hasFrames,
-  framesCount,
-  apiKey,
-  comparison,
-  onApiKey,
-  onDiagnose,
-  onJump,
-  onApply,
-}: AiPanelProps) {
-  const gain =
-    comparison && comparison.from > 0
-      ? Math.round(((comparison.from - comparison.to) / comparison.from) * 100)
-      : null;
-
-  return (
-    <section className="flex min-h-[340px] flex-col rounded-xl border border-violet-500/30 bg-[linear-gradient(160deg,rgba(76,29,149,0.22),rgba(10,15,26,0.85))] xl:min-h-0">
-      <header className="flex items-center gap-2 border-b border-violet-500/30 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-violet-200/80">
-        <BrainCircuit className="h-3.5 w-3.5 text-neon-violet" />
-        <span>DeepSeek / AI 帧级复杂度手术刀</span>
-        {report && (
-          <span className="ml-auto flex items-center gap-1 rounded border border-ink-600 bg-ink-900 px-1.5 py-[1px] text-[10px] normal-case tracking-normal text-slate-300">
-            <Cpu className="h-3 w-3 text-neon-cyan" />
-            {report.engine === 'deepseek' ? 'DeepSeek 在线' : '内置免 Key 引擎'}
-          </span>
-        )}
-      </header>
-
-      <div className="scroll-thin min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <div className="space-y-2 rounded-lg border border-ink-600 bg-ink-850/60 p-3">
-          <label className="block text-[10px] uppercase tracking-widest text-slate-500">
-            DeepSeek API Key（可选，留空使用内置确定性引擎）
-          </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => onApiKey(e.target.value)}
-            placeholder="sk-••••••••••••••••"
-            className="w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-violet-400/60"
-          />
-          <button
-            onClick={onDiagnose}
-            disabled={!hasFrames || loading || running}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-violet-400/60 bg-gradient-to-b from-violet-500/30 to-fuchsia-600/20 px-3 py-2 text-[12px] font-bold text-violet-50 shadow-glow transition hover:brightness-125 disabled:opacity-40"
-          >
-            <Sparkles className={clsx('h-4 w-4', loading && 'animate-spin')} />
-            {loading ? 'AI 帧级推理中…' : '✨ 启动 AI 帧级诊断'}
-          </button>
-          <p className="text-[10px] leading-relaxed text-slate-500">
-            Key 仅保存在内存并在本次诊断中直连 DeepSeek，不写入 localStorage；若浏览器 CORS
-            拦截则自动回退内置 AST 引擎。
-          </p>
-        </div>
-
-        {!report && !loading && (
-          <p className="rounded-lg border border-dashed border-ink-600 p-6 text-center text-xs text-slate-500">
-            采集时间帧后启动诊断，AI 将基于 lineHits 与调用栈深度给出时空复杂度报告
-          </p>
-        )}
-
-        {loading && (
-          <div className="space-y-2">
-            {[64, 40, 88].map((w, i) => (
-              <div key={i} className="h-3 animate-pulse rounded bg-ink-700/70" style={{ width: `${w}%` }} />
-            ))}
-          </div>
-        )}
-
-        {report && !loading && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 p-2.5">
-                <p className="text-[10px] uppercase tracking-widest text-rose-200/70">时间复杂度</p>
-                <p className="mt-1 text-[13px] font-bold text-rose-100">{report.timeComplexity}</p>
-              </div>
-              <div className="rounded-lg border border-cyan-400/40 bg-cyan-500/10 p-2.5">
-                <p className="text-[10px] uppercase tracking-widest text-cyan-200/70">空间复杂度</p>
-                <p className="mt-1 text-[13px] font-bold text-cyan-100">{report.spaceComplexity}</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
-                <p className="text-[10px] text-slate-500">热点行</p>
-                <p className="mt-0.5 flex items-center justify-center gap-1 text-[13px] font-bold text-orange-200">
-                  <Flame className="h-3.5 w-3.5" />L{report.hotspotLine}
-                </p>
-                <p className="text-[10px] text-slate-500">×{report.maxHitCount}</p>
-              </div>
-              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
-                <p className="text-[10px] text-slate-500">最大栈深</p>
-                <p className="mt-0.5 text-[13px] font-bold text-violet-200">{report.maxStackDepth} 层</p>
-                <p className="text-[10px] text-slate-500">调用栈峰值</p>
-              </div>
-              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
-                <p className="text-[10px] text-slate-500">总帧数</p>
-                <p className="mt-0.5 text-[13px] font-bold text-neon-cyan">{framesCount}</p>
-                <p className="text-[10px] text-slate-500">AST 采集</p>
-              </div>
-            </div>
-
-            <button
-              onClick={() => onJump(report.bottleneckFrameIndex)}
-              className="flex w-full items-center gap-2 rounded-lg border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-left text-[11px] text-amber-100 transition hover:bg-amber-500/20"
-            >
-              <Target className="h-4 w-4 shrink-0" />
-              <span>
-                瓶颈帧定位 · 第 <b className="text-amber-50">{report.bottleneckFrameIndex}</b> 帧为栈深峰值 / 关键状态转折点
-              </span>
-              <span className="ml-auto whitespace-nowrap rounded border border-amber-400/50 px-1.5 py-[2px] text-[10px] font-bold">
-                🎯 跳转至第 {report.bottleneckFrameIndex} 帧
-              </span>
-            </button>
-
-            <p className="rounded-lg border border-ink-600 bg-ink-950/60 p-3 text-[11px] leading-relaxed text-slate-300">
-              {report.summary}
-            </p>
-
-            {report.frameInsights.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-[10px] uppercase tracking-widest text-slate-500">帧级洞察</p>
-                {report.frameInsights.map((insight, i) => (
-                  <button
-                    key={i}
-                    onClick={() => onJump(insight.frameIndex)}
-                    className="flex w-full items-start gap-2 rounded-md border border-ink-600 bg-ink-850/60 p-2 text-left transition hover:border-violet-400/50"
-                  >
-                    <span className="mt-[1px] shrink-0 rounded border border-violet-400/50 bg-violet-500/15 px-1.5 py-[1px] text-[10px] font-bold text-violet-200">
-                      F{insight.frameIndex}
-                    </span>
-                    <span className="flex-1 text-[11px] leading-snug text-slate-300">
-                      <b className="text-orange-200">L{insight.line}</b> · {insight.issue}
-                    </span>
-                    <Target className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="rounded-lg border border-ink-600 bg-ink-950/70 p-3">
-              <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-widest text-slate-500">
-                <Wand2 className="h-3.5 w-3.5 text-neon-lime" />
-                AI 优化代码
-              </div>
-              <pre className="scroll-thin max-h-40 overflow-auto whitespace-pre-wrap text-[10.5px] leading-[16px] text-lime-200/90">
-                {report.optimizedCode}
-              </pre>
-              <p className="mt-2 flex items-start gap-1.5 text-[11px] text-emerald-200/90">
-                <TrendingDown className="mt-[1px] h-3.5 w-3.5 shrink-0" />
-                {report.optimizationGain}
-              </p>
-              <button
-                onClick={() => onApply(report.optimizedCode)}
-                disabled={running}
-                className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-400/60 bg-emerald-500/20 px-3 py-2 text-[12px] font-bold text-emerald-100 transition hover:brightness-125 disabled:opacity-40"
-              >
-                <Zap className="h-4 w-4" />⚡ 一键应用 AI 优化代码并重跑对比
-              </button>
-            </div>
-
-            {comparison && gain !== null && (
-              <div className="flex items-center gap-2 rounded-lg border border-cyan-400/50 bg-cyan-500/10 p-3 text-[12px] text-cyan-100">
-                <GitCompare className="h-4 w-4 shrink-0" />
-                <span>
-                  优化前后时间帧：
-                  <b className="mx-1 text-rose-200 line-through">{comparison.from}</b>→
-                  <b className="mx-1 text-emerald-200">{comparison.to}</b>
-                  {gain >= 0 ? `（减少 ${gain}%）` : `（增加 ${-gain}%）`}
-                </span>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  );
-}
-
-/* ───────────────────── Qoder 协同开发档案 ───────────────────── */
-
-const BREAKER_ROWS = [
-  { name: '步数熔断', where: '__guard', limit: '2000 步', effect: '抛出疑似死循环告警，并回收熔断前全部时间帧' },
-  { name: '递归熔断', where: '__enterFn', limit: '150 层', effect: '调用栈超限即抛出栈溢出告警，__exitFn 负责退栈' },
-  { name: '硬件熔断', where: 'sandboxRunner', limit: '3000ms', effect: 'worker.terminate() 强制终止隔离线程' },
-];
-
-const MILESTONES = [
-  {
-    tag: 'Milestone 1',
-    title: 'AST 作用域快照与 Web Worker 沙箱构建',
-    detail:
-      'Babel 插件在循环、赋值、函数调用处注入 __trace 钩子；Blob Worker 隔离执行 + 3000ms 硬件熔断；输出 frameIndex / line / variables / callStack / stdout 五元组时间帧。',
-  },
-  {
-    tag: 'Milestone 2',
-    title: '架构师纠偏：AST 递归退栈 + 行级热力',
-    detail:
-      '架构师指出递归函数返回后调用栈未弹出，导致帧级 callStack 只增不减、栈深指标失真。指导 Qoder 以 try...finally { __exitFn() } 包裹函数体，并在 __trace 内累计 __lineHits 让每一帧携带截至该帧的行级执行热力。',
-  },
-];
-
-const QODER_CORRECTIONS = [
-  'TDZ 纠偏：scope.bindings 含同块内稍后声明的 let/const，快照读取改为 try/catch 闭包，避免 ReferenceError 中断采集。',
-  '帧回收纠偏：__frames 同步挂载 globalThis.__mtmFrames，Worker catch 分支得以在熔断后回传前序帧。',
-  '覆盖纠偏：插桩 visitor 扩展到 Program，使顶层语句（函数调用与 console.log）同样产帧。',
-  '协同纠偏留痕：Milestone 2 实例代码曾回退上述 TDZ 修复，已在合并时保留修复并标注来源。',
-];
-
-function ArchiveModal({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
-      <div
-        className="scroll-thin max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-violet-400/40 bg-ink-900 shadow-[0_40px_120px_-40px_rgba(139,92,246,0.5)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <header className="sticky top-0 flex items-center gap-3 border-b border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur">
-          <span className="grid h-8 w-8 place-items-center rounded-lg border border-violet-400/50 bg-violet-500/15">
-            <Wrench className="h-4 w-4 text-neon-violet" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-bold text-slate-50">🛠️ Qoder 协同开发档案</h2>
-            <p className="text-[11px] text-slate-500">人机协同架构演进 · 安全熔断设计 · 工程纠偏留痕</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="ml-auto grid h-8 w-8 place-items-center rounded-lg border border-ink-600 text-slate-400 transition hover:border-rose-400/60 hover:text-rose-200"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="space-y-5 p-4">
-          <section>
-            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-cyan">
-              <ShieldCheck className="h-4 w-4" />三层安全熔断架构
-            </h3>
-            <div className="overflow-hidden rounded-lg border border-ink-600">
-              <table className="w-full text-left text-[11px]">
-                <thead className="bg-ink-800 text-slate-400">
-                  <tr>
-                    <th className="px-3 py-2 font-semibold">熔断层</th>
-                    <th className="px-3 py-2 font-semibold">实现位置</th>
-                    <th className="px-3 py-2 font-semibold">阈值</th>
-                    <th className="px-3 py-2 font-semibold">触发行为</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-ink-700 bg-ink-850/60 text-slate-300">
-                  {BREAKER_ROWS.map((r) => (
-                    <tr key={r.name}>
-                      <td className="px-3 py-2 font-bold text-slate-100">{r.name}</td>
-                      <td className="px-3 py-2 font-mono text-neon-lime">{r.where}</td>
-                      <td className="px-3 py-2 text-amber-200">{r.limit}</td>
-                      <td className="px-3 py-2">{r.effect}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section>
-            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-violet">
-              <BookOpen className="h-4 w-4" />人机协同架构演进记录
-            </h3>
-            <div className="space-y-2">
-              {MILESTONES.map((m) => (
-                <div key={m.tag} className="rounded-lg border border-ink-600 bg-ink-850/60 p-3">
-                  <div className="flex items-center gap-2">
-                    <History className="h-3.5 w-3.5 text-neon-cyan" />
-                    <span className="rounded border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-[1px] text-[10px] font-bold text-cyan-200">
-                      {m.tag}
-                    </span>
-                    <span className="text-[12px] font-bold text-slate-100">{m.title}</span>
-                  </div>
-                  <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{m.detail}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-amber">
-              <AlertTriangle className="h-4 w-4" />Qoder 工程纠偏留痕
-            </h3>
-            <ul className="space-y-1.5 rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
-              {QODER_CORRECTIONS.map((c) => (
-                <li key={c} className="flex gap-2 text-[11px] leading-relaxed text-amber-100/90">
-                  <ChevronRight className="mt-[2px] h-3 w-3 shrink-0 text-amber-300" />
-                  {c}
-                </li>
-              ))}
-            </ul>
-          </section>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ───────────────────── 时间旅行控制器 ───────────────────── */
-
-interface TimelineProps {
-  frames: TraceFrame[];
-  cursor: number;
-  playing: boolean;
-  speed: number;
-  onCursor: (next: number) => void;
-  onTogglePlay: () => void;
-  onStep: (delta: number) => void;
-  onSpeed: (next: number) => void;
-}
-
-function Timeline({ frames, cursor, playing, speed, onCursor, onTogglePlay, onStep, onSpeed }: TimelineProps) {
-  const total = frames.length;
-  const current = total > 0 ? frames[Math.min(cursor, total - 1)] : null;
-  const pct = total > 1 ? (cursor / (total - 1)) * 100 : 0;
-
-  return (
-    <footer className="shrink-0 border-t border-ink-700 bg-ink-900/90 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => onCursor(0)}
-            disabled={total === 0}
-            className="grid h-9 w-9 place-items-center rounded-lg border border-ink-600 bg-ink-850 text-slate-300 transition hover:border-neon-cyan/60 hover:text-neon-cyan disabled:opacity-35"
-            title="回到首帧"
-          >
-            <RotateCcw className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => onStep(-1)}
-            disabled={total === 0}
-            className="grid h-9 w-9 place-items-center rounded-lg border border-ink-600 bg-ink-850 text-slate-300 transition hover:border-neon-cyan/60 hover:text-neon-cyan disabled:opacity-35"
-            title="上一帧"
-          >
-            <SkipBack className="h-4 w-4" />
-          </button>
-          <button
-            onClick={onTogglePlay}
-            disabled={total === 0}
-            className="grid h-11 w-11 place-items-center rounded-xl border border-cyan-400/60 bg-gradient-to-b from-cyan-500/30 to-blue-600/25 text-cyan-100 shadow-glow-lg transition hover:brightness-125 disabled:opacity-35"
-            title={playing ? '暂停' : '播放'}
-          >
-            {playing ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 translate-x-[1px]" />}
-          </button>
-          <button
-            onClick={() => onStep(1)}
-            disabled={total === 0}
-            className="grid h-9 w-9 place-items-center rounded-lg border border-ink-600 bg-ink-850 text-slate-300 transition hover:border-neon-cyan/60 hover:text-neon-cyan disabled:opacity-35"
-            title="下一帧"
-          >
-            <SkipForward className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="flex min-w-[220px] flex-1 flex-col gap-1">
-          <input
-            type="range"
-            className="timeline"
-            min={0}
-            max={Math.max(0, total - 1)}
-            value={Math.min(cursor, Math.max(0, total - 1))}
-            disabled={total === 0}
-            onChange={(e) => onCursor(Number(e.target.value))}
-            style={{ '--progress': `${pct}%` } as CSSProperties}
-          />
-          <div className="flex items-center justify-between text-[11px] text-slate-400">
-            <span className="font-bold text-cyan-200">
-              Frame {total > 0 ? cursor + 1 : 0} / {total}
-            </span>
-            <span className="truncate pl-3 text-slate-300">
-              {current ? `${current.event} · L${current.line}` : '等待采集时间帧'}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <Gauge className="h-4 w-4 text-slate-500" />
-          {SPEEDS.map((s) => (
-            <button
-              key={s}
-              onClick={() => onSpeed(s)}
-              className={clsx(
-                'rounded-md border px-2.5 py-1 text-[11px] font-bold transition',
-                speed === s
-                  ? 'border-cyan-400/70 bg-cyan-500/20 text-cyan-100 shadow-glow'
-                  : 'border-ink-600 bg-ink-850 text-slate-400 hover:text-slate-200'
-              )}
-            >
-              {s}x
-            </button>
-          ))}
-        </div>
-      </div>
-    </footer>
-  );
-}
-
-/* ───────────────────── 主应用 ───────────────────── */
-
-export default function App() {
-  const [source, setSource] = useState(DEFAULT_PRESET.code);
-  const [activePreset, setActivePreset] = useState<string | null>(DEFAULT_PRESET.id);
-  const [frames, setFrames] = useState<TraceFrame[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [cursor, setCursor] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
-  const [elapsed, setElapsed] = useState<number | null>(null);
-  const [apiKey, setApiKey] = useState('');
-  const [report, setReport] = useState<AIDiagnosticReport | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [comparison, setComparison] = useState<{ from: number; to: number } | null>(null);
-  const [showArchive, setShowArchive] = useState(false);
-
-  const total = frames.length;
-  const current = total > 0 ? frames[Math.min(cursor, total - 1)] : null;
-  const activeLine = current ? current.line : null;
-
-  const maxHits = useMemo(() => {
-    const values = Object.values(current?.lineHits ?? {});
-    return values.length ? Math.max(1, ...values.map(Number)) : 1;
-  }, [current]);
-
-  async function execute(code: string) {
-    setRunning(true);
-    setPlaying(false);
-    setError(null);
-    const result = await runInSandbox(code);
-    setFrames(result.frames);
-    setCursor(0);
-    setElapsed(result.executionTimeMs);
-    setError(result.success ? null : result.error ?? '未知错误');
-    setRunning(false);
-    return result.frames.length;
-  }
-
-  useEffect(() => {
-    execute(DEFAULT_PRESET.code);
+    executeCode(sourceCode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (!playing || total === 0) return;
-    const id = window.setInterval(() => {
-      setCursor((c) => Math.min(c + 1, total - 1));
-    }, BASE_TICK / speed);
-    return () => window.clearInterval(id);
-  }, [playing, speed, total]);
+    if (!isPlaying || frames.length === 0) return;
+    const intervalMs = Math.max(35, Math.round(260 / speed));
+    const timer = setInterval(() => {
+      setCurrentFrameIdx((prev) => {
+        if (prev >= frames.length - 1) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [isPlaying, speed, frames.length]);
 
+  // Keyboard shortcuts: Space to toggle play, Left/Right arrows to step frames
   useEffect(() => {
-    if (playing && total > 0 && cursor >= total - 1) setPlaying(false);
-  }, [playing, cursor, total]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsPlaying((p) => !p);
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setCurrentFrameIdx((p) => Math.min(frames.length - 1, p + 1));
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setCurrentFrameIdx((p) => Math.max(0, p - 1));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [frames.length]);
 
-  const jumpToFrame = (index: number) => {
-    if (total === 0) return;
-    setPlaying(false);
-    setCursor(Math.max(0, Math.min(index, total - 1)));
+  const currentFrame: TraceFrame | undefined = frames[currentFrameIdx];
+  const prevFrame: TraceFrame | undefined =
+    currentFrameIdx > 0 ? frames[currentFrameIdx - 1] : undefined;
+
+  // Scroll active line into view gently
+  useEffect(() => {
+    if (activeLineRef.current && !editMode && codeTab === 'source') {
+      activeLineRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [currentFrame?.line, editMode, codeTab]);
+
+  const instrumentedPreview = useMemo(() => {
+    try {
+      return instrumentCode(sourceCode);
+    } catch (e: any) {
+      return `// AST Parse Error:\n// ${e.message}`;
+    }
+  }, [sourceCode]);
+
+  const traceMetrics = useMemo(() => analyzeTraceMetrics(frames), [frames]);
+
+  // Compute variable diffs between prevFrame and currentFrame
+  const mutatedKeys = useMemo(() => {
+    const diffs: Record<string, { prev: any; next: any }> = {};
+    if (!currentFrame || !prevFrame) return diffs;
+    for (const [k, v] of Object.entries(currentFrame.variables)) {
+      const pv = prevFrame.variables[k];
+      if (JSON.stringify(pv) !== JSON.stringify(v)) {
+        diffs[k] = { prev: pv, next: v };
+      }
+    }
+    return diffs;
+  }, [currentFrame, prevFrame]);
+
+  // Separate variables into 2D matrices, 1D arrays, pointers, and scalars
+  const categorizedVars = useMemo(() => {
+    const matrices2D: { name: string; data: number[][] }[] = [];
+    const arrays1D: { name: string; data: any[] }[] = [];
+    const scalars: { name: string; value: any; isPointer: boolean }[] = [];
+    const numericPointers: Record<string, number> = {};
+
+    if (!currentFrame) return { matrices2D, arrays1D, scalars, numericPointers };
+
+    for (const [k, v] of Object.entries(currentFrame.variables)) {
+      if (
+        Array.isArray(v) &&
+        v.length > 0 &&
+        Array.isArray(v[0]) &&
+        v.every((row) => Array.isArray(row))
+      ) {
+        matrices2D.push({ name: k, data: v });
+      } else if (Array.isArray(v)) {
+        arrays1D.push({ name: k, data: v });
+      } else {
+        const isPtr = POINTER_NAMES.has(k) && typeof v === 'number';
+        if (isPtr) numericPointers[k] = v;
+        scalars.push({ name: k, value: v, isPointer: isPtr });
+      }
+    }
+    return { matrices2D, arrays1D, scalars, numericPointers };
+  }, [currentFrame]);
+
+  const codeLines = useMemo(() => sourceCode.split('\n'), [sourceCode]);
+  const maxLineHitInFrame = useMemo(() => {
+    if (!currentFrame?.lineHits) return 1;
+    return Math.max(1, ...Object.values(currentFrame.lineHits));
+  }, [currentFrame]);
+
+  const handleSelectPreset = (preset: PresetItem) => {
+    setSelectedPresetId(preset.id);
+    setSourceCode(preset.code);
+    setEditMode(false);
+    executeCode(preset.code);
   };
 
-  async function diagnose() {
-    if (total === 0) return;
-    setAiLoading(true);
-    const next = await runAIDiagnostics(source, frames, error ?? undefined, apiKey);
-    setReport(next);
-    setAiLoading(false);
-  }
-
-  async function applyOptimized(code: string) {
-    const from = total;
-    setSource(code);
-    const to = await execute(code);
-    setComparison({ from, to });
-  }
+  const handleApplyOptimized = () => {
+    if (!aiReport?.optimizedCode) return;
+    setSourceCode(aiReport.optimizedCode);
+    setEditMode(false);
+    executeCode(aiReport.optimizedCode);
+  };
 
   return (
-    <div className="flex h-full flex-col bg-ink-950 text-slate-200">
-      <header className="shrink-0 border-b border-ink-700 bg-ink-900/80 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2.5">
-            <span className="grid h-9 w-9 place-items-center rounded-lg border border-cyan-400/50 bg-cyan-500/10 shadow-glow">
-              <History className="h-5 w-5 text-neon-cyan" />
-            </span>
-            <div>
-              <h1 className="text-[15px] font-bold tracking-tight text-slate-50">
-                AlgoTimeMachine
-                <span className="ml-2 text-[11px] font-normal text-neon-cyan">AST 时间旅行调试器</span>
-              </h1>
-              <p className="text-[11px] text-slate-500">Babel 自动插桩 · Web Worker 沙箱 · AI 帧级复杂度手术刀</p>
-            </div>
+    <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
+      {/* ==================== TOP INDUSTRIAL WORKBENCH BAR (44px) ==================== */}
+      <header className="h-11 shrink-0 border-b border-zinc-800/80 bg-[#0C0E14] px-3 flex items-center justify-between gap-3">
+        {/* Left Brand & Architecture Badge */}
+        <div className="flex items-center gap-2.5">
+          <div className="w-6 h-6 rounded bg-sky-500/10 border border-sky-500/40 flex items-center justify-center text-sky-400">
+            <Cpu className="w-3.5 h-3.5" />
           </div>
-
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            {PRESETS.map((p, i) => {
-              const Icon = PRESET_ICONS[p.icon];
-              const active = activePreset === p.id;
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => {
-                    setActivePreset(p.id);
-                    setSource(p.code);
-                    setComparison(null);
-                    execute(p.code);
-                  }}
-                  className={clsx(
-                    'flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition',
-                    active
-                      ? 'border-cyan-400/70 bg-cyan-500/10 shadow-glow'
-                      : 'border-ink-600 bg-ink-850 hover:border-neon-cyan/50'
-                  )}
-                >
-                  <Icon className={clsx('h-4 w-4', active ? 'text-neon-cyan' : 'text-slate-400')} />
-                  <span className="leading-tight">
-                    <span className="block text-[12px] font-bold text-slate-100">
-                      {i + 1}. {p.title}
-                    </span>
-                    <span className="block text-[10px] text-slate-500">{p.subtitle}</span>
-                  </span>
-                </button>
-              );
-            })}
-
-            <button
-              onClick={() => execute(source)}
-              disabled={running}
-              className="flex items-center gap-2 rounded-lg border border-emerald-400/60 bg-gradient-to-b from-emerald-500/25 to-emerald-600/15 px-4 py-2.5 text-[12px] font-bold text-emerald-100 shadow-glow transition hover:brightness-125 disabled:opacity-60"
-            >
-              <Rocket className="h-4 w-4" />
-              {running ? '插桩执行中…' : '运行插桩'}
-            </button>
-
-            <button
-              onClick={() => setShowArchive(true)}
-              className="flex items-center gap-2 rounded-lg border border-violet-400/50 bg-violet-500/10 px-3 py-2.5 text-[12px] font-bold text-violet-100 transition hover:bg-violet-500/20"
-            >
-              <Wrench className="h-4 w-4" />🛠️ 协同档案
-            </button>
+          <div className="flex items-baseline gap-2">
+            <span className="font-semibold tracking-tight text-xs text-zinc-100">
+              ALGO<span className="text-sky-400">TIME</span>MACHINE
+            </span>
+            <span className="text-[10px] font-mono text-zinc-500 hidden sm:inline">
+              AST-IR v2.4 · WORKER SANDBOX
+            </span>
           </div>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-          <span className="flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-1">
-            <Timer className="h-3.5 w-3.5 text-neon-amber" />
-            执行耗时 <b className="text-slate-100">{elapsed === null ? '—' : `${elapsed}ms`}</b>
-          </span>
-          <span className="flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-1">
-            <Activity className="h-3.5 w-3.5 text-neon-cyan" />
-            时间帧 <b className="text-slate-100">{total}</b>
-          </span>
-          <span className="flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-1">
-            <Zap className="h-3.5 w-3.5 text-neon-lime" />
-            当前事件 <b className="max-w-[220px] truncate text-slate-100">{current ? current.event : '—'}</b>
-          </span>
-          <span className="flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-1">
-            <AlertTriangle className="h-3.5 w-3.5 text-neon-rose" />
-            熔断阈值 <b className="text-slate-100">2000 步 / 150 层 / 3000ms</b>
-          </span>
+        {/* Center Segmented Preset Selector */}
+        <div className="flex items-center bg-zinc-900/90 p-0.5 rounded-md border border-zinc-800/90 overflow-x-auto max-w-[54vw]">
+          {PRESETS.map((p) => {
+            const active = selectedPresetId === p.id;
+            return (
+              <button
+                key={p.id}
+                onClick={() => handleSelectPreset(p)}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                  active
+                    ? 'bg-zinc-800 text-sky-300 shadow-sm border border-zinc-700/80'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span>{p.title}</span>
+                <span
+                  className={`text-[9px] font-mono px-1 rounded ${
+                    active ? 'bg-sky-500/20 text-sky-300' : 'bg-zinc-800/70 text-zinc-500'
+                  }`}
+                >
+                  {p.complexity}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Right Telemetry & Actions */}
+        <div className="flex items-center gap-2">
+          <div className="hidden xl:flex items-center gap-3 px-2.5 py-1 rounded bg-zinc-900/70 border border-zinc-800/80 text-[11px] font-mono">
+            <span className="text-zinc-400">
+              LATENCY <strong className="text-emerald-400">{execTimeMs}ms</strong>
+            </span>
+            <span className="text-zinc-700">|</span>
+            <span className="text-zinc-400">
+              FRAMES <strong className="text-sky-400">{frames.length}</strong>
+            </span>
+            <span className="text-zinc-700">|</span>
+            <span className="text-zinc-400">
+              PEAK STACK <strong className="text-violet-400">{traceMetrics.maxStackDepth}</strong>
+            </span>
+          </div>
+
+          <button
+            onClick={() => executeCode(sourceCode)}
+            className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold text-[11px] flex items-center gap-1.5 transition shadow-sm"
+          >
+            <Zap className="w-3 h-3 fill-current" />
+            <span>Compile & Trace</span>
+          </button>
+
+          <button
+            onClick={() => setShowArchModal(true)}
+            className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 text-[11px] flex items-center gap-1.5 transition"
+          >
+            <GitCommit className="w-3.5 h-3.5 text-violet-400" />
+            <span className="hidden md:inline">Qoder Engineering Spec</span>
+          </button>
         </div>
       </header>
 
-      {error && (
-        <div className="flex shrink-0 items-center gap-3 border-y border-rose-500/60 bg-rose-950/60 px-4 py-2.5">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-rose-400/70 bg-rose-500/20">
-            <AlertTriangle className="h-4 w-4 text-rose-200" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[13px] font-bold text-rose-100">{error}</p>
-            <p className="text-[11px] text-rose-200/70">
-              沙箱已安全拦截，并回收熔断前 <b className="text-rose-50">{total}</b> 帧现场快照 —— 可拖动进度条逐帧复盘，或启动 AI 诊断定位收敛缺陷。
-            </p>
+      {/* ==================== SANDBOX FUSE TRIPPED BANNER ==================== */}
+      {sandboxError && (
+        <div className="bg-rose-950/80 border-b border-rose-500/40 px-4 py-1.5 flex items-center justify-between text-xs text-rose-200 shrink-0">
+          <div className="flex items-center gap-2 font-mono">
+            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{sandboxError}</span>
           </div>
+          <span className="text-[11px] font-mono text-rose-300/80">
+            Pre-crash trace preserved ({frames.length} frames)
+          </span>
         </div>
       )}
 
-      <main className="grid min-h-0 flex-1 gap-3 overflow-auto p-3 xl:grid-cols-3 xl:overflow-hidden">
-        <Editor
-          source={source}
-          onChange={setSource}
-          activeLine={activeLine}
-          lineHits={current?.lineHits}
-          maxHits={maxHits}
-        />
-        <MemoryScope frame={current} />
-        <AiPanel
-          report={report}
-          loading={aiLoading}
-          running={running}
-          hasFrames={total > 0}
-          framesCount={total}
-          apiKey={apiKey}
-          comparison={comparison}
-          onApiKey={setApiKey}
-          onDiagnose={diagnose}
-          onJump={jumpToFrame}
-          onApply={applyOptimized}
-        />
-      </main>
+      {/* ==================== MAIN SPLIT IDE WORKBENCH ==================== */}
+      <div className="flex-1 min-h-0 grid grid-cols-12 divide-x divide-zinc-800/80">
+        {/* ---------- LEFT PANE (5 COLS): SOURCE HEATMAP & AST IR INSPECTOR ---------- */}
+        <div className="col-span-5 flex flex-col min-h-0 bg-[#0B0D13]">
+          {/* Subheader */}
+          <div className="h-9 px-3 border-b border-zinc-800/80 flex items-center justify-between bg-[#0E1118]">
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCodeTab('source')}
+                className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition ${
+                  codeTab === 'source'
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5 text-sky-400" />
+                <span>Source & Heatmap</span>
+              </button>
+              <button
+                onClick={() => {
+                  setCodeTab('ast');
+                  setEditMode(false);
+                }}
+                className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition ${
+                  codeTab === 'ast'
+                    ? 'bg-zinc-800 text-amber-300'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                <span>Babel AST Transformed IR</span>
+              </button>
+            </div>
 
-      <Timeline
-        frames={frames}
-        cursor={cursor}
-        playing={playing}
-        speed={speed}
-        onCursor={jumpToFrame}
-        onTogglePlay={() => {
-          if (total === 0) return;
-          if (cursor >= total - 1) setCursor(0);
-          setPlaying((p) => !p);
-        }}
-        onStep={(delta) => {
-          setPlaying(false);
-          setCursor((c) => Math.max(0, Math.min(c + delta, total - 1)));
-        }}
-        onSpeed={setSpeed}
-      />
+            {codeTab === 'source' && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono text-zinc-500">
+                  ACTIVE <strong className="text-sky-400">L{currentFrame?.line || 1}</strong>
+                </span>
+                <button
+                  onClick={() => setEditMode((e) => !e)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono border transition ${
+                    editMode
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  {editMode ? 'Done Editing' : 'Edit Code'}
+                </button>
+              </div>
+            )}
+          </div>
 
-      {showArchive && <ArchiveModal onClose={() => setShowArchive(false)} />}
+          {/* Code Body */}
+          <div className="flex-1 min-h-0 overflow-y-auto font-mono text-xs relative">
+            {codeTab === 'ast' ? (
+              <pre className="p-3 text-[11px] leading-relaxed text-amber-200/80 whitespace-pre-wrap select-text">
+                {instrumentedPreview}
+              </pre>
+            ) : editMode ? (
+              <textarea
+                value={sourceCode}
+                onChange={(e) => setSourceCode(e.target.value)}
+                spellCheck={false}
+                className="w-full h-full bg-[#090B10] text-zinc-100 p-3 font-mono text-xs leading-6 focus:outline-none resize-none select-text"
+              />
+            ) : (
+              <div className="py-2">
+                {codeLines.map((lineText, idx) => {
+                  const lineNum = idx + 1;
+                  const isCurrentLine = currentFrame?.line === lineNum;
+                  const hitCount = currentFrame?.lineHits?.[lineNum] || 0;
+                  const heatRatio = hitCount > 0 ? hitCount / maxLineHitInFrame : 0;
+
+                  return (
+                    <div
+                      key={lineNum}
+                      ref={isCurrentLine ? activeLineRef : null}
+                      className={`group flex items-center px-2 py-0.5 leading-6 transition-colors relative ${
+                        isCurrentLine
+                          ? 'bg-sky-500/15 border-l-2 border-sky-400'
+                          : 'border-l-2 border-transparent hover:bg-zinc-900/60'
+                      }`}
+                      style={
+                        !isCurrentLine && hitCount > 0
+                          ? {
+                              backgroundColor: `rgba(244, 63, 94, ${Math.min(
+                                0.16,
+                                heatRatio * 0.16
+                              )})`,
+                            }
+                          : undefined
+                      }
+                    >
+                      {/* Line Number */}
+                      <span
+                        className={`w-7 shrink-0 text-right pr-2 text-[11px] select-none ${
+                          isCurrentLine ? 'text-sky-400 font-bold' : 'text-zinc-600'
+                        }`}
+                      >
+                        {lineNum}
+                      </span>
+
+                      {/* Execution Hit Heatmap Pill */}
+                      <div className="w-12 shrink-0 flex items-center">
+                        {hitCount > 0 && (
+                          <span
+                            className={`px-1 py-0.2 rounded text-[9px] font-mono leading-tight ${
+                              heatRatio > 0.65
+                                ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40'
+                                : 'bg-zinc-800/90 text-zinc-400'
+                            }`}
+                          >
+                            {hitCount}x
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Code Text */}
+                      <span
+                        className={`whitespace-pre overflow-x-auto ${
+                          isCurrentLine ? 'text-zinc-50 font-medium' : 'text-zinc-300'
+                        }`}
+                      >
+                        {lineText || ' '}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Left Bottom Call Stack & Stdout Strip */}
+          <div className="h-32 shrink-0 border-t border-zinc-800/80 bg-[#090B10] flex flex-col">
+            <div className="px-3 py-1 border-b border-zinc-800/60 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+              <span className="flex items-center gap-1.5">
+                <Layers className="w-3 h-3 text-violet-400" />
+                CALL STACK FRAMES ({currentFrame?.callStack.length || 0})
+              </span>
+              <span>STDOUT STREAM</span>
+            </div>
+            <div className="flex-1 min-h-0 grid grid-cols-2 divide-x divide-zinc-800/60 overflow-hidden">
+              {/* Call stack pills */}
+              <div className="p-2 overflow-y-auto flex flex-wrap content-start gap-1">
+                {currentFrame?.callStack.map((fn, i) => {
+                  const isTop = i === currentFrame.callStack.length - 1;
+                  return (
+                    <div key={i} className="flex items-center gap-1 text-[11px] font-mono">
+                      {i > 0 && <ChevronRight className="w-3 h-3 text-zinc-600" />}
+                      <span
+                        className={`px-1.5 py-0.5 rounded border ${
+                          isTop
+                            ? 'bg-violet-500/20 text-violet-200 border-violet-500/50 font-semibold'
+                            : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                        }`}
+                      >
+                        {fn}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Console output */}
+              <div className="p-2 overflow-y-auto font-mono text-[11px] text-emerald-400/90 space-y-0.5">
+                {currentFrame?.stdout.length ? (
+                  currentFrame.stdout.map((log, i) => (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <Terminal className="w-3 h-3 text-zinc-600 shrink-0" />
+                      <span>{log}</span>
+                    </div>
+                  ))
+                ) : (
+                  <span className="text-zinc-600 text-[10px]">
+                    // Waiting for console.log emission...
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ---------- RIGHT PANE (7 COLS): VISUAL MEMORY CANVAS + AI SURGICAL PROFILER ---------- */}
+        <div className="col-span-7 flex flex-col min-h-0 bg-[#090A0F]">
+          {/* TOP RIGHT (58%): MEMORY MICROSCOPE (2D MATRIX + 1D POINTERS + MUTATION DIFF) */}
+          <div className="h-[58%] flex flex-col min-h-0 border-b border-zinc-800/80">
+            <div className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-medium text-zinc-200">
+                <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Heap & Pointer State Microscope</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
+                  {currentFrame?.event || 'Idle'}
+                </span>
+              </div>
+
+              {/* Live Mutation Diff Counter */}
+              <div className="flex items-center gap-2 text-[11px] font-mono">
+                {Object.keys(mutatedKeys).length > 0 ? (
+                  <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                    Δ {Object.keys(mutatedKeys).length} State Mutation(s) in Frame #{currentFrameIdx}
+                  </span>
+                ) : (
+                  <span className="text-zinc-500">No state delta</span>
+                )}
+              </div>
+            </div>
+
+            {/* Canvas Scroll Area */}
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+              {/* 1. 2D Matrices (e.g., DP Table / Grid) */}
+              {categorizedVars.matrices2D.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {categorizedVars.matrices2D.map((mat) => {
+                    const activeR = categorizedVars.numericPointers['r'];
+                    const activeC = categorizedVars.numericPointers['c'];
+                    return (
+                      <div
+                        key={mat.name}
+                        className="p-2.5 rounded-md bg-[#0E1117] border border-zinc-800/90"
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[11px] font-mono font-semibold text-zinc-300">
+                            2D Matrix: <span className="text-sky-400">{mat.name}</span> [
+                            {mat.data.length}×{mat.data[0]?.length || 0}]
+                          </span>
+                          {activeR !== undefined && activeC !== undefined && (
+                            <span className="text-[10px] font-mono text-amber-300">
+                              Cursor [{activeR}][{activeC}]
+                            </span>
+                          )}
+                        </div>
+                        <div className="inline-block border border-zinc-800 rounded overflow-hidden">
+                          {mat.data.map((row, rIdx) => (
+                            <div
+                              key={rIdx}
+                              className="flex divide-x divide-zinc-800 border-b last:border-b-0 border-zinc-800"
+                            >
+                              {row.map((cellVal, cIdx) => {
+                                const isTarget = activeR === rIdx && activeC === cIdx;
+                                const isCrosshair = activeR === rIdx || activeC === cIdx;
+                                const prevMat = prevFrame?.variables?.[mat.name];
+                                const cellMutated =
+                                  Array.isArray(prevMat) &&
+                                  Array.isArray(prevMat[rIdx]) &&
+                                  prevMat[rIdx][cIdx] !== cellVal;
+
+                                return (
+                                  <div
+                                    key={cIdx}
+                                    className={`w-10 h-8 flex flex-col items-center justify-center font-mono text-xs transition-all ${
+                                      cellMutated
+                                        ? 'bg-amber-500/30 text-amber-200 font-bold ring-1 ring-amber-400'
+                                        : isTarget
+                                          ? 'bg-sky-500/25 text-sky-200 font-bold'
+                                          : isCrosshair
+                                            ? 'bg-zinc-800/60 text-zinc-300'
+                                            : 'bg-zinc-900/50 text-zinc-400'
+                                    }`}
+                                  >
+                                    <span>{cellVal}</span>
+                                    <span className="text-[8px] text-zinc-600">
+                                      {rIdx},{cIdx}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* 2. 1D Arrays with Smart Pointer Tracking & Rainwater Simulation */}
+              {categorizedVars.arrays1D.map((arr) => {
+                const numericVals = arr.data.filter((x) => typeof x === 'number') as number[];
+                const maxVal = Math.max(1, ...numericVals);
+                const isRainHeight =
+                  arr.name === 'height' &&
+                  currentFrame?.variables?.leftMax !== undefined &&
+                  currentFrame?.variables?.rightMax !== undefined;
+
+                return (
+                  <div
+                    key={arr.name}
+                    className="p-3 rounded-md bg-[#0E1117] border border-zinc-800/90"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] font-mono font-semibold text-zinc-300">
+                        Array Buffer: <span className="text-sky-400">{arr.name}</span> (len=
+                        {arr.data.length})
+                      </span>
+                      {isRainHeight && (
+                        <span className="text-[10px] font-mono text-sky-400">
+                          Water Surface Overlay Active
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-end gap-1.5 pt-2 pb-1 overflow-x-auto">
+                      {arr.data.map((val, idx) => {
+                        const matchingPointers = Object.entries(
+                          categorizedVars.numericPointers
+                        ).filter(([, ptrIdx]) => ptrIdx === idx);
+
+                        const prevArr = prevFrame?.variables?.[arr.name];
+                        const elemMutated = Array.isArray(prevArr) && prevArr[idx] !== val;
+                        const barHeightPct =
+                          typeof val === 'number' ? Math.max(8, (val / maxVal) * 100) : 15;
+
+                        // Calculate simulated water level for Trapping Rain Water preset
+                        let waterPct = 0;
+                        if (isRainHeight && typeof val === 'number') {
+                          const lIdx = categorizedVars.numericPointers['left'] ?? 0;
+                          const rIdx =
+                            categorizedVars.numericPointers['right'] ?? arr.data.length - 1;
+                          const bound = Math.min(
+                            currentFrame?.variables?.leftMax || 0,
+                            currentFrame?.variables?.rightMax || 0
+                          );
+                          if ((idx <= lIdx || idx >= rIdx) && bound > val) {
+                            waterPct = ((bound - val) / maxVal) * 100;
+                          }
+                        }
+
+                        return (
+                          <div key={idx} className="flex flex-col items-center min-w-[38px]">
+                            {/* Bar Graph Visualization */}
+                            <div className="w-8 h-16 bg-zinc-900/90 rounded-t border border-b-0 border-zinc-800 flex flex-col justify-end overflow-hidden relative">
+                              {waterPct > 0 && (
+                                <div
+                                  className="w-full bg-sky-500/35 border-t border-sky-400/60 transition-all duration-150"
+                                  style={{ height: `${waterPct}%` }}
+                                />
+                              )}
+                              <div
+                                className={`w-full transition-all duration-150 ${
+                                  elemMutated
+                                    ? 'bg-amber-400'
+                                    : matchingPointers.length > 0
+                                      ? 'bg-sky-400'
+                                      : 'bg-zinc-600'
+                                }`}
+                                style={{ height: `${barHeightPct}%` }}
+                              />
+                            </div>
+
+                            {/* Value Cell */}
+                            <div
+                              className={`w-full py-1 text-center font-mono text-xs border rounded-b transition-colors ${
+                                elemMutated
+                                  ? 'bg-amber-500/25 border-amber-400 text-amber-200 font-bold'
+                                  : matchingPointers.length > 0
+                                    ? 'bg-sky-500/20 border-sky-500/60 text-zinc-100 font-semibold'
+                                    : 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                              }`}
+                            >
+                              {String(val)}
+                            </div>
+
+                            {/* Index Label */}
+                            <span className="text-[9px] font-mono text-zinc-500 mt-0.5">
+                              [{idx}]
+                            </span>
+
+                            {/* Active Pointers Stacked Below */}
+                            <div className="min-h-[34px] flex flex-col items-center gap-0.5 mt-0.5">
+                              {matchingPointers.map(([ptrName]) => (
+                                <span
+                                  key={ptrName}
+                                  className={`px-1.5 py-0.2 rounded text-[9px] font-mono border leading-tight ${
+                                    POINTER_COLORS[ptrName] ||
+                                    'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                                  }`}
+                                >
+                                  ↑{ptrName}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* 3. Scalar Registers & Live Diff Badges */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {categorizedVars.scalars.map((sc) => {
+                  const diff = mutatedKeys[sc.name];
+                  return (
+                    <div
+                      key={sc.name}
+                      className={`px-2.5 py-2 rounded border font-mono transition-all ${
+                        diff
+                          ? 'bg-amber-500/10 border-amber-500/50 shadow-sm'
+                          : 'bg-[#0E1117] border-zinc-800/80'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                        <span>{sc.name}</span>
+                        {sc.isPointer && (
+                          <span className="text-[9px] px-1 rounded bg-zinc-800 text-sky-400">
+                            PTR
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-baseline gap-1.5 truncate">
+                        {diff && diff.prev !== undefined ? (
+                          <>
+                            <span className="text-[11px] text-zinc-500 line-through">
+                              {JSON.stringify(diff.prev)}
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-amber-400 shrink-0" />
+                            <span className="text-sm font-bold text-amber-300">
+                              {JSON.stringify(sc.value)}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-sm font-semibold text-zinc-100">
+                            {JSON.stringify(sc.value)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* BOTTOM RIGHT (42%): AI SURGICAL COMPLEXITY PROFILER & CODE DIFF */}
+          <div className="h-[42%] flex flex-col min-h-0 bg-[#0B0D13]">
+            <div className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+                <span className="text-xs font-medium text-zinc-200">
+                  AI Complexity Profiler & Frame Diagnostics
+                </span>
+                {aiReport && (
+                  <div className="flex items-center gap-1.5 ml-2 font-mono text-[10px]">
+                    <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                      Time: {aiReport.timeComplexity}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      Space: {aiReport.spaceComplexity}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                      Hotspot: L{aiReport.hotspotLine} ({aiReport.maxHitCount}x)
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {showKeyInput ? (
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="DeepSeek sk-..."
+                      className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[11px] font-mono text-zinc-200 w-36 focus:outline-none focus:border-violet-400"
+                    />
+                    <button
+                      onClick={() => setShowKeyInput(false)}
+                      className="text-zinc-500 hover:text-zinc-300"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowKeyInput(true)}
+                    className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[10px] font-mono text-zinc-400 flex items-center gap-1"
+                  >
+                    <KeyRound className="w-3 h-3" />
+                    <span>{apiKey ? 'DeepSeek Key Active' : 'Engine: Deterministic + API'}</span>
+                  </button>
+                )}
+
+                {aiReport && aiReport.optimizedCode !== sourceCode && (
+                  <button
+                    onClick={handleApplyOptimized}
+                    className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm"
+                  >
+                    <Zap className="w-3 h-3" />
+                    <span>Apply O(n) Refactor & Re-Trace</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Profiler Content */}
+            <div className="flex-1 min-h-0 grid grid-cols-12 divide-x divide-zinc-800/80 overflow-hidden">
+              {/* Left 7 cols: Summary & Bottleneck Frame Jumpers */}
+              <div className="col-span-7 p-3 overflow-y-auto space-y-2.5">
+                {isAnalyzing ? (
+                  <div className="text-xs font-mono text-zinc-500 animate-pulse">
+                    Analyzing AST execution trace & control-flow hotspots...
+                  </div>
+                ) : aiReport ? (
+                  <>
+                    <p className="text-xs text-zinc-300 leading-relaxed bg-zinc-900/60 p-2.5 rounded border border-zinc-800/80">
+                      {aiReport.summary}
+                    </p>
+
+                    <div className="space-y-1.5">
+                      {aiReport.frameInsights.map((ins, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2 rounded bg-[#0E1117] border border-zinc-800/90 flex items-center justify-between gap-2"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2 font-mono text-[10px]">
+                              <span className="text-amber-400 font-semibold">[{ins.tag}]</span>
+                              <span className="text-zinc-500">Line {ins.line}</span>
+                            </div>
+                            <div className="text-[11px] text-zinc-300">{ins.issue}</div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setIsPlaying(false);
+                              setCurrentFrameIdx(
+                                Math.min(frames.length - 1, Math.max(0, ins.frameIndex))
+                              );
+                            }}
+                            className="shrink-0 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-sky-300 font-mono text-[10px] border border-zinc-700 transition"
+                          >
+                            Jump #{ins.frameIndex}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+
+              {/* Right 5 cols: Suggested Refactored Code Preview */}
+              <div className="col-span-5 flex flex-col min-h-0 bg-[#080A0E]">
+                <div className="px-2.5 py-1 border-b border-zinc-800/60 flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-emerald-400">REFACTORED CODE PATCH</span>
+                  <span className="text-zinc-500 truncate max-w-[180px]">
+                    {aiReport?.optimizationGain}
+                  </span>
+                </div>
+                <pre className="flex-1 p-2.5 overflow-y-auto font-mono text-[11px] leading-relaxed text-emerald-300/90 select-text">
+                  {aiReport?.optimizedCode || '// No refactoring required'}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ==================== BOTTOM HARDWARE FLAMEGRAPH TIMELINE SCRUBBER (52px) ==================== */}
+      <footer className="h-13 shrink-0 border-t border-zinc-800/90 bg-[#0C0E14] px-3 flex items-center gap-4">
+        {/* Playback Controls */}
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => {
+              setIsPlaying(false);
+              setCurrentFrameIdx(0);
+            }}
+            title="Reset to Frame 0"
+            className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => {
+              setIsPlaying(false);
+              setCurrentFrameIdx((p) => Math.max(0, p - 1));
+            }}
+            title="Step Backward (←)"
+            className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition"
+          >
+            <SkipBack className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => {
+              if (currentFrameIdx >= frames.length - 1) setCurrentFrameIdx(0);
+              setIsPlaying((p) => !p);
+            }}
+            title="Play / Pause (Space)"
+            className="px-2.5 py-1.5 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold flex items-center gap-1 transition"
+          >
+            {isPlaying ? (
+              <Pause className="w-3.5 h-3.5 fill-current" />
+            ) : (
+              <Play className="w-3.5 h-3.5 fill-current" />
+            )}
+          </button>
+          <button
+            onClick={() => {
+              setIsPlaying(false);
+              setCurrentFrameIdx((p) => Math.min(frames.length - 1, p + 1));
+            }}
+            title="Step Forward (→)"
+            className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition"
+          >
+            <SkipForward className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Interactive Call-Stack Flamegraph Bar Scrubber */}
+        <div className="flex-1 flex flex-col justify-center">
+          <div className="h-7 w-full bg-zinc-900/90 rounded border border-zinc-800 px-1 flex items-end gap-[1px] overflow-hidden cursor-pointer relative">
+            {frames.map((f, idx) => {
+              const isCurr = idx === currentFrameIdx;
+              const isPast = idx < currentFrameIdx;
+              const stackRatio = Math.max(
+                0.22,
+                Math.min(1, f.callStack.length / Math.max(2, traceMetrics.maxStackDepth))
+              );
+              const isHotspot = f.line === traceMetrics.hotspotLine;
+
+              return (
+                <div
+                  key={idx}
+                  onClick={() => {
+                    setIsPlaying(false);
+                    setCurrentFrameIdx(idx);
+                  }}
+                  onMouseEnter={(e) => {
+                    if (e.buttons === 1) {
+                      setIsPlaying(false);
+                      setCurrentFrameIdx(idx);
+                    }
+                  }}
+                  style={{ height: `${Math.round(stackRatio * 100)}%` }}
+                  className={`flex-1 min-w-[2px] transition-colors ${
+                    isCurr
+                      ? 'bg-amber-400'
+                      : isHotspot && isPast
+                        ? 'bg-rose-500/80'
+                        : isPast
+                          ? 'bg-sky-500/70'
+                          : 'bg-zinc-700/50 hover:bg-zinc-600'
+                  }`}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Frame Counter & Speed Selector */}
+        <div className="flex items-center gap-3 shrink-0 font-mono text-[11px]">
+          <div className="text-zinc-400">
+            FRAME{' '}
+            <strong className="text-zinc-100">{frames.length ? currentFrameIdx + 1 : 0}</strong>
+            <span className="text-zinc-600"> / {frames.length}</span>
+          </div>
+
+          <div className="flex items-center bg-zinc-900 rounded border border-zinc-800 p-0.5">
+            {[0.5, 1, 2, 4].map((s) => (
+              <button
+                key={s}
+                onClick={() => setSpeed(s)}
+                className={`px-1.5 py-0.5 rounded text-[10px] transition ${
+                  speed === s ? 'bg-zinc-800 text-sky-400 font-semibold' : 'text-zinc-500'
+                }`}
+              >
+                {s}x
+              </button>
+            ))}
+          </div>
+        </div>
+      </footer>
+
+      {/* ==================== QODER ENGINEERING SPEC MODAL ==================== */}
+      {showArchModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-[#0D1017] border border-zinc-800 rounded-lg shadow-2xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold text-zinc-100">
+                <GitCommit className="w-4 h-4 text-violet-400" />
+                <span>Qoder Agentic Engineering Spec & Three-Tier Safety Fuse</span>
+              </div>
+              <button
+                onClick={() => setShowArchModal(false)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 text-xs text-zinc-300 font-mono leading-relaxed">
+              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                <div className="text-sky-400 font-semibold">1. Custom Babel AST Visitor Pipeline</div>
+                <p className="text-zinc-400 text-[11px]">
+                  Rewrites user AST in-memory via @babel/standalone. Injects __guard() at loop headers,
+                  wraps FunctionDeclaration bodies in try...finally &#123; __exitFn() &#125; for accurate
+                  stack unwinding, and captures deep-cloned lexical scope bindings at every statement.
+                </p>
+              </div>
+              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                <div className="text-emerald-400 font-semibold">2. Three-Tier Sandbox Fuse</div>
+                <p className="text-zinc-400 text-[11px]">
+                  • Instruction Fuse: 2000 steps max (__guard) — preserves pre-crash trace frames.
+                  <br />• Stack Fuse: 150 recursion frames max (__enterFn / __exitFn).
+                  <br />• Hardware Fuse: 3000ms Web Worker watchdog timer with worker.terminate().
+                </p>
+              </div>
+              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                <div className="text-violet-400 font-semibold">
+                  3. Human Architect + Qoder Agent Collaboration Log
+                </div>
+                <p className="text-zinc-400 text-[11px]">
+                  • M1: Built AST lexical scope snapshot engine & isolated Blob Worker runner.
+                  <br />• M2: Fixed recursive stack unwinding leak via try-finally AST node wrapping.
+                  <br />• M3: Upgraded to 100vh industrial workbench with 2D DP matrix crosshair,
+                  frame-delta mutation diffing, and interactive stack-depth flamegraph scrubber.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

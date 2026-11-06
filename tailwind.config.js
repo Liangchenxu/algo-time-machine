@@ -3,6 +3,11 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      spacing: {
+        // 工作台标记使用了标度外的 h-13（52px 火焰图时间轨）与 py-0.2（微型徽章）
+        13: '3.25rem',
+        '0.2': '0.05rem',
+      },
       fontFamily: {
         mono: ['JetBrains Mono', 'Cascadia Code', 'Consolas', 'Menlo', 'monospace'],
       },
