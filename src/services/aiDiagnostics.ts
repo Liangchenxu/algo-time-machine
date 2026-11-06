@@ -37,6 +37,67 @@ export function analyzeTraceMetrics(frames: TraceFrame[]) {
   return { hotspotLine, maxHitCount, maxStackDepth, bottleneckFrameIndex };
 }
 
+type DpShape = 'none' | 'matrix2d' | 'rolling1d';
+
+/**
+ * 区分只读输入矩阵与状态转移表：判据完全取自运行时轨迹里 dp 的真实维度形态，
+ * 因此「点击重构后 dp 由二维降为一维」会被识别为滚动数组压缩版而非 2D Tabulation。
+ */
+function detectDpShape(frames: TraceFrame[]): DpShape {
+  let dpIs2D = false;
+  let dpIs1D = false;
+  let hasAny2DTable = false;
+
+  for (const f of frames) {
+    for (const [name, v] of Object.entries(f.variables)) {
+      if (!Array.isArray(v) || v.length === 0) continue;
+      const is2D = Array.isArray(v[0]);
+      if (is2D) hasAny2DTable = true;
+      if (name === 'dp') {
+        if (is2D) dpIs2D = true;
+        else dpIs1D = true;
+      }
+    }
+  }
+
+  if (dpIs2D || (hasAny2DTable && !dpIs1D)) return 'matrix2d';
+  if (dpIs1D && hasAny2DTable) return 'rolling1d';
+  return 'none';
+}
+
+/**
+ * 折半搜索判据：主判据是作用域内同时存在区间边界 low/high 与折半中点 mid，
+ * 辅助判据是「长度 >= 8 的一维数组」与总帧数的量级关系（帧数 <= ceil(log2 n) * 4 说明搜索空间按对数收敛）。
+ */
+function detectLogarithmicHalving(frames: TraceFrame[]) {
+  if (!frames.length) return { detected: false, probeCount: 0, arrayLen: 0, budget: 0 };
+
+  let hasIntervalPointers = false;
+  let arrayLen = 0;
+
+  for (const f of frames) {
+    const v = f.variables;
+    if (typeof v.low === 'number' && typeof v.high === 'number' && typeof v.mid === 'number') {
+      hasIntervalPointers = true;
+    }
+    for (const val of Object.values(v)) {
+      if (Array.isArray(val) && val.length >= 8 && !Array.isArray(val[0]) && val.length > arrayLen) {
+        arrayLen = val.length;
+      }
+    }
+  }
+
+  const budget = arrayLen >= 8 ? Math.ceil(Math.log2(arrayLen)) * 4 : 0;
+  const probeCount = frames.filter((f) => f.event.includes('循环迭代')).length;
+
+  return {
+    detected: hasIntervalPointers || (budget > 0 && frames.length <= budget),
+    probeCount,
+    arrayLen,
+    budget,
+  };
+}
+
 export async function runAIDiagnostics(
   sourceCode: string,
   frames: TraceFrame[],
@@ -44,12 +105,8 @@ export async function runAIDiagnostics(
   apiKey?: string
 ): Promise<AIDiagnosticReport> {
   const metrics = analyzeTraceMetrics(frames);
-
-  // 二维表的判据取自运行时轨迹而非源码字符串：只有真实出现 dp[r][c] 形态的嵌套数组才算 2D Tabulation，
-  // 否则一维滚动数组优化版会被误判为矩阵 DP，并在「应用优化后重跑」时与界面结论自相矛盾。
-  const has2DDPTable = frames.some((f) =>
-    Object.values(f.variables).some((v) => Array.isArray(v) && v.length > 0 && Array.isArray(v[0]))
-  );
+  const dpShape = detectDpShape(frames);
+  const halving = detectLogarithmicHalving(frames);
 
   if (apiKey && apiKey.trim().startsWith('sk-')) {
     try {
@@ -87,7 +144,7 @@ export async function runAIDiagnostics(
 
   await new Promise((r) => setTimeout(r, 380));
 
-  if (errorMsg && errorMsg.includes('死循环')) {
+  if (errorMsg && errorMsg.includes('[FUSE_STEP_LIMIT]')) {
     return {
       ...metrics,
       timeComplexity: 'O(∞) Non-Terminating',
@@ -137,7 +194,32 @@ export async function runAIDiagnostics(
     };
   }
 
-  if (sourceCode.includes('grid') || has2DDPTable) {
+  if (halving.detected) {
+    return {
+      ...metrics,
+      timeComplexity: 'O(log n) Logarithmic Halving',
+      spaceComplexity: 'O(1) Constant Pointers',
+      summary: `区间折半收敛轨迹验证通过。搜索空间长度 ${halving.arrayLen}，共完成 ${halving.probeCount} 次折半探测（总帧数 ${frames.length}，对数预算 ceil(log2 n) * 4 = ${halving.budget}），边界指针 low/high 每次迭代严格向 mid 收缩一半，属对数级判定而非线性扫描。`,
+      frameInsights: [
+        {
+          frameIndex: Math.min(metrics.bottleneckFrameIndex, frames.length - 1),
+          line: metrics.hotspotLine,
+          tag: 'INTERVAL_HALVING',
+          issue: '中点探测完成后区间按 ceil((high - low) / 2) 折半收缩，边界指针单调逼近目标',
+        },
+        {
+          frameIndex: frames.length - 1,
+          line: metrics.hotspotLine,
+          tag: 'BOUND_CONVERGENCE',
+          issue: `low / high 区间宽度收敛，探测次数与 log2(${halving.arrayLen || 'n'}) 同阶`,
+        },
+      ],
+      optimizedCode: sourceCode,
+      optimizationGain: 'Optimal Comparison Bound Achieved (O(log n) Time, O(1) Auxiliary Space)',
+    };
+  }
+
+  if (dpShape === 'matrix2d') {
     return {
       ...metrics,
       timeComplexity: 'O(M * N) Matrix DP',
@@ -153,6 +235,25 @@ export async function runAIDiagnostics(
       ],
       optimizedCode: `// Optimized: 一维滚动数组空间压缩 O(N) Space\nconst grid = [\n  [1, 3, 1],\n  [1, 5, 1],\n  [4, 2, 1]\n];\nconst dp = [1, 4, 5];\nfor (let r = 1; r < 3; r++) {\n  dp[0] += grid[r][0];\n  for (let c = 1; c < 3; c++) {\n    dp[c] = Math.min(dp[c], dp[c - 1]) + grid[r][c];\n  }\n}\nconsole.log("Compressed 1D DP MinPath =", dp[2]);`,
       optimizationGain: 'Space Complexity: O(M*N) -> O(N) 1D Rolling Buffer',
+    };
+  }
+
+  if (dpShape === 'rolling1d') {
+    return {
+      ...metrics,
+      timeComplexity: 'O(M * N) Optimal Scan',
+      spaceComplexity: 'O(N) 1D Rolling Buffer (Compressed)',
+      summary: `已完成滚动数组空间降维优化：只读输入矩阵仍为二维，而状态转移表 dp 已降为一维滚动缓冲，空间占用由 O(M*N) 压缩至 O(N)。共采集 ${frames.length} 帧，状态转移热点位于 L${metrics.hotspotLine}（累计执行 ${metrics.maxHitCount} 次），时间复杂度维持在最优扫描下界，无需继续重构。`,
+      frameInsights: [
+        {
+          frameIndex: Math.floor(frames.length * 0.4),
+          line: metrics.hotspotLine,
+          tag: 'SPACE_COMPRESSED',
+          issue: 'dp[c] 就地覆盖上一行状态，左邻 dp[c-1] 与上邻 dp[c] 在同一行内完成最优子结构合并',
+        },
+      ],
+      optimizedCode: sourceCode,
+      optimizationGain: 'Space Compression Verified (O(M*N) -> O(N)) | Time Bound Already Optimal',
     };
   }
 

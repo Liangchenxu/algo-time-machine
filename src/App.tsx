@@ -36,6 +36,14 @@ interface PresetItem {
   code: string;
 }
 
+interface BaselineMetrics {
+  framesCount: number;
+  maxStackDepth: number;
+  timeComplexity: string;
+  spaceComplexity: string;
+  execTimeMs: number;
+}
+
 const PRESETS: PresetItem[] = [
   {
     id: 'rainwater',
@@ -184,6 +192,110 @@ const POINTER_COLORS: Record<string, string> = {
   c: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
 };
 
+interface DevlogEntry {
+  tag: string;
+  commit: string;
+  doc: string;
+  title: string;
+  why: string;
+  what: string[];
+  conflicts: string[];
+  impact: string[];
+}
+
+const DEVLOGS: DevlogEntry[] = [
+  {
+    tag: 'M1',
+    commit: '6f94a32',
+    doc: 'docs/devlogs/M1-genesis-ast-sandbox.md',
+    title: 'AST 自动插桩内核与 Blob Worker 时间旅行沙箱',
+    why: '评委需要零门槛演示任意算法源码，但主线程直接 eval 会被死循环与爆栈冻结整个页面。',
+    what: [
+      'instrumenter.ts：循环头注入 __guard + 循环迭代快照，语句后注入状态更新快照，函数体注入 __enterFn。',
+      '运行时注入 __clone 深拷贝、__trace 五元组时间帧与 console 劫持，stdout 随帧快照。',
+      'sandboxRunner.ts：Blob Worker 隔离执行 + 3000ms watchdog + URL.revokeObjectURL 回收。',
+    ],
+    conflicts: [
+      'TDZ ReferenceError：scope.bindings 含同块内稍后声明的 let/const，typeof 提前读取即崩，改为 try/catch 闭包安全读取。',
+      '熔断后帧丢失：new Function 作用域内的 __frames 在 worker catch 不可见，挂载 globalThis.__mtmFrames 才能回收崩溃现场。',
+      'Program 未插桩导致顶层语句零帧、stdout 永不可见，visitor 扩展为 BlockStatement|Program。',
+    ],
+    impact: [
+      '双指针接雨水采集 41 帧，沙箱执行 1ms。',
+      '死循环压测触发 2000 步熔断并回收 1555 帧现场快照。',
+      'npm run build 零 TypeScript 报错。',
+    ],
+  },
+  {
+    tag: 'M2',
+    commit: '638022a',
+    doc: 'docs/devlogs/M2-stack-unwinding-and-profiler.md',
+    title: 'AST 递归退栈纠偏、行级热力与 AI 帧级诊断',
+    why: '架构师复核指出递归函数返回后调用栈只增不减，callStack 失真使栈深指标无法用于复杂度诊断。',
+    what: [
+      '函数体改写为 try...finally { __exitFn() }，并以 __instrumented 标记防止重复插桩。',
+      '__trace 内累计 __lineHits，每一帧携带「截至该帧」的行级执行热力快照。',
+      'aiDiagnostics.ts 双引擎：DeepSeek 在线 + 免 Key 确定性引擎，产出热点行 / 峰值栈深 / 瓶颈帧。',
+    ],
+    conflicts: [
+      'M2 实例代码回退了 TDZ 安全读取并删除 globalThis 帧回收，合并时保留修复，否则预设 1/2 第二帧即崩、熔断后 0 帧。',
+      '实例 visitor 仅剩 BlockStatement，fib 预设只有 67 帧且末帧无法证明退栈；恢复 Program 插桩后 69 帧、末帧调用栈精确回到 main()。',
+      'fetch URL 被 Markdown 链接化损坏；新增 engine 字段避免在线失败时界面谎称 DeepSeek 结果。',
+    ],
+    impact: [
+      'fib(8)：69 帧、峰值栈深 9 层、末帧 callStack = [main()]。',
+      '一键优化：暴力递归 69 → 14 帧（-80%）；死循环 1555 → 27 帧（-98%）。',
+    ],
+  },
+  {
+    tag: 'M3',
+    commit: '41ad788',
+    doc: 'docs/devlogs/M3-industrial-workbench-and-2d-dp.md',
+    title: '工业级全屏 IDE 重铸、2D DP 矩阵、帧间 Diff 与火焰图',
+    why: '去掉塑料感演示页，改为 100vh 高信息密度工作台，并补齐二维 DP、帧间突变差分与栈深火焰轨。',
+    what: [
+      '12 栏工作台：源码热力 + AST IR 透视 / 堆与指针显微镜 / AI 复杂度诊断 / 火焰图时间轴。',
+      '2D 矩阵十字准星 Cursor [r][c]、单元格级帧间 amber 差分、Δ N State Mutation 计数。',
+      '火焰图跳帧、Space 与方向键控盘、5 个预设 segmented 切换。',
+    ],
+    conflicts: [
+      '4 处机械损坏：useState 与 useRef 泛型被 Markdown 吞成 "null |>"；fetch URL 再次链接化；5 个未使用 import 在 noUnusedLocals 下直接编译失败；h-13 与 py-0.2 不在 Tailwind v3 标度内被静默丢弃，改为 extend.spacing 补 3.25rem / 0.05rem 并在产物 CSS 中验证。',
+      'fib 字符串判据导致点击 Apply 后 O(n) 递推版仍报 O(2^n)，并输出 "Frames: 14 -> 15 (-50% Overhead)" 自相矛盾；递归判据收紧为运行时 maxStackDepth >= 4，二维判据改为运行时表形态探测。',
+      '隐藏视口下 requestAnimationFrame 不触发导致计时脚本挂起，改用宏任务计时。',
+    ],
+    impact: [
+      '死循环预设 1334 帧全量渲染为火焰条，跳帧重渲 14-19ms。',
+      'DP 预设 29 帧：双矩阵同屏、十字准星命中、Δ 1 突变与 amber 写入格对齐。',
+      '界面零 Emoji（App.tsx 与 aiDiagnostics.ts 扫描无 emoji）。',
+    ],
+  },
+  {
+    tag: 'M4',
+    commit: 'HEAD',
+    doc: 'docs/devlogs/M4-logarithmic-heuristics-and-governance.md',
+    title: '算法判据闭环、重构实测基准与工程治理制度',
+    why: '判据、度量与项目记忆三者都还依赖人肉判断：复杂度靠源码单词、收益靠文案宣称、跨版本约束靠对话记忆。',
+    what: [
+      'aiDiagnostics.ts：新增 O(log n) 折半判据（low/high/mid 三元组为结构证据，帧数 <= ceil(log2 n) * 4 为量级证据）。',
+      'aiDiagnostics.ts：以 dp 在时间帧里的真实维度形态区分 matrix2d 与 rolling1d，重构后自动切换为 O(N) 1D Rolling Buffer 并让 Apply 按钮退场。',
+      '异常文案标准化为 [FUSE_STEP_LIMIT] / [FUSE_STACK_OVERFLOW] / [FUSE_WATCHDOG_TIMEOUT]，诊断谓词同步改读前缀。',
+      'App.tsx：baselineMetrics 在点击 Apply 瞬间锁定、切换预设即清空，重跑后渲染 VERIFIED REFACTOR BENCHMARK 实测横幅；Spec 弹窗升级为 Architecture / DevLog 双标签页。',
+      '建立 docs/devlogs/（INDEX + M1-M4）与 AGENT_GUIDE.md 的三条 Iron Laws。',
+    ],
+    conflicts: [
+      '死循环诊断谓词原本匹配中文「死循环」，去掉 emoji 与前缀改造同时会失配并静默退化为 O(n) 报告，已把谓词与 [FUSE_STEP_LIMIT] 字面量绑定并写入不变量清单。',
+      '一维 dp 优化样例仍保留二维只读 grid，若继续用 includes(grid) 判据就会在重构后误报 2D Tabulation，改为读 dp 自身形态。',
+      '实测发现线性深递归 depth(400) 触发 [FUSE_STACK_OVERFLOW] 后被判为 O(2^n)：入口条件已换成运行时栈深，但该分支结论文案仍是指数级，属未闭合项，如实记录而非偷偷绕过。',
+    ],
+    impact: [
+      'Binary Search 由 O(n) 修正为 O(log n) Logarithmic Halving：10 帧、空间 11、探测 1 次、对数预算 16。',
+      'Min Path Sum 重构闭环：29 帧 Matrix DP → 15 帧 Optimal Scan，横幅 FRAMES: 29 → 15 (-48.3%)，PEAK STACK 1 → 1。',
+      'Naive Fibonacci：文案宣称 31 → 15（-52%），同沙箱实测 31 → 14（-54.8%）、PEAK STACK 6 → 2，实测优于宣称并以实测展示。',
+      '熔断链路：1334 帧步数熔断与 149 帧栈溢出熔断均保留现场；全仓四个源文件 emoji 扫描全部为 none。',
+    ],
+  },
+];
+
 export default function App() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>('rainwater');
   const [sourceCode, setSourceCode] = useState<string>(PRESETS[0].code);
@@ -202,6 +314,11 @@ export default function App() {
   const [apiKey, setApiKey] = useState<string>('');
   const [showKeyInput, setShowKeyInput] = useState<boolean>(false);
   const [showArchModal, setShowArchModal] = useState<boolean>(false);
+  const [specTab, setSpecTab] = useState<'arch' | 'devlog'>('arch');
+  const [devlogIdx, setDevlogIdx] = useState<number>(0);
+
+  // 点击 Apply Refactor 之前锁定一份基准，重跑完成后与当前实测值对齐成收益横幅
+  const [baselineMetrics, setBaselineMetrics] = useState<BaselineMetrics | null>(null);
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
 
@@ -339,15 +456,41 @@ export default function App() {
     setSelectedPresetId(preset.id);
     setSourceCode(preset.code);
     setEditMode(false);
+    setBaselineMetrics(null);
     executeCode(preset.code);
   };
 
   const handleApplyOptimized = () => {
     if (!aiReport?.optimizedCode) return;
+    setBaselineMetrics({
+      framesCount: frames.length,
+      maxStackDepth: traceMetrics.maxStackDepth,
+      timeComplexity: aiReport.timeComplexity,
+      spaceComplexity: aiReport.spaceComplexity,
+      execTimeMs,
+    });
     setSourceCode(aiReport.optimizedCode);
     setEditMode(false);
     executeCode(aiReport.optimizedCode);
   };
+
+  const benchmarkDelta = useMemo(() => {
+    if (!baselineMetrics || !aiReport) return null;
+    const from = baselineMetrics.framesCount;
+    const to = frames.length;
+    const pct = from > 0 ? ((to - from) / from) * 100 : 0;
+    return {
+      from,
+      to,
+      pct,
+      stackFrom: baselineMetrics.maxStackDepth,
+      stackTo: traceMetrics.maxStackDepth,
+      timeFrom: baselineMetrics.timeComplexity,
+      spaceFrom: baselineMetrics.spaceComplexity,
+      latencyFrom: baselineMetrics.execTimeMs,
+      latencyTo: execTimeMs,
+    };
+  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs]);
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -939,6 +1082,36 @@ export default function App() {
               </div>
             </div>
 
+            {/* Verified refactor benchmark: measured before/after on the same sandbox */}
+            {benchmarkDelta && (
+              <div className="shrink-0 px-3 py-1.5 border-b border-emerald-500/40 bg-emerald-500/10 flex items-center gap-2 font-mono text-[10px] text-emerald-300 overflow-x-auto">
+                <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 font-semibold text-emerald-200">
+                  VERIFIED REFACTOR BENCHMARK
+                </span>
+                <span className="whitespace-nowrap">
+                  FRAMES: <strong className="text-emerald-100">{benchmarkDelta.from}</strong> →{' '}
+                  <strong className="text-emerald-100">{benchmarkDelta.to}</strong>{' '}
+                  ({benchmarkDelta.pct <= 0 ? '-' : '+'}
+                  {Math.abs(benchmarkDelta.pct).toFixed(1)}%) | PEAK STACK:{' '}
+                  <strong className="text-emerald-100">
+                    {benchmarkDelta.stackFrom} → {benchmarkDelta.stackTo}
+                  </strong>{' '}
+                  | SPACE:{' '}
+                  <strong className="text-emerald-100">
+                    {benchmarkDelta.spaceFrom} → {aiReport?.spaceComplexity}
+                  </strong>{' '}
+                  | TIME:{' '}
+                  <strong className="text-emerald-100">
+                    {benchmarkDelta.timeFrom} → {aiReport?.timeComplexity}
+                  </strong>{' '}
+                  | LATENCY:{' '}
+                  <strong className="text-emerald-100">
+                    {benchmarkDelta.latencyFrom}ms → {benchmarkDelta.latencyTo}ms
+                  </strong>
+                </span>
+              </div>
+            )}
+
             {/* Profiler Content */}
             <div className="flex-1 min-h-0 grid grid-cols-12 divide-x divide-zinc-800/80 overflow-hidden">
               {/* Left 7 cols: Summary & Bottleneck Frame Jumpers */}
@@ -1123,7 +1296,7 @@ export default function App() {
             <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs font-semibold text-zinc-100">
                 <GitCommit className="w-4 h-4 text-violet-400" />
-                <span>Qoder Agentic Engineering Spec & Three-Tier Safety Fuse</span>
+                <span>Qoder Agentic Engineering Spec · Safety Fuse & DevLog Archive</span>
               </div>
               <button
                 onClick={() => setShowArchModal(false)}
@@ -1132,34 +1305,162 @@ export default function App() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="p-4 space-y-3 text-xs text-zinc-300 font-mono leading-relaxed">
-              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
-                <div className="text-sky-400 font-semibold">1. Custom Babel AST Visitor Pipeline</div>
-                <p className="text-zinc-400 text-[11px]">
-                  Rewrites user AST in-memory via @babel/standalone. Injects __guard() at loop headers,
-                  wraps FunctionDeclaration bodies in try...finally &#123; __exitFn() &#125; for accurate
-                  stack unwinding, and captures deep-cloned lexical scope bindings at every statement.
-                </p>
-              </div>
-              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
-                <div className="text-emerald-400 font-semibold">2. Three-Tier Sandbox Fuse</div>
-                <p className="text-zinc-400 text-[11px]">
-                  • Instruction Fuse: 2000 steps max (__guard) — preserves pre-crash trace frames.
-                  <br />• Stack Fuse: 150 recursion frames max (__enterFn / __exitFn).
-                  <br />• Hardware Fuse: 3000ms Web Worker watchdog timer with worker.terminate().
-                </p>
-              </div>
-              <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
-                <div className="text-violet-400 font-semibold">
-                  3. Human Architect + Qoder Agent Collaboration Log
-                </div>
-                <p className="text-zinc-400 text-[11px]">
-                  • M1: Built AST lexical scope snapshot engine & isolated Blob Worker runner.
-                  <br />• M2: Fixed recursive stack unwinding leak via try-finally AST node wrapping.
-                  <br />• M3: Upgraded to 100vh industrial workbench with 2D DP matrix crosshair,
-                  frame-delta mutation diffing, and interactive stack-depth flamegraph scrubber.
-                </p>
-              </div>
+            {/* Spec tabs */}
+            <div className="px-4 py-2 border-b border-zinc-800 flex items-center gap-1 bg-[#0B0E14]">
+              <button
+                onClick={() => setSpecTab('arch')}
+                className={`px-2.5 py-1 rounded text-[11px] font-mono transition ${
+                  specTab === 'arch'
+                    ? 'bg-zinc-800 text-sky-300 border border-zinc-700'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Architecture & Safety Fuse
+              </button>
+              <button
+                onClick={() => setSpecTab('devlog')}
+                className={`px-2.5 py-1 rounded text-[11px] font-mono transition ${
+                  specTab === 'devlog'
+                    ? 'bg-zinc-800 text-violet-300 border border-zinc-700'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                DevLog & Reflection History [M1-M{DEVLOGS.length}]
+              </button>
+              <span className="ml-auto text-[10px] font-mono text-zinc-600">
+                {specTab === 'arch' ? 'three-tier fuse contract' : 'docs/devlogs/ archive index'}
+              </span>
+            </div>
+
+            <div className="p-4 space-y-3 text-xs text-zinc-300 font-mono leading-relaxed max-h-[70vh] overflow-y-auto">
+              {specTab === 'arch' ? (
+                <>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-sky-400 font-semibold">1. Custom Babel AST Visitor Pipeline</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Rewrites user AST in-memory via @babel/standalone. Injects __guard() at loop headers,
+                      wraps FunctionDeclaration bodies in try...finally &#123; __exitFn() &#125; for accurate
+                      stack unwinding, and captures deep-cloned lexical scope bindings at every statement.
+                      Scope reads are wrapped in try/catch closures because lexical bindings declared later in
+                      the same block sit in the temporal dead zone.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">2. Three-Tier Sandbox Fuse</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      • [FUSE_STEP_LIMIT] — instruction fuse, 2000 steps max (__guard); preserves pre-crash
+                      trace frames via globalThis.__mtmFrames.
+                      <br />• [FUSE_STACK_OVERFLOW] — stack fuse, 150 recursion frames max (__enterFn /
+                      __exitFn).
+                      <br />• [FUSE_WATCHDOG_TIMEOUT] — hardware fuse, 3000ms Web Worker watchdog timer with
+                      worker.terminate().
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-violet-400 font-semibold">
+                      3. Human Architect + Qoder Agent Collaboration Log
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      • M1: Built AST lexical scope snapshot engine & isolated Blob Worker runner.
+                      <br />• M2: Fixed recursive stack unwinding leak via try-finally AST node wrapping.
+                      <br />• M3: Upgraded to 100vh industrial workbench with 2D DP matrix crosshair,
+                      frame-delta mutation diffing, and interactive stack-depth flamegraph scrubber.
+                      <br />• M4: Closed the complexity-heuristic gaps (logarithmic halving, rolling-buffer
+                      state shape), standardized fuse exception prefixes, and added the measured
+                      before/after refactor benchmark.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-amber-400 font-semibold">4. Complexity Heuristic Decision Order</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Step fuse trap → recursion depth (runtime maxStackDepth &gt;= 4) → interval halving
+                      (low/high/mid triple or frame count within ceil(log2 n) * 4) → 2D tabulation vs 1D
+                      rolling buffer (runtime shape of dp) → linear two-pointer fallback. Every gate reads
+                      runtime evidence, never source-code string matching.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {DEVLOGS.map((d, i) => (
+                      <button
+                        key={d.tag}
+                        onClick={() => setDevlogIdx(i)}
+                        className={`px-2.5 py-1 rounded text-[11px] font-mono transition ${
+                          devlogIdx === i
+                            ? 'bg-violet-500/20 text-violet-200 border border-violet-500/50'
+                            : 'bg-zinc-900 text-zinc-500 border border-zinc-800 hover:text-zinc-300'
+                        }`}
+                      >
+                        {d.tag} · {d.commit}
+                      </button>
+                    ))}
+                  </div>
+
+                  {(() => {
+                    const d = DEVLOGS[devlogIdx];
+                    return (
+                      <div className="space-y-2.5">
+                        <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-violet-500/20 border border-violet-500/40 text-[10px] text-violet-200 font-semibold">
+                              {d.tag}
+                            </span>
+                            <span className="text-[12px] text-zinc-100 font-semibold">{d.title}</span>
+                          </div>
+                          <p className="text-zinc-400 text-[11px]">
+                            <span className="text-sky-400">Why · 背景动机</span> — {d.why}
+                          </p>
+                          <p className="text-zinc-500 text-[10px]">
+                            commit {d.commit} · full log: {d.doc}
+                          </p>
+                        </div>
+
+                        <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                          <div className="text-emerald-400 font-semibold">What &amp; Where · 核心改动</div>
+                          <ul className="space-y-1 text-zinc-400 text-[11px]">
+                            {d.what.map((line) => (
+                              <li key={line} className="flex gap-1.5">
+                                <ChevronRight className="w-3 h-3 shrink-0 text-zinc-600 mt-[3px]" />
+                                <span>{line}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                          <div className="text-amber-400 font-semibold">矛盾与认知纠偏 · Resolved Conflicts</div>
+                          <ul className="space-y-1 text-zinc-400 text-[11px]">
+                            {d.conflicts.map((line) => (
+                              <li key={line} className="flex gap-1.5">
+                                <ShieldAlert className="w-3 h-3 shrink-0 text-amber-500/70 mt-[3px]" />
+                                <span>{line}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                          <div className="text-sky-400 font-semibold">Measured Impact · 实测验证指标</div>
+                          <ul className="space-y-1 text-zinc-300 text-[11px]">
+                            {d.impact.map((line) => (
+                              <li key={line} className="flex gap-1.5">
+                                <Zap className="w-3 h-3 shrink-0 text-sky-400/70 mt-[3px]" />
+                                <span>{line}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <p className="text-[10px] text-zinc-600">
+                          反幻觉回味协议见根目录 AGENT_GUIDE.md「Iron Laws」：改动前核对不变量，交付前归档 DevLog。
+                        </p>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
             </div>
           </div>
         </div>

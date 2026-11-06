@@ -54,7 +54,7 @@ export async function runInSandbox(sourceCode: string): Promise<SandboxResult> {
       resolve({
         success: false,
         frames: [],
-        error: '⏱️ 沙箱硬件级熔断：代码执行超过 3000ms 强制终止！',
+        error: '[FUSE_WATCHDOG_TIMEOUT] 沙箱硬件级熔断：代码执行超过 3000ms 强制终止！',
         executionTimeMs: 3000,
       });
     }, 3000);

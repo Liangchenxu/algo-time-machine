@@ -169,7 +169,7 @@ export function instrumentCode(sourceCode: string): string {
     function __guard(line) {
       __steps++;
       if (__steps > __MAX_STEPS) {
-        throw new Error(\`🚨 触发安全熔断：第 \${line} 行附近疑似存在死循环，执行已超过 \${__MAX_STEPS} 步上限！\`);
+        throw new Error(\`[FUSE_STEP_LIMIT] 疑似死循环：第 \${line} 行附近执行已超过 \${__MAX_STEPS} 步上限，沙箱已保留熔断前全部时间帧。\`);
       }
     }
 
@@ -177,7 +177,7 @@ export function instrumentCode(sourceCode: string): string {
       __guard(line);
       __callStack.push(name + '()');
       if (__callStack.length > 150) {
-        throw new Error(\`🚨 触发栈溢出熔断：函数 \${name} 递归深度超过 150 层！\`);
+        throw new Error(\`[FUSE_STACK_OVERFLOW] 函数 \${name} 递归深度超过 150 层，触发调用栈熔断。\`);
       }
     }
 
