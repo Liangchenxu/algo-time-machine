@@ -7,11 +7,11 @@ export interface TraceFrame {
   variables: Record<string, any>;
   callStack: string[];
   stdout: string[];
+  lineHits?: Record<number, number>;
 }
 
 export function instrumentCode(sourceCode: string): string {
   const tracePlugin = ({ types: t }: any) => {
-    // 收集当前作用域内所有可见的用户变量名
     const getVisibleVarNames = (scope: any): string[] => {
       const names = new Set<string>();
       let curr = scope;
@@ -24,8 +24,8 @@ export function instrumentCode(sourceCode: string): string {
       return Array.from(names);
     };
 
-    // let/const 的暂时性死区(TDZ)会让快照读取尚未声明的绑定直接抛 ReferenceError，
-    // 因此每个变量都用 try/catch 闭包安全读取。
+    // let/const 的暂时性死区(TDZ)：scope.bindings 含同一块内「稍后才声明」的绑定，
+    // 直接写 typeof x 会抛 ReferenceError，因此每个变量用 try/catch 闭包安全读取。
     const buildSafeRead = (name: string) =>
       t.callExpression(
         t.arrowFunctionExpression(
@@ -59,7 +59,6 @@ export function instrumentCode(sourceCode: string): string {
 
     return {
       visitor: {
-        // 为所有循环注入死循环步数熔断器与循环帧记录
         'ForStatement|WhileStatement|DoWhileStatement'(path: any) {
           const line = path.node.loc?.start?.line || 1;
           const guardNode = t.expressionStatement(
@@ -72,25 +71,16 @@ export function instrumentCode(sourceCode: string): string {
             path.node.body = t.blockStatement([guardNode, snapNode, path.node.body]);
           }
         },
-        // 在代码块中的每条关键语句后注入变量快照
+        // Program 一并插桩，使顶层语句（如函数调用返回值、console.log）也产生时间帧
         'BlockStatement|Program'(path: any) {
-          if (path.parentPath && path.parentPath.isFunctionDeclaration()) {
-            const fnName = path.parentPath.node.id?.name || 'anonymous';
-            const line = path.node.loc?.start?.line || 1;
-            path.node.body.unshift(
-              t.expressionStatement(
-                t.callExpression(t.identifier('__enterFn'), [
-                  t.stringLiteral(fnName),
-                  t.numericLiteral(line),
-                ])
-              )
-            );
-          }
+          // 避免对内部生成的 try-finally 块重复插桩
+          if ((path.node as any).__instrumented) return;
+          (path.node as any).__instrumented = true;
+
           const newBody: any[] = [];
           for (const stmt of path.node.body) {
             newBody.push(stmt);
             if (t.isVariableDeclaration(stmt) || t.isExpressionStatement(stmt)) {
-              // 避免对注入的内部函数重复插桩
               const isInternal =
                 t.isExpressionStatement(stmt) &&
                 t.isCallExpression(stmt.expression) &&
@@ -104,6 +94,33 @@ export function instrumentCode(sourceCode: string): string {
             }
           }
           path.node.body = newBody;
+
+          // 如果是函数声明体，注入 __enterFn 与 try...finally { __exitFn() } 确保递归栈帧准确弹出
+          if (path.parentPath && path.parentPath.isFunctionDeclaration()) {
+            const fnName = path.parentPath.node.id?.name || 'anonymous';
+            const line = path.node.loc?.start?.line || 1;
+            const enterStmt = t.expressionStatement(
+              t.callExpression(t.identifier('__enterFn'), [
+                t.stringLiteral(fnName),
+                t.numericLiteral(line),
+              ])
+            );
+            const enterSnap = buildSnapshotNode(line, `函数进入: ${fnName}()`, path.scope);
+            const exitBlock = t.blockStatement([
+              t.expressionStatement(t.callExpression(t.identifier('__exitFn'), [])),
+            ]);
+            (exitBlock as any).__instrumented = true;
+
+            const tryBlock = t.blockStatement([enterSnap, ...path.node.body]);
+            (tryBlock as any).__instrumented = true;
+
+            const wrappedBody = t.blockStatement([
+              enterStmt,
+              t.tryStatement(tryBlock, null, exitBlock),
+            ]);
+            (wrappedBody as any).__instrumented = true;
+            path.replaceWith(wrappedBody);
+          }
         },
       },
     };
@@ -126,6 +143,7 @@ export function instrumentCode(sourceCode: string): string {
     const __frames = [];
     const __callStack = ['main()'];
     const __stdout = [];
+    const __lineHits = {};
 
     // 熔断/异常时沙箱需要回收已采集的前序帧，因此把帧数组同时挂到全局。
     globalThis.__mtmFrames = __frames;
@@ -163,8 +181,15 @@ export function instrumentCode(sourceCode: string): string {
       }
     }
 
+    function __exitFn() {
+      if (__callStack.length > 1) {
+        __callStack.pop();
+      }
+    }
+
     function __trace(line, event, vars) {
       __guard(line);
+      __lineHits[line] = (__lineHits[line] || 0) + 1;
       const cleanVars = {};
       for (const [k, v] of Object.entries(vars)) {
         if (typeof v !== 'function' && v !== undefined) {
@@ -177,7 +202,8 @@ export function instrumentCode(sourceCode: string): string {
         event,
         variables: cleanVars,
         callStack: [...__callStack],
-        stdout: [...__stdout]
+        stdout: [...__stdout],
+        lineHits: { ...__lineHits }
       });
     }
 

@@ -11,14 +11,18 @@ Vite + React 18 + TypeScript + Tailwind CSS + `@babel/standalone` + `lucide-reac
 通过 Babel AST 插件自动在循环、赋值、函数调用处注入 `__trace` 快照钩子与 2000 步死循环熔断器，
 在 Web Worker 隔离线程中安全运行，输出完整时间帧供前端回放与 AI 帧级诊断。
 
+函数体额外以 `try ... finally { __exitFn() }` 包裹，保证递归返回时调用栈精准弹出；
+`__trace` 内累计 `__lineHits`，使每一帧自带「截至该帧」的行级执行热力，供热力图与 AI 手术刀定位热点行。
+
 ## 数据流
 
 ```
 用户源码
-  └─ src/core/instrumenter.ts     Babel AST 遍历，注入 __guard / __enterFn / __trace
+  └─ src/core/instrumenter.ts        Babel AST 遍历，注入 __guard / __enterFn+__exitFn / __trace
        └─ src/core/sandboxRunner.ts  Blob Worker 隔离执行 + 3000ms 硬件级熔断
-            └─ TraceFrame[]           frameIndex / line / event / variables / callStack / stdout
-                 └─ src/App.tsx       时间旅行回放 + 内存显微镜 + 双指针联动渲染
+            └─ TraceFrame[]           frameIndex / line / event / variables / callStack / stdout / lineHits
+                 ├─ src/App.tsx       时间旅行回放 + 内存显微镜 + 双指针联动 + 行级热力图
+                 └─ src/services/aiDiagnostics.ts  DeepSeek 在线 / 内置免 Key 双引擎复杂度诊断
 ```
 
 ## 三层熔断
@@ -26,7 +30,7 @@ Vite + React 18 + TypeScript + Tailwind CSS + `@babel/standalone` + `lucide-reac
 | 层级 | 位置 | 阈值 | 触发结果 |
 | --- | --- | --- | --- |
 | 步数熔断 | `__guard` | 2000 步 | 抛出死循环告警，保留熔断前已采集的时间帧 |
-| 递归熔断 | `__enterFn` | 调用栈 150 层 | 抛出栈溢出告警 |
+| 递归熔断 | `__enterFn` / `__exitFn` | 调用栈 150 层 | 抛出栈溢出告警；`finally` 退栈保证栈深真实 |
 | 硬件熔断 | `sandboxRunner` | 3000ms | `worker.terminate()` 强制终止 |
 
 ## 时间帧契约
@@ -37,10 +41,17 @@ interface TraceFrame {
   line: number;                           // 原始源码行号（retainLines 保证对齐）
   event: string;                          // 循环迭代 / 状态更新 / 函数进入
   variables: Record<string, any>;         // 该时刻作用域内可见变量的深拷贝快照
-  callStack: string[];                    // 调用栈面包屑
+  callStack: string[];                    // 调用栈面包屑（含退栈后的真实深度）
   stdout: string[];                       // 截至该帧的 console.log 终端日志
+  lineHits?: Record<number, number>;      // 截至该帧的累计行执行次数，驱动热力图与 AI 热点定位
 }
 ```
+
+## AI 诊断引擎
+
+`src/services/aiDiagnostics.ts` 提供双引擎：填入 DeepSeek API Key 时在线诊断（失败自动回退），
+留空时使用内置确定性引擎，按 `lineHits` / 栈深 / 熔断信息产出时空复杂度、瓶颈帧与可一键重跑的优化代码。
+Key 仅驻留内存，不写入 localStorage。
 
 ## 本地运行
 

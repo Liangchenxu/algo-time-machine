@@ -3,9 +3,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
   Boxes,
+  BrainCircuit,
   ChevronRight,
+  Cpu,
+  Flame,
   Gauge,
+  GitCompare,
   History,
   Layers,
   Pause,
@@ -13,22 +18,33 @@ import {
   Rocket,
   RotateCcw,
   Search,
+  ShieldCheck,
   SkipBack,
   SkipForward,
+  Sparkles,
+  Target,
   Terminal,
   Timer,
+  TreePine,
+  TrendingDown,
+  Wand2,
+  Waves,
+  Wrench,
+  X,
   Zap,
   Bomb,
-  Waves,
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { TraceFrame } from './core/instrumenter';
 import { runInSandbox } from './core/sandboxRunner';
+import type { AIDiagnosticReport } from './services/aiDiagnostics';
+import { runAIDiagnostics } from './services/aiDiagnostics';
 import { DEFAULT_PRESET, PRESETS } from './presets';
 
 const LINE_H = 22;
 const BASE_TICK = 240;
 const SPEEDS = [0.5, 1, 2, 4];
+const GUTTER = 92;
 
 const POINTER_STYLES: Record<string, string> = {
   left: 'border-cyan-400/60 bg-cyan-500/15 text-cyan-200',
@@ -42,7 +58,7 @@ const POINTER_STYLES: Record<string, string> = {
   fast: 'border-emerald-400/60 bg-emerald-500/15 text-emerald-200',
 };
 
-const PRESET_ICONS = { rain: Waves, search: Search, bomb: Bomb };
+const PRESET_ICONS = { rain: Waves, search: Search, tree: TreePine, bomb: Bomb };
 
 function formatValue(v: unknown): string {
   if (typeof v === 'string') return v.length > 24 ? `"${v.slice(0, 21)}…"` : `"${v}"`;
@@ -56,20 +72,34 @@ function formatValue(v: unknown): string {
   }
 }
 
-/* ───────────────────────── 代码编辑 + 实时执行行追踪 ───────────────────────── */
+/** 执行次数越高，热力背景越偏红 */
+function heatTint(hits: number, maxHits: number): string {
+  const t = Math.min(1, hits / Math.max(1, maxHits));
+  return `linear-gradient(90deg, rgba(251,146,60,${(0.08 + t * 0.3).toFixed(3)}) 0%, rgba(239,68,68,${(
+    0.04 + t * 0.22
+  ).toFixed(3)}) 44%, rgba(5,7,13,0) 82%)`;
+}
+
+function heatBadgeClass(hits: number, maxHits: number): string {
+  const t = Math.min(1, hits / Math.max(1, maxHits));
+  if (t > 0.66) return 'border-rose-400/60 bg-rose-500/20 text-rose-100';
+  if (t > 0.33) return 'border-orange-400/60 bg-orange-500/15 text-orange-100';
+  return 'border-amber-400/50 bg-amber-500/10 text-amber-100';
+}
+
+/* ───────────────────── 代码编辑 + 行级执行热力图 ───────────────────── */
 
 interface EditorProps {
   source: string;
   onChange: (next: string) => void;
   activeLine: number | null;
-  hits: Map<number, number>;
+  lineHits?: Record<number, number>;
   maxHits: number;
 }
 
-function Editor({ source, onChange, activeLine, hits, maxHits }: EditorProps) {
+function Editor({ source, onChange, activeLine, lineHits, maxHits }: EditorProps) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
 
   const lines = useMemo(() => source.split('\n'), [source]);
 
@@ -78,66 +108,86 @@ function Editor({ source, onChange, activeLine, hits, maxHits }: EditorProps) {
     const layer = layerRef.current;
     if (!ta || !layer) return;
     layer.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
-    setScrollTop(ta.scrollTop);
   };
+
+  useEffect(() => {
+    sync();
+  }, [source]);
 
   useEffect(() => {
     const ta = taRef.current;
     if (!ta || activeLine === null) return;
     const y = (activeLine - 1) * LINE_H;
-    const viewTop = ta.scrollTop;
-    const viewBottom = ta.scrollTop + ta.clientHeight;
-    if (y < viewTop + LINE_H || y > viewBottom - LINE_H * 2) {
+    if (y < ta.scrollTop + LINE_H || y > ta.scrollTop + ta.clientHeight - LINE_H * 2) {
       ta.scrollTop = Math.max(0, y - ta.clientHeight / 2);
       sync();
     }
   }, [activeLine]);
 
+  const pad = `${GUTTER}px`;
+
   return (
-    <section className="flex min-h-0 flex-col rounded-xl border border-ink-700 bg-ink-900/70 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.9)]">
+    <section className="flex min-h-[320px] flex-col rounded-xl border border-ink-700 bg-ink-900/70 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.9)] xl:min-h-0">
       <header className="flex items-center gap-2 border-b border-ink-700 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
         <Layers className="h-3.5 w-3.5 text-neon-cyan" />
-        <span>源码 / 执行行追踪</span>
+        <span>源码 · 行级执行热力图</span>
         <span className="ml-auto flex items-center gap-2 normal-case tracking-normal">
+          <span className="flex items-center gap-1 text-[10px] text-slate-500">
+            冷
+            <span className="inline-block h-2 w-10 rounded-full bg-gradient-to-r from-amber-500/30 via-orange-500/60 to-rose-500/80" />
+            热
+          </span>
           {activeLine !== null && (
             <span className="rounded-md border border-cyan-400/40 bg-cyan-500/10 px-2 py-0.5 text-cyan-200">
               当前 L{activeLine}
             </span>
           )}
-          <span className="text-slate-500">{lines.length} 行</span>
         </span>
       </header>
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* 追踪层：行号 + 当前行发光条 + 执行次数热力背景（不拦截输入） */}
         <div
           ref={layerRef}
-          className="pointer-events-none absolute left-0 top-0 pt-3 will-change-transform"
+          className="pointer-events-none absolute left-0 top-0 pt-3 font-mono text-[13px] will-change-transform"
         >
           {lines.map((line, i) => {
             const no = i + 1;
-            const count = hits.get(no) ?? 0;
+            const count = lineHits?.[no] ?? 0;
             const isCurrent = activeLine === no;
-            const heat = count > 0 && !isCurrent ? 0.06 + (count / maxHits) * 0.16 : 0;
             return (
               <div
                 key={no}
                 className={clsx(
-                  'relative h-[22px] whitespace-pre pl-[54px] pr-[420px] font-mono text-[13px] leading-[22px]',
-                  isCurrent && 'bg-blue-500/20'
+                  'relative h-[22px] whitespace-pre leading-[22px] pr-[420px]',
+                  isCurrent && 'z-[1]'
                 )}
-                style={heat ? { background: `rgba(34,211,238,${heat.toFixed(3)})` } : undefined}
+                style={{
+                  paddingLeft: pad,
+                  background: count > 0 ? heatTint(count, maxHits) : undefined,
+                  boxShadow: isCurrent ? 'inset 0 0 0 1px rgba(96,165,250,0.6)' : undefined,
+                }}
               >
                 <span
                   className={clsx(
-                    'absolute left-0 w-[40px] text-right text-[11px]',
+                    'absolute left-0 w-[36px] text-right text-[11px]',
                     isCurrent ? 'font-bold text-cyan-200' : count > 0 ? 'text-slate-400' : 'text-slate-600'
                   )}
                 >
                   {no}
                 </span>
+                {count > 0 && (
+                  <span
+                    className={clsx(
+                      'absolute left-[42px] top-[3px] rounded border px-1 text-[9px] font-bold leading-[16px]',
+                      heatBadgeClass(count, maxHits),
+                      isCurrent && 'ring-1 ring-cyan-300/50'
+                    )}
+                  >
+                    🔥{count}x
+                  </span>
+                )}
                 {isCurrent && (
-                  <span className="absolute left-[46px] top-0 h-full w-[3px] rounded-full bg-cyan-300 shadow-glow animate-pulseRing" />
+                  <span className="animate-pulseRing absolute top-0 h-full w-[3px] rounded-full bg-cyan-300 shadow-glow" style={{ left: GUTTER - 8 }} />
                 )}
                 <span className="text-transparent">{line || ' '}</span>
               </div>
@@ -146,21 +196,6 @@ function Editor({ source, onChange, activeLine, hits, maxHits }: EditorProps) {
           <div className="h-24" />
         </div>
 
-        {/* 当前行徽标：随滚动定位，显示行号与该行累计执行次数 */}
-        {activeLine !== null && (
-          <div
-            className="pointer-events-none absolute right-4 z-20 flex items-center gap-1.5 text-[10px] font-semibold"
-            style={{ top: 12 + (activeLine - 1) * LINE_H - scrollTop }}
-          >
-            <span className="rounded border border-cyan-400/50 bg-cyan-500/15 px-1.5 py-[1px] text-cyan-200">
-              L{activeLine}
-            </span>
-            <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1.5 py-[1px] text-amber-200">
-              ×{hits.get(activeLine) ?? 0}
-            </span>
-          </div>
-        )}
-
         <textarea
           ref={taRef}
           value={source}
@@ -168,14 +203,15 @@ function Editor({ source, onChange, activeLine, hits, maxHits }: EditorProps) {
           spellCheck={false}
           onChange={(e) => onChange(e.target.value)}
           onScroll={sync}
-          className="scroll-thin absolute inset-0 h-full w-full resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-[54px] pr-6 font-mono text-[13px] leading-[22px] text-slate-100 caret-cyan-300 outline-none"
+          style={{ paddingLeft: pad }}
+          className="scroll-thin absolute inset-0 h-full w-full resize-none overflow-auto whitespace-pre bg-transparent py-3 pr-6 font-mono text-[13px] leading-[22px] text-slate-100 caret-cyan-300 outline-none"
         />
       </div>
     </section>
   );
 }
 
-/* ───────────────────────── 内存显微镜：数组 + 双指针联动 ───────────────────────── */
+/* ───────────────────── 内存显微镜 ───────────────────── */
 
 interface PointerRef {
   name: string;
@@ -184,10 +220,9 @@ interface PointerRef {
 
 function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers: PointerRef[] }) {
   const isMatrix = arr.length > 0 && arr.every((row) => Array.isArray(row));
-  const flat = arr as any[];
-  const numeric = !isMatrix && flat.every((v) => typeof v === 'number' && Number.isFinite(v));
-  const maxAbs = numeric ? Math.max(1, ...flat.map((v: number) => Math.abs(v))) : 1;
-  const visible = flat.slice(0, 60);
+  const numeric = !isMatrix && arr.every((v) => typeof v === 'number' && Number.isFinite(v));
+  const maxAbs = numeric ? Math.max(1, ...(arr as number[]).map((v) => Math.abs(v))) : 1;
+  const visible = arr.slice(0, 60);
   const hitsByIndex = new Map<number, PointerRef[]>();
   pointers.forEach((p) => {
     if (p.value >= 0 && p.value < visible.length) {
@@ -200,7 +235,9 @@ function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers
       <div className="mb-2 flex items-center gap-2 text-[11px]">
         <Boxes className="h-3.5 w-3.5 text-neon-violet" />
         <span className="font-bold text-slate-200">{name}</span>
-        <span className="text-slate-500">{isMatrix ? `矩阵 ${flat.length}×${(flat[0] as any[])?.length ?? 0}` : `数组 · ${flat.length} 项`}</span>
+        <span className="text-slate-500">
+          {isMatrix ? `矩阵 ${arr.length}×${(arr[0] as any[])?.length ?? 0}` : `数组 · ${arr.length} 项`}
+        </span>
         {numeric && (
           <span className="ml-auto text-slate-500">
             max <b className="text-neon-cyan">{maxAbs}</b>
@@ -213,10 +250,10 @@ function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers
           {visible.map((cell, idx) => {
             const cellPointers = hitsByIndex.get(idx) ?? [];
             const highlighted = cellPointers.length > 0;
-            const barPct = numeric && !isMatrix ? Math.max(4, (Math.abs(cell as number) / maxAbs) * 100) : 0;
+            const barPct = numeric ? Math.max(4, (Math.abs(cell as number) / maxAbs) * 100) : 0;
             return (
               <div key={idx} className="flex w-[62px] flex-col items-center gap-1">
-                {numeric && !isMatrix && (
+                {numeric && (
                   <div className="flex h-[46px] w-full items-end justify-center">
                     <div
                       className="w-[74%] rounded-t-[3px] bg-gradient-to-t from-blue-600/70 to-cyan-300/90 transition-all duration-150"
@@ -236,7 +273,9 @@ function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers
                   title={JSON.stringify(cell)}
                 >
                   {isMatrix
-                    ? `[${(cell as any[]).slice(0, 4).map((v) => (typeof v === 'number' ? v : formatValue(v))).join(',')}${(cell as any[]).length > 4 ? '…' : ''}]`
+                    ? `[${(cell as any[]).slice(0, 4).map((v) => (typeof v === 'number' ? v : formatValue(v))).join(',')}${
+                        (cell as any[]).length > 4 ? '…' : ''
+                      }]`
                     : formatValue(cell)}
                 </div>
                 <span className="text-[10px] text-slate-500">[{idx}]</span>
@@ -258,8 +297,10 @@ function ArrayLens({ name, arr, pointers }: { name: string; arr: any[]; pointers
           })}
         </div>
       </div>
-      {flat.length > visible.length && (
-        <p className="mt-1 text-[10px] text-slate-500">仅渲染前 {visible.length} 项，共 {flat.length} 项</p>
+      {arr.length > visible.length && (
+        <p className="mt-1 text-[10px] text-slate-500">
+          仅渲染前 {visible.length} 项，共 {arr.length} 项
+        </p>
       )}
     </div>
   );
@@ -275,19 +316,18 @@ function MemoryScope({ frame }: { frame: TraceFrame | null }) {
   const pointers: PointerRef[] = entries
     .filter(([k, v]) => POINTER_STYLES[k] && typeof v === 'number' && Number.isInteger(v))
     .map(([k, v]) => ({ name: k, value: v as number }));
-  const outOfRange = pointers.filter(
-    (p) => !arrays.some(([, a]) => p.value >= 0 && p.value < a.length)
-  );
+  const inRange = pointers.filter((p) => arrays.some(([, a]) => p.value >= 0 && p.value < a.length));
+  const outOfRange = pointers.filter((p) => !inRange.includes(p));
 
   return (
-    <section className="flex min-h-0 flex-col rounded-xl border border-ink-700 bg-ink-900/70">
+    <section className="flex min-h-[340px] flex-col rounded-xl border border-ink-700 bg-ink-900/70 xl:min-h-0">
       <header className="flex items-center gap-2 border-b border-ink-700 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
         <Activity className="h-3.5 w-3.5 text-neon-lime" />
         <span>内存显微镜</span>
         <span className="ml-auto flex items-center gap-2 normal-case tracking-normal text-slate-500">
           <span>{arrays.length} 数组</span>
           <span>·</span>
-          <span>{pointers.length} 指针</span>
+          <span>{inRange.length} 指针</span>
         </span>
       </header>
 
@@ -305,7 +345,7 @@ function MemoryScope({ frame }: { frame: TraceFrame | null }) {
         )}
 
         {arrays.map(([name, arr]) => (
-          <ArrayLens key={name} name={name} arr={arr} pointers={pointers.filter((p) => !outOfRange.includes(p))} />
+          <ArrayLens key={name} name={name} arr={arr} pointers={inRange} />
         ))}
 
         {scalars.length > 0 && (
@@ -394,7 +434,333 @@ function MemoryScope({ frame }: { frame: TraceFrame | null }) {
   );
 }
 
-/* ───────────────────────── 时间旅行控制器 ───────────────────────── */
+/* ───────────────────── AI 帧级复杂度手术刀 ───────────────────── */
+
+interface AiPanelProps {
+  report: AIDiagnosticReport | null;
+  loading: boolean;
+  running: boolean;
+  hasFrames: boolean;
+  framesCount: number;
+  apiKey: string;
+  comparison: { from: number; to: number } | null;
+  onApiKey: (v: string) => void;
+  onDiagnose: () => void;
+  onJump: (frameIndex: number) => void;
+  onApply: (code: string) => void;
+}
+
+function AiPanel({
+  report,
+  loading,
+  running,
+  hasFrames,
+  framesCount,
+  apiKey,
+  comparison,
+  onApiKey,
+  onDiagnose,
+  onJump,
+  onApply,
+}: AiPanelProps) {
+  const gain =
+    comparison && comparison.from > 0
+      ? Math.round(((comparison.from - comparison.to) / comparison.from) * 100)
+      : null;
+
+  return (
+    <section className="flex min-h-[340px] flex-col rounded-xl border border-violet-500/30 bg-[linear-gradient(160deg,rgba(76,29,149,0.22),rgba(10,15,26,0.85))] xl:min-h-0">
+      <header className="flex items-center gap-2 border-b border-violet-500/30 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-violet-200/80">
+        <BrainCircuit className="h-3.5 w-3.5 text-neon-violet" />
+        <span>DeepSeek / AI 帧级复杂度手术刀</span>
+        {report && (
+          <span className="ml-auto flex items-center gap-1 rounded border border-ink-600 bg-ink-900 px-1.5 py-[1px] text-[10px] normal-case tracking-normal text-slate-300">
+            <Cpu className="h-3 w-3 text-neon-cyan" />
+            {report.engine === 'deepseek' ? 'DeepSeek 在线' : '内置免 Key 引擎'}
+          </span>
+        )}
+      </header>
+
+      <div className="scroll-thin min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        <div className="space-y-2 rounded-lg border border-ink-600 bg-ink-850/60 p-3">
+          <label className="block text-[10px] uppercase tracking-widest text-slate-500">
+            DeepSeek API Key（可选，留空使用内置确定性引擎）
+          </label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => onApiKey(e.target.value)}
+            placeholder="sk-••••••••••••••••"
+            className="w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-violet-400/60"
+          />
+          <button
+            onClick={onDiagnose}
+            disabled={!hasFrames || loading || running}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-violet-400/60 bg-gradient-to-b from-violet-500/30 to-fuchsia-600/20 px-3 py-2 text-[12px] font-bold text-violet-50 shadow-glow transition hover:brightness-125 disabled:opacity-40"
+          >
+            <Sparkles className={clsx('h-4 w-4', loading && 'animate-spin')} />
+            {loading ? 'AI 帧级推理中…' : '✨ 启动 AI 帧级诊断'}
+          </button>
+          <p className="text-[10px] leading-relaxed text-slate-500">
+            Key 仅保存在内存并在本次诊断中直连 DeepSeek，不写入 localStorage；若浏览器 CORS
+            拦截则自动回退内置 AST 引擎。
+          </p>
+        </div>
+
+        {!report && !loading && (
+          <p className="rounded-lg border border-dashed border-ink-600 p-6 text-center text-xs text-slate-500">
+            采集时间帧后启动诊断，AI 将基于 lineHits 与调用栈深度给出时空复杂度报告
+          </p>
+        )}
+
+        {loading && (
+          <div className="space-y-2">
+            {[64, 40, 88].map((w, i) => (
+              <div key={i} className="h-3 animate-pulse rounded bg-ink-700/70" style={{ width: `${w}%` }} />
+            ))}
+          </div>
+        )}
+
+        {report && !loading && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 p-2.5">
+                <p className="text-[10px] uppercase tracking-widest text-rose-200/70">时间复杂度</p>
+                <p className="mt-1 text-[13px] font-bold text-rose-100">{report.timeComplexity}</p>
+              </div>
+              <div className="rounded-lg border border-cyan-400/40 bg-cyan-500/10 p-2.5">
+                <p className="text-[10px] uppercase tracking-widest text-cyan-200/70">空间复杂度</p>
+                <p className="mt-1 text-[13px] font-bold text-cyan-100">{report.spaceComplexity}</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
+                <p className="text-[10px] text-slate-500">热点行</p>
+                <p className="mt-0.5 flex items-center justify-center gap-1 text-[13px] font-bold text-orange-200">
+                  <Flame className="h-3.5 w-3.5" />L{report.hotspotLine}
+                </p>
+                <p className="text-[10px] text-slate-500">×{report.maxHitCount}</p>
+              </div>
+              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
+                <p className="text-[10px] text-slate-500">最大栈深</p>
+                <p className="mt-0.5 text-[13px] font-bold text-violet-200">{report.maxStackDepth} 层</p>
+                <p className="text-[10px] text-slate-500">调用栈峰值</p>
+              </div>
+              <div className="rounded-lg border border-ink-600 bg-ink-850/70 p-2">
+                <p className="text-[10px] text-slate-500">总帧数</p>
+                <p className="mt-0.5 text-[13px] font-bold text-neon-cyan">{framesCount}</p>
+                <p className="text-[10px] text-slate-500">AST 采集</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => onJump(report.bottleneckFrameIndex)}
+              className="flex w-full items-center gap-2 rounded-lg border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-left text-[11px] text-amber-100 transition hover:bg-amber-500/20"
+            >
+              <Target className="h-4 w-4 shrink-0" />
+              <span>
+                瓶颈帧定位 · 第 <b className="text-amber-50">{report.bottleneckFrameIndex}</b> 帧为栈深峰值 / 关键状态转折点
+              </span>
+              <span className="ml-auto whitespace-nowrap rounded border border-amber-400/50 px-1.5 py-[2px] text-[10px] font-bold">
+                🎯 跳转至第 {report.bottleneckFrameIndex} 帧
+              </span>
+            </button>
+
+            <p className="rounded-lg border border-ink-600 bg-ink-950/60 p-3 text-[11px] leading-relaxed text-slate-300">
+              {report.summary}
+            </p>
+
+            {report.frameInsights.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] uppercase tracking-widest text-slate-500">帧级洞察</p>
+                {report.frameInsights.map((insight, i) => (
+                  <button
+                    key={i}
+                    onClick={() => onJump(insight.frameIndex)}
+                    className="flex w-full items-start gap-2 rounded-md border border-ink-600 bg-ink-850/60 p-2 text-left transition hover:border-violet-400/50"
+                  >
+                    <span className="mt-[1px] shrink-0 rounded border border-violet-400/50 bg-violet-500/15 px-1.5 py-[1px] text-[10px] font-bold text-violet-200">
+                      F{insight.frameIndex}
+                    </span>
+                    <span className="flex-1 text-[11px] leading-snug text-slate-300">
+                      <b className="text-orange-200">L{insight.line}</b> · {insight.issue}
+                    </span>
+                    <Target className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="rounded-lg border border-ink-600 bg-ink-950/70 p-3">
+              <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-widest text-slate-500">
+                <Wand2 className="h-3.5 w-3.5 text-neon-lime" />
+                AI 优化代码
+              </div>
+              <pre className="scroll-thin max-h-40 overflow-auto whitespace-pre-wrap text-[10.5px] leading-[16px] text-lime-200/90">
+                {report.optimizedCode}
+              </pre>
+              <p className="mt-2 flex items-start gap-1.5 text-[11px] text-emerald-200/90">
+                <TrendingDown className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+                {report.optimizationGain}
+              </p>
+              <button
+                onClick={() => onApply(report.optimizedCode)}
+                disabled={running}
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-400/60 bg-emerald-500/20 px-3 py-2 text-[12px] font-bold text-emerald-100 transition hover:brightness-125 disabled:opacity-40"
+              >
+                <Zap className="h-4 w-4" />⚡ 一键应用 AI 优化代码并重跑对比
+              </button>
+            </div>
+
+            {comparison && gain !== null && (
+              <div className="flex items-center gap-2 rounded-lg border border-cyan-400/50 bg-cyan-500/10 p-3 text-[12px] text-cyan-100">
+                <GitCompare className="h-4 w-4 shrink-0" />
+                <span>
+                  优化前后时间帧：
+                  <b className="mx-1 text-rose-200 line-through">{comparison.from}</b>→
+                  <b className="mx-1 text-emerald-200">{comparison.to}</b>
+                  {gain >= 0 ? `（减少 ${gain}%）` : `（增加 ${-gain}%）`}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* ───────────────────── Qoder 协同开发档案 ───────────────────── */
+
+const BREAKER_ROWS = [
+  { name: '步数熔断', where: '__guard', limit: '2000 步', effect: '抛出疑似死循环告警，并回收熔断前全部时间帧' },
+  { name: '递归熔断', where: '__enterFn', limit: '150 层', effect: '调用栈超限即抛出栈溢出告警，__exitFn 负责退栈' },
+  { name: '硬件熔断', where: 'sandboxRunner', limit: '3000ms', effect: 'worker.terminate() 强制终止隔离线程' },
+];
+
+const MILESTONES = [
+  {
+    tag: 'Milestone 1',
+    title: 'AST 作用域快照与 Web Worker 沙箱构建',
+    detail:
+      'Babel 插件在循环、赋值、函数调用处注入 __trace 钩子；Blob Worker 隔离执行 + 3000ms 硬件熔断；输出 frameIndex / line / variables / callStack / stdout 五元组时间帧。',
+  },
+  {
+    tag: 'Milestone 2',
+    title: '架构师纠偏：AST 递归退栈 + 行级热力',
+    detail:
+      '架构师指出递归函数返回后调用栈未弹出，导致帧级 callStack 只增不减、栈深指标失真。指导 Qoder 以 try...finally { __exitFn() } 包裹函数体，并在 __trace 内累计 __lineHits 让每一帧携带截至该帧的行级执行热力。',
+  },
+];
+
+const QODER_CORRECTIONS = [
+  'TDZ 纠偏：scope.bindings 含同块内稍后声明的 let/const，快照读取改为 try/catch 闭包，避免 ReferenceError 中断采集。',
+  '帧回收纠偏：__frames 同步挂载 globalThis.__mtmFrames，Worker catch 分支得以在熔断后回传前序帧。',
+  '覆盖纠偏：插桩 visitor 扩展到 Program，使顶层语句（函数调用与 console.log）同样产帧。',
+  '协同纠偏留痕：Milestone 2 实例代码曾回退上述 TDZ 修复，已在合并时保留修复并标注来源。',
+];
+
+function ArchiveModal({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div
+        className="scroll-thin max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-violet-400/40 bg-ink-900 shadow-[0_40px_120px_-40px_rgba(139,92,246,0.5)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="sticky top-0 flex items-center gap-3 border-b border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur">
+          <span className="grid h-8 w-8 place-items-center rounded-lg border border-violet-400/50 bg-violet-500/15">
+            <Wrench className="h-4 w-4 text-neon-violet" />
+          </span>
+          <div>
+            <h2 className="text-[14px] font-bold text-slate-50">🛠️ Qoder 协同开发档案</h2>
+            <p className="text-[11px] text-slate-500">人机协同架构演进 · 安全熔断设计 · 工程纠偏留痕</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="ml-auto grid h-8 w-8 place-items-center rounded-lg border border-ink-600 text-slate-400 transition hover:border-rose-400/60 hover:text-rose-200"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="space-y-5 p-4">
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-cyan">
+              <ShieldCheck className="h-4 w-4" />三层安全熔断架构
+            </h3>
+            <div className="overflow-hidden rounded-lg border border-ink-600">
+              <table className="w-full text-left text-[11px]">
+                <thead className="bg-ink-800 text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">熔断层</th>
+                    <th className="px-3 py-2 font-semibold">实现位置</th>
+                    <th className="px-3 py-2 font-semibold">阈值</th>
+                    <th className="px-3 py-2 font-semibold">触发行为</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-ink-700 bg-ink-850/60 text-slate-300">
+                  {BREAKER_ROWS.map((r) => (
+                    <tr key={r.name}>
+                      <td className="px-3 py-2 font-bold text-slate-100">{r.name}</td>
+                      <td className="px-3 py-2 font-mono text-neon-lime">{r.where}</td>
+                      <td className="px-3 py-2 text-amber-200">{r.limit}</td>
+                      <td className="px-3 py-2">{r.effect}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-violet">
+              <BookOpen className="h-4 w-4" />人机协同架构演进记录
+            </h3>
+            <div className="space-y-2">
+              {MILESTONES.map((m) => (
+                <div key={m.tag} className="rounded-lg border border-ink-600 bg-ink-850/60 p-3">
+                  <div className="flex items-center gap-2">
+                    <History className="h-3.5 w-3.5 text-neon-cyan" />
+                    <span className="rounded border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-[1px] text-[10px] font-bold text-cyan-200">
+                      {m.tag}
+                    </span>
+                    <span className="text-[12px] font-bold text-slate-100">{m.title}</span>
+                  </div>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{m.detail}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 text-[12px] font-bold text-neon-amber">
+              <AlertTriangle className="h-4 w-4" />Qoder 工程纠偏留痕
+            </h3>
+            <ul className="space-y-1.5 rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
+              {QODER_CORRECTIONS.map((c) => (
+                <li key={c} className="flex gap-2 text-[11px] leading-relaxed text-amber-100/90">
+                  <ChevronRight className="mt-[2px] h-3 w-3 shrink-0 text-amber-300" />
+                  {c}
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────── 时间旅行控制器 ───────────────────── */
 
 interface TimelineProps {
   frames: TraceFrame[];
@@ -493,7 +859,7 @@ function Timeline({ frames, cursor, playing, speed, onCursor, onTogglePlay, onSt
   );
 }
 
-/* ───────────────────────── 主应用 ───────────────────────── */
+/* ───────────────────── 主应用 ───────────────────── */
 
 export default function App() {
   const [source, setSource] = useState(DEFAULT_PRESET.code);
@@ -505,24 +871,20 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [elapsed, setElapsed] = useState<number | null>(null);
+  const [apiKey, setApiKey] = useState('');
+  const [report, setReport] = useState<AIDiagnosticReport | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [comparison, setComparison] = useState<{ from: number; to: number } | null>(null);
+  const [showArchive, setShowArchive] = useState(false);
 
   const total = frames.length;
   const current = total > 0 ? frames[Math.min(cursor, total - 1)] : null;
   const activeLine = current ? current.line : null;
 
-  const { hits, maxHits } = useMemo(() => {
-    const map = new Map<number, number>();
-    const end = Math.min(cursor, total - 1);
-    for (let i = 0; i <= end; i++) {
-      const line = frames[i].line;
-      map.set(line, (map.get(line) ?? 0) + 1);
-    }
-    let max = 1;
-    map.forEach((v) => {
-      if (v > max) max = v;
-    });
-    return { hits: map, maxHits: max };
-  }, [frames, cursor, total]);
+  const maxHits = useMemo(() => {
+    const values = Object.values(current?.lineHits ?? {});
+    return values.length ? Math.max(1, ...values.map(Number)) : 1;
+  }, [current]);
 
   async function execute(code: string) {
     setRunning(true);
@@ -534,6 +896,7 @@ export default function App() {
     setElapsed(result.executionTimeMs);
     setError(result.success ? null : result.error ?? '未知错误');
     setRunning(false);
+    return result.frames.length;
   }
 
   useEffect(() => {
@@ -553,14 +916,29 @@ export default function App() {
     if (playing && total > 0 && cursor >= total - 1) setPlaying(false);
   }, [playing, cursor, total]);
 
-  const step = (delta: number) => {
+  const jumpToFrame = (index: number) => {
+    if (total === 0) return;
     setPlaying(false);
-    setCursor((c) => Math.max(0, Math.min(c + delta, total - 1)));
+    setCursor(Math.max(0, Math.min(index, total - 1)));
   };
+
+  async function diagnose() {
+    if (total === 0) return;
+    setAiLoading(true);
+    const next = await runAIDiagnostics(source, frames, error ?? undefined, apiKey);
+    setReport(next);
+    setAiLoading(false);
+  }
+
+  async function applyOptimized(code: string) {
+    const from = total;
+    setSource(code);
+    const to = await execute(code);
+    setComparison({ from, to });
+  }
 
   return (
     <div className="flex h-full flex-col bg-ink-950 text-slate-200">
-      {/* 顶部：品牌 + 预设算法 + 运行 */}
       <header className="shrink-0 border-b border-ink-700 bg-ink-900/80 px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2.5">
@@ -572,7 +950,7 @@ export default function App() {
                 AlgoTimeMachine
                 <span className="ml-2 text-[11px] font-normal text-neon-cyan">AST 时间旅行调试器</span>
               </h1>
-              <p className="text-[11px] text-slate-500">Babel 自动插桩 · Web Worker 沙箱 · 2000 步熔断守护</p>
+              <p className="text-[11px] text-slate-500">Babel 自动插桩 · Web Worker 沙箱 · AI 帧级复杂度手术刀</p>
             </div>
           </div>
 
@@ -586,10 +964,11 @@ export default function App() {
                   onClick={() => {
                     setActivePreset(p.id);
                     setSource(p.code);
+                    setComparison(null);
                     execute(p.code);
                   }}
                   className={clsx(
-                    'group flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition',
+                    'flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition',
                     active
                       ? 'border-cyan-400/70 bg-cyan-500/10 shadow-glow'
                       : 'border-ink-600 bg-ink-850 hover:border-neon-cyan/50'
@@ -614,10 +993,16 @@ export default function App() {
               <Rocket className="h-4 w-4" />
               {running ? '插桩执行中…' : '运行插桩'}
             </button>
+
+            <button
+              onClick={() => setShowArchive(true)}
+              className="flex items-center gap-2 rounded-lg border border-violet-400/50 bg-violet-500/10 px-3 py-2.5 text-[12px] font-bold text-violet-100 transition hover:bg-violet-500/20"
+            >
+              <Wrench className="h-4 w-4" />🛠️ 协同档案
+            </button>
           </div>
         </div>
 
-        {/* 指标条 */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
           <span className="flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-1">
             <Timer className="h-3.5 w-3.5 text-neon-amber" />
@@ -638,7 +1023,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* 熔断告警横幅 */}
       {error && (
         <div className="flex shrink-0 items-center gap-3 border-y border-rose-500/60 bg-rose-950/60 px-4 py-2.5">
           <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-rose-400/70 bg-rose-500/20">
@@ -647,16 +1031,34 @@ export default function App() {
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-bold text-rose-100">{error}</p>
             <p className="text-[11px] text-rose-200/70">
-              沙箱已安全拦截，并回收熔断前 <b className="text-rose-50">{total}</b> 帧现场快照 —— 可拖动下方进度条逐帧复盘崩溃路径。
+              沙箱已安全拦截，并回收熔断前 <b className="text-rose-50">{total}</b> 帧现场快照 —— 可拖动进度条逐帧复盘，或启动 AI 诊断定位收敛缺陷。
             </p>
           </div>
         </div>
       )}
 
-      {/* 主体双栏 */}
-      <main className="grid min-h-0 flex-1 gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Editor source={source} onChange={setSource} activeLine={activeLine} hits={hits} maxHits={maxHits} />
+      <main className="grid min-h-0 flex-1 gap-3 overflow-auto p-3 xl:grid-cols-3 xl:overflow-hidden">
+        <Editor
+          source={source}
+          onChange={setSource}
+          activeLine={activeLine}
+          lineHits={current?.lineHits}
+          maxHits={maxHits}
+        />
         <MemoryScope frame={current} />
+        <AiPanel
+          report={report}
+          loading={aiLoading}
+          running={running}
+          hasFrames={total > 0}
+          framesCount={total}
+          apiKey={apiKey}
+          comparison={comparison}
+          onApiKey={setApiKey}
+          onDiagnose={diagnose}
+          onJump={jumpToFrame}
+          onApply={applyOptimized}
+        />
       </main>
 
       <Timeline
@@ -664,18 +1066,20 @@ export default function App() {
         cursor={cursor}
         playing={playing}
         speed={speed}
-        onCursor={(next) => {
-          setPlaying(false);
-          setCursor(Math.max(0, Math.min(next, Math.max(0, total - 1))));
-        }}
+        onCursor={jumpToFrame}
         onTogglePlay={() => {
           if (total === 0) return;
           if (cursor >= total - 1) setCursor(0);
           setPlaying((p) => !p);
         }}
-        onStep={step}
+        onStep={(delta) => {
+          setPlaying(false);
+          setCursor((c) => Math.max(0, Math.min(c + delta, total - 1)));
+        }}
         onSpeed={setSpeed}
       />
+
+      {showArchive && <ArchiveModal onClose={() => setShowArchive(false)} />}
     </div>
   );
 }

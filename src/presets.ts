@@ -1,6 +1,6 @@
 export interface Preset {
   id: string;
-  icon: 'rain' | 'search' | 'bomb';
+  icon: 'rain' | 'search' | 'tree' | 'bomb';
   title: string;
   subtitle: string;
   code: string;
@@ -76,6 +76,22 @@ const nums = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27];
 const target = 19;
 const index = binarySearch(nums, target);
 console.log("目标", target, "最终下标 =", index);
+`,
+  },
+  {
+    id: 'fib-recursion',
+    icon: 'tree',
+    title: '暴力递归斐波那契',
+    subtitle: 'Naive Fib · O(2^n) 重叠子问题与栈伸缩',
+    code: `function fib(n) {
+  if (n <= 1) {
+    return n;
+  }
+  return fib(n - 1) + fib(n - 2);
+}
+
+const result = fib(8);
+console.log("暴力递归 fib(8) =", result);
 `,
   },
   {
