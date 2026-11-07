@@ -102,15 +102,22 @@ Key 仅驻留内存，不写入 localStorage。
   任意重叠递归（不限 fib）由 `dominantRecursiveName` 定位函数并注入 Top-Down 记忆化包装
   （`const __memo = {}` + `JSON.stringify([参数])` 守卫，原函数体塞进 IIFE 保留 return 语义）；
   定位失败或形参含默认值/解构时放弃注入并说明原因。
-  Stage-2 继续降维：`sniffBinaryRecurrence` 从函数体嗅探 `fn(p - a) <op> fn(p - b)` 与恒等/常量基线，
-  生成自底向上 `dp` 数组递推（`Apply Stage-2: Bottom-Up Tabulation (O(1) Stack)`），
-  形成「暴力指数递归 → Stage-1 顶向下记忆化剪枝 → Stage-2 底向上数组递推消栈」的二级火箭；
-  超出该形态（多元参数、变步长、混合算子）则返回 null 保持源码不变。
+  Stage-2 继续降维：`sniffBinaryRecurrence` 从函数体嗅探 `fn(p - a) <op> fn(p - b)`（直接式与
+  `let a = fn(p-1); let b = fn(p-2); return a + b` 拆分式都支持）与恒等/常量基线，
+  生成自底向上 `dp` 数组递推；`sniffTwoParamPascalRecurrence` 另认
+  `if (k==0||k==n) return 1` + `fn(n-1,k-1)+fn(n-1,k)` 的双参数帕斯卡形态，生成 `dp[r][c]` 二维表
+  （`r`/`c`/`dp` 命名直接驱动显微镜 2D 十字准星）。
+  **种子契约**：种子只覆盖基线定义域 `0..baseMax`，循环从 `baseMax + 1` 起算，
+  并要求 `maxOffset <= baseMax + 1`；`max(baseMax, offsets) + 1` 的旧式在 fib 上会写出错误的 `dp[2]`。
+  形成「暴力指数递归 → Stage-1 顶向下记忆化剪枝 → Stage-2 数组/二维表递推消栈」的二级火箭，
+  且**所有重叠递归（含 fib）都走同一条管线，禁止函数名特判**；超出可推导形态则返回 null 保持源码不变。
 - Watch 条件守卫：标量 / 1D 数组 / 2D 矩阵卡片均可 Pin 置顶；断言在当前帧变量快照上求值，
   显示 TRUE / FALSE / INVALID / ERROR 四态（作用域缺变量必须 ERROR 而非谎报 FALSE），
   并受闸门约束（放行 `[` `]` 下标断言如 `dp[1][2] === 6`；禁止点号、引号与单等号赋值以切断成员注入；
   禁 `ident(` 调用与宿主对象名）。每条断言右侧 `→T` 为 GDB 式条件观察点：从下一帧起环形扫描，
-  停在第一个使断言为 TRUE 的帧，全轨迹无解时显示 `no TRUE frame`。
+  停在第一个使断言为 TRUE 的帧，并区分四态——`→ #n`（前方命中）/ `↺ #n (wrapped)`（绕回命中）/
+  `= only @ #n`（仅当前帧成立，不移动）/ `no TRUE frame`（无解）；
+  Quick-Watch 芯片按当前预设给 2 条建议断言，点击只"加入断言"不产生位置副作用，跳转仍由用户显式点 `→T`。
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
   `HIT`（翠绿 `#10b981`，首次展开过而本次零子节点直接退栈 = 被记忆化缓存拦截），
   判据是 `firstChildCount > 0 && childCount === 0`，不读源码；配色优先级
@@ -120,7 +127,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M8 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M9 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

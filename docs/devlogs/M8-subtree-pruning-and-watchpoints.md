@@ -1,6 +1,6 @@
 # M8 · 记忆化 HIT 剪枝拓扑取证、二阶段递推降维合成与 Watch 下标观察点
 
-Commit：本次提交（`git log -1`）— feat(watchpoint): 完成 Milestone 8 记忆化HIT剪枝拓扑、二阶段递推降维、Watch数组下标解析与Seek TRUE条件跳帧
+Commit `6da81b1` — feat(watchpoint): 完成 Milestone 8 记忆化HIT剪枝拓扑、二阶段递推降维、Watch数组下标解析与Seek TRUE条件跳帧
 
 ## Why · 背景动机
 

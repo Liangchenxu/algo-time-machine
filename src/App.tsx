@@ -364,6 +364,15 @@ function layoutCallTree(nodes: CallTreeNode[], limit = 40) {
   };
 }
 
+/** 场景化一键断言：按预设给出 2 条最有信息量的观察点，评委零打字即可 →T */
+const QUICK_WATCH: Record<string, string[]> = {
+  rainwater: ['water >= 4', 'left === right'],
+  'dp-matrix': ['dp[1][2] === 6', 'r === 2 && c === 3'],
+  'binary-search': ['guess === target', 'low === high'],
+  'fib-tree': ['n === 2', 'leftBranch === 2'],
+  'infinite-loop': ['anomalySum > 500', 'count === 0'],
+};
+
 const WATCH_FORBIDDEN =
   /(^|[^.\w$])(this|window|globalThis|self|top|parent|document|location|Function|eval|constructor|prototype|process|require|import)([^.\w$]|$)/;
 
@@ -585,7 +594,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M8',
-    commit: '本次提交',
+    commit: '6da81b1',
     doc: 'docs/devlogs/M8-subtree-pruning-and-watchpoints.md',
     title: '记忆化 HIT 剪枝拓扑取证、二阶段递推降维合成与 Watch 下标观察点',
     why: 'M7 之后还剩三处不闭环：记忆化生效时调用树仍把所有重复画成玫红 DUP，看不出「这次重复其实被缓存拦截」；A′ 档的 optimizedCode 直接回填源码，二级火箭只有半程，栈深依旧 5 层；Watch 不支持下标，无法断言 dp[1][2] 这类真正体现算法状态的命题，也没有「跳到条件成立的那一帧」的能力。',
@@ -609,6 +618,35 @@ const DEVLOGS: DevlogEntry[] = [
       'DUP 计数交叉验证：fib(5) 31 帧下 DUP 9 / HIT 0，与 redundantCallCount = 9 一致；记忆化 climb 的 HIT 2 + DUP 1 = 3 等于其 redundantCallCount = 3。',
       'Watch 下标与跳帧实测：FRAME 11 下 dp[1][2] === 6 → TRUE 且 dp[99][0] === 1 → ERROR（Cannot read properties of undefined (reading 0)，越界不崩溃）；FRAME 1 同一断言 → ERROR（dp is not defined：TDZ 过滤后该帧作用域里还没有 dp，与裁决预期的 FALSE 不同）；count = 5 → INVALID（assignment not allowed）；引号下标写法与 window.alert → INVALID（no dot or quotes）；→T 从 FRAME 1 精确瞬移到 FRAME 11 / 29，与 amber 突变格 6 @ [1,2] 同一帧。',
       '回归与纪律：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、死循环 1334 帧 O(∞) 与 [FUSE_STEP_LIMIT] 横幅全部未变；13 条不变量逐条复核通过，npm run build 零报错，src/** emoji 扫描无命中，控制台零 error/warn。',
+    ],
+  },
+  {
+    tag: 'M9',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M9-two-stage-fib-and-2d-synthesis.md',
+    title: 'fib 预设并入二级火箭、双参帕斯卡二维表降维与 Seek 四态导航',
+    why: 'M8 之后还有三处体验与能力缺口：fib 预设因历史特判一步跳到底向上数组，评委看不到 HIT 剪枝与 SUBTREE PRUNING 的关键一幕；Stage-2 只认单参数递推，comb(n, k) 这类双参数组合递推无从数组化；→T 的「绕回」「仅当前帧」「无解」三种情况共用一个反馈，且 Watch 需要手打表达式，零打字体验不成立。',
+    what: [
+      'aiDiagnostics.ts：移除分支 A 中 targetFnName === fib 的历史特判，所有重叠递归统一注入 Top-Down 记忆化，fib 与 climb 走完全相同的二级火箭。',
+      'aiDiagnostics.ts：sniffBinaryRecurrence 增加「拆分式」识别（let a = fn(n - 1); let b = fn(n - 2); return a + b）覆盖 fib 预设的真实写法；修正种子/起点公式为 baseMax + 1 并加 maxOffset <= baseMax + 1 收敛门，杜绝把未定义项当种子。',
+      'aiDiagnostics.ts：新增 sniffTwoParamPascalRecurrence 与 synthesizeTwoParamTabulation，对 if (k==0||k==n) return 1 + fn(n-1,k-1)+fn(n-1,k) 生成 dp[r][c] 二维表（r/c/dp 命名直接驱动显微镜 2D 十字准星）；实参取自 topCallExpr 的数字序列。',
+      'aiDiagnostics.ts：二维档的一维滚动样例改为条件提供——只有源码确有二维输入 grid 时才给（该样例是 min-path 专用题解），否则 optimizedCode 回填源码、Apply 退场，避免把无关算法塞进 comb 的编辑器。',
+      'App.tsx：→T 反馈拆成四态——前方命中 → #n（天蓝）、绕回命中 ↺ #n (wrapped)（琥珀）、仅当前帧 = only @ #n（紫罗兰，且不移动）、无解 no TRUE frame（玫红）；调用树图例为 DUP/HIT 加 title 说明并在 DUP>0&&HIT=0 / HIT>0 时分别显示 unpruned → click Apply for HIT 与 memo cache pruned。',
+      'App.tsx：新增场景化 Quick-Watch 芯片（按 selectedPresetId 给 2 条建议断言，点击即加入，零打字），五个预设各自配置最有信息量的条件。',
+    ],
+    conflicts: [
+      'M9 让 fib 走 Stage-2 时暴露出 M8 种子公式的真实数学错误：原式 start = max(baseMax, offsetA, offsetB) + 1 会为 fib 生成 dp = [0, 1, 2] 且从 3 起算，导致 dp[2] 被写成 2，而 fib(2) 实际是 1。climb 因 baseMax 恰为 2 掩盖了该缺陷。已改为 start = baseMax + 1、种子只覆盖 0..baseMax，并加 maxOffset <= baseMax + 1 的依赖完备门；回归确认 climb 仍输出 8、fib 现在输出 5。',
+      'comb 走完 Stage-2 后引擎按「二维表」继续推荐一维滚动样例，而那段样例是硬编码 min-path 题解，点下去会替换掉 comb 的代码。这是 M4 遗留的样例特化问题，本轮按不变量 #13c 加门控：无 grid 输入时不提供该样例，Apply 随即退场。',
+      '取消 fib 特判后，fib 的 Stage-1 帧数从基线的 31 涨到 41（缓存守卫自身也要进入函数），横幅以 SUBTREE PRUNING 3 → 0 为主锚点解释，Stage-2 再回落到 11 帧，三段单调。',
+      'Quick-Watch 按 selectedPresetId 取建议，用户改写成自定义代码后芯片仍显示原预设建议——语义上无错（点进去会得到 ERROR 或 FALSE 的真实求值），但提示性减弱，已记入遗留。',
+    ],
+    impact: [
+      'fib 二级火箭实测：Stage-0 31 帧 O(2^n) / Stack Depth 6 / DUP 9 / HIT 0 且图例提示 unpruned → Stage-1 41 帧 O(n) Memoized Linear、DUP 1 / HIT 2（HIT×2 翠绿）、横幅 SUBTREE PRUNING: Expansive Redundant Subtrees 3 → 0 (-100% Pruned) + TRACE STEPS: 31 → 41 (Includes O(1) Memo Lookups)、终端 fib(5) = 5 → Stage-2 生成 const dp = [0, 1] 与 i=2..n 递推、11 帧、PEAK STACK 6 → 2、O(n) Linear Iterative Scan / O(1) Scalar Accumulator、终端 fibTabulated(5) = 5、Apply 退场。',
+      'climb 回归：Stage-2 仍生成 const dp = [0, 1, 2]、9 帧、终端 climbTabulated(5) = 8，证明种子公式修正未破坏原有形态。',
+      'comb(4, 2) 二级火箭：Stage-0 12 帧 O(2^n) / DUP 3 → Stage-1 39 帧 O(n) Memoized Linear、缓存键 JSON.stringify([n, k])、HIT×2 / DUP 0、横幅剪枝 1 → 0、按钮换标 → Stage-2 生成 dp[r][c] 二维表、17 帧、终端 combTabulated(4, 2) = 6、判据 O(M * N) Matrix DP / O(M * N) 2D Tabulation。',
+      '2D 联动：Stage-2 后显微镜渲染 2D Matrix: dp [5×3] 共 15 格，第 7 帧出现 Cursor [3][1] 十字准星，Δ 1 State Mutation 正常；Apply 在该档已被门控隐藏（无 grid 输入）。',
+      '→T 四态实测：DP 预设 FRAME 1 点 Quick-Watch 芯片 + dp[1][2] === 6 后点 →T 显示 → #11 并落在写入帧；同帧再点 → #12；跳到末帧再点显示 ↺ #11 wrapped；单帧成立的 i === 2 && x === 10 二次点击显示 = only @ #4 且帧号不变；x === 999 显示 no TRUE frame。',
+      '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、死循环 1334 帧 O(∞) 均未变；14 条不变量逐条复核通过。',
     ],
   },
 ];
@@ -644,7 +682,11 @@ export default function App() {
   const [pinnedVars, setPinnedVars] = useState<Set<string>>(new Set<string>());
   const [watchExprs, setWatchExprs] = useState<string[]>([]);
   const [watchDraft, setWatchDraft] = useState<string>('');
-  const [seekState, setSeekState] = useState<{ expr: string; found: boolean; frameIndex: number } | null>(null);
+  const [seekState, setSeekState] = useState<{
+    expr: string;
+    kind: 'forward' | 'wrapped' | 'only' | 'none';
+    frameIndex: number;
+  } | null>(null);
   const svgScrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
@@ -1020,12 +1062,17 @@ export default function App() {
     });
   };
 
+  const adoptWatchExpr = (expr: string) => {
+    if (!expr) return;
+    setWatchExprs((prev) => (prev.includes(expr) || prev.length >= 4 ? prev : [...prev, expr]));
+    setSeekState(null);
+  };
+
   const addWatchExpression = () => {
     const expr = watchDraft.trim();
     if (!expr) return;
-    setWatchExprs((prev) => (prev.includes(expr) || prev.length >= 4 ? prev : [...prev, expr]));
+    adoptWatchExpr(expr);
     setWatchDraft('');
-    setSeekState(null);
   };
 
   const removeWatchExpression = (expr: string) => {
@@ -1033,7 +1080,7 @@ export default function App() {
     setSeekState((prev) => (prev && prev.expr === expr ? null : prev));
   };
 
-  // 条件观察点跳帧：从下一帧起环形扫描整条轨迹，停在第一个使断言为 TRUE 的帧
+  // 条件观察点跳帧：从下一帧起环形扫描整条轨迹，四态严格区分（前方命中 / 绕回命中 / 仅当前帧 / 无解）
   const seekNextTrue = (expr: string) => {
     if (frames.length === 0) return;
     const start = (currentFrameIdx + 1) % frames.length;
@@ -1041,12 +1088,30 @@ export default function App() {
       const idx = (start + step) % frames.length;
       if (evalWatchExpression(expr, frames[idx].variables ?? {}).state === 'TRUE') {
         setIsPlaying(false);
+        if (idx === currentFrameIdx) {
+          setSeekState({ expr, kind: 'only', frameIndex: idx });
+          return;
+        }
         setCurrentFrameIdx(idx);
-        setSeekState({ expr, found: true, frameIndex: idx });
+        setSeekState({ expr, kind: idx > currentFrameIdx ? 'forward' : 'wrapped', frameIndex: idx });
         return;
       }
     }
-    setSeekState({ expr, found: false, frameIndex: -1 });
+    setSeekState({ expr, kind: 'none', frameIndex: -1 });
+  };
+
+  const seekBadge = (expr: string) => {
+    if (!seekState || seekState.expr !== expr) return null;
+    switch (seekState.kind) {
+      case 'forward':
+        return { text: `→ #${seekState.frameIndex + 1}`, cls: 'bg-sky-500/15 text-sky-300' };
+      case 'wrapped':
+        return { text: `↺ #${seekState.frameIndex + 1} (wrapped)`, cls: 'bg-amber-500/15 text-amber-300' };
+      case 'only':
+        return { text: `= only @ #${seekState.frameIndex + 1}`, cls: 'bg-violet-500/15 text-violet-300' };
+      default:
+        return { text: 'no TRUE frame', cls: 'bg-rose-500/15 text-rose-400' };
+    }
   };
 
   // SVG 调用树自动聚焦：把当前激活路径上最深的节点滚到视口中心
@@ -1416,8 +1481,8 @@ export default function App() {
                 >
                   <span className="font-semibold">{expr}</span>
                   <span className="rounded bg-black/40 px-1">{result.state}</span>
-                  {seekState && seekState.expr === expr && !seekState.found && (
-                    <span className="rounded bg-amber-500/20 px-1 text-amber-200">no TRUE frame</span>
+                  {seekBadge(expr) && (
+                    <span className={`rounded px-1 ${seekBadge(expr)!.cls}`}>{seekBadge(expr)!.text}</span>
                   )}
                   <button
                     onClick={() => seekNextTrue(expr)}
@@ -1451,6 +1516,18 @@ export default function App() {
               >
                 Add
               </button>
+              {(QUICK_WATCH[selectedPresetId] ?? [])
+                .filter((q) => !watchExprs.includes(q) && watchExprs.length < 4)
+                .map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => adoptWatchExpr(q)}
+                    title={`Quick watch: ${q}`}
+                    className="rounded border border-emerald-700/50 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300 transition hover:bg-emerald-500/20"
+                  >
+                    + {q}
+                  </button>
+                ))}
             </div>
 
             {/* Canvas Scroll Area */}
@@ -1492,11 +1569,17 @@ export default function App() {
                       <span className="h-2 w-2 rounded bg-sky-500/60" />
                       active
                     </span>
-                    <span className="flex items-center gap-1 shrink-0">
+                    <span
+                      className="flex items-center gap-1 shrink-0 cursor-help"
+                      title="Redundant activation that expanded its subtree again — real recomputation"
+                    >
                       <span className="h-2 w-2 rounded bg-rose-500/60" />
                       DUP {pruneStats.expansive}
                     </span>
-                    <span className="flex items-center gap-1 shrink-0">
+                    <span
+                      className="flex items-center gap-1 shrink-0 cursor-help"
+                      title="Duplicate activation that returned with zero child calls — intercepted by the memo cache guard"
+                    >
                       <span className="h-2 w-2 rounded bg-emerald-500/60" />
                       HIT {pruneStats.pruned}
                     </span>
@@ -1504,6 +1587,16 @@ export default function App() {
                       <span className="h-2 w-2 rounded bg-zinc-700" />
                       retired
                     </span>
+                    {pruneStats.expansive > 0 && pruneStats.pruned === 0 && (
+                      <span className="shrink-0 rounded bg-amber-500/10 px-1 text-amber-300">
+                        unpruned → click Apply for HIT
+                      </span>
+                    )}
+                    {pruneStats.pruned > 0 && (
+                      <span className="shrink-0 rounded bg-emerald-500/10 px-1 text-emerald-300">
+                        memo cache pruned
+                      </span>
+                    )}
                     <span className="shrink-0 text-zinc-600">
                       nodes {treeLayout.selectedCount} · edges {treeLayout.edges.length} · leaves{' '}
                       {treeLayout.positions.filter(
@@ -2326,6 +2419,23 @@ export default function App() {
                       <br />• M8: Runtime-only HIT vs DUP pruning forensics in the call tree, Stage-2
                       bottom-up tabulation lowering, subtree-pruning benchmark anchor, and watch
                       subscripts with Seek-Next-TRUE watchpoints.
+                      <br />• M9: fib preset folded into the same two-stage pipeline (no more fib-only
+                      shortcut), two-parameter Pascal recurrences lowered to 2D dp tables, four-state
+                      seek feedback, and preset-scoped quick-watch chips for zero-typing demos.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-sky-400 font-semibold">9. Two-Stage Pipeline &amp; Seek States (M9)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Every overlapping recursion now follows Stage-0 exponential trace → Stage-1 top-down
+                      memoization (HIT pruning + SUBTREE PRUNING banner) → Stage-2 array lowering, with no
+                      name-based shortcuts. Stage-2 recognises both the direct form
+                      fn(n - 1) + fn(n - 2) and the split form let a = fn(n - 1); let b = fn(n - 2);
+                      return a + b, and seeds dp[0..baseMax] with the loop starting at baseMax + 1
+                      (starting earlier would treat undefined slots as seeds - the M8 formula bug that only
+                      surfaced once fib took this path). Two-parameter Pascal recurrences become dp[r][c]
+                      matrices. Seek reports four distinct states: forward, wrapped, only-current (no
+                      movement) and none.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

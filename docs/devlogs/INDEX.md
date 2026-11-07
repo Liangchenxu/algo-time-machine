@@ -15,7 +15,8 @@
 | M5 | `ef934b0` | [M5-call-tree-and-breakpoints.md](./M5-call-tree-and-breakpoints.md) | 带参调用栈签名、重叠子问题精确取证与 A/B 分档、可点击调用树拓扑、行级断点与 Continue to Breakpoint |
 | M6 | `772ef79` | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
 | M7 | `7de93be` | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
-| M8 | 本次提交 | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
+| M8 | `6da81b1` | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
+| M9 | 本次提交 | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -82,21 +83,37 @@
     改动该取证口径必须同步复核 `benchmarkSegments` 的优先级链
     `STATUS(熔断) > SUBTREE PRUNING > STACK REDUCTION > FRAMES`，并保留 `emitTailComplexityRows`
     这类防重复渲染开关。
-    （c）Stage-2 递推合成只接受「单参数 + 二元 + 恒等或常量基线」这一可机械推导形态，
+    （c）Stage-2 递推合成只接受可机械推导的形态（单参数二元递推；M9 起扩至双参数帕斯卡递推），
     其余一律返回 `null` 回退源码：**宁可少一级火箭，不得生成算错的 dp 递推**。
     （d）Watch 放行 `[` `]` 下标断言（`dp[1][2] === 6`、`grid[r][c] > 0`），但仍禁止点号、引号与
     单等号赋值（切断 `obj.constructor` / `obj["constructor"]` 两条成员注入路径，
     `===` `!==` `<=` `>=` `==` `!=` 不受影响）；越界与缺变量返回 ERROR；
     `→T` 观察点跳帧需先暂停再瞬移，全轨迹无解时必须给出可见反馈而不是静默。
+15. **二级火箭阶段单调性与 Seek 四态完备契约**（M9 确立）：
+    （a）**所有重叠递归必须走同一条管线**：禁止任何函数名特判（`targetFnName === 'fib'` 已下线）。
+    Stage-0 指数 → Stage-1 记忆化（HIT 剪枝 + SUBTREE PRUNING 横幅）→ Stage-2 数组化，
+    三段各自有独立判据锚点；任何"直接跳到终点"的捷径都会让 HIT/剪枝能力在演示中隐身。
+    （b）**Stage-2 种子必须严格等于基线定义域**：种子只覆盖 `0..baseMax`，循环从 `baseMax + 1` 起算，
+    并要求 `maxOffset <= baseMax + 1`（依赖项必须在基线覆盖范围内）。
+    M8 的 `max(baseMax, offsets) + 1` 公式在 climb 上偶然正确、在 fib 上会写出 `dp[2] = 2`（真值 1），
+    证明"样本覆盖不足的通过"不等于契约成立——新增递推形态时必须对每个形态单独核对首几项数值。
+    （c）**合成产物不得替换成无关算法**：二维档的一维滚动样例是 min-path 专用题解，
+    仅在源码确有 `grid` 二维输入时提供，否则 `optimizedCode = sourceCode` 让 Apply 退场（#13c 的具体化）。
+    （d）**`→T` 四态必须互斥且都可见**：`forward`（`→ #n` 天蓝）/ `wrapped`（`↺ #n (wrapped)` 琥珀）/
+    `only`（`= only @ #n` 紫罗兰，不移动）/ `none`（`no TRUE frame` 玫红）。
+    `only` 的判定必须来自**扫描完全程后唯一的 TRUE 帧**（从 current+1 环形起点、绕回 current 恰为最后一圈），
+    不得用"第一次碰到自己"这种短路判定。
+    （e）Quick-Watch 建议芯片只做"加入断言"这一件事，不自动跳帧：加入后用户仍显式点 `→T`，
+    保持"观察点 = 断言 + 跳转"两步语义，避免芯片点击产生位置副作用。
 
-## 当前实测基线（M8 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M9 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
 | Trapping Rain Water | 40 | 1 | `O(n) Linear Two-Pointer` / `O(1) In-Place Pointers` | 热点 L9（11x）；无函数激活 → 调用树面板隐藏 |
 | Min Path Sum (2D DP) | 29 | 1 | `O(M * N) Matrix DP` / `O(M * N) 2D Tabulation` | 热点 L14（6x）；Apply 重跑后 15 帧 `O(M*N) Optimal Scan` / `O(N) Rolling Buffer` |
 | Binary Search Bounds | 10 | 1 | `O(log n) Logarithmic Halving` / `O(1) Constant Pointers` | 空间 11、探测 1 次、对数预算 16 |
-| Naive Fibonacci Tree | 31 | 6 | `O(2^n) Exponential` / `O(n) Stack Depth 6` | 调用树 15 节点 + 9 个 DUP；铁证 `fib(1) ×5, fib(2) ×3, fib(0) ×3, fib(3) ×2`，冗余 9 次 |
+| Naive Fibonacci Tree | 31 | 6 | `O(2^n) Exponential` / `O(n) Stack Depth 6` | 调用树 15 节点 + 9 个 DUP；铁证 `fib(1) ×5, fib(2) ×3, fib(0) ×3, fib(3) ×2`，冗余 9 次；M9 起可点两次 Apply 走完整二级火箭（31 → 41 → 11 帧） |
 | Infinite Loop Guard | 1334 | 1 | `O(∞) Non-Terminating` / `O(1) Constant Heap` | `[FUSE_STEP_LIMIT]` 横幅 + 1334 帧现场，热点 L5（666x） |
 | 手写 `depth(400)` | 149 | 150 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 150` | **M4 误判项已闭环**：149 个唯一签名、0 个 DUP 节点、树仅渲染前 64 个；`[FUSE_STACK_OVERFLOW]` 保留现场 |
 | 手写 `fact(6)` | 7 | 7 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 7` | 6 个唯一签名、冗余进入 0 次，判为单链线性而非指数 |
@@ -130,6 +147,11 @@
 | 剪枝锚点（M8） | `SUBTREE PRUNING: Expansive Redundant Subtrees 1 → 0 (-100% Pruned)` \| `TIME: O(2^n) Exponential → O(n) Memoized Linear` \| `SPACE: … → O(n) Memo Table + 5 Stack Frames` \| `TRACE STEPS: 10 → 29 (Includes O(1) Memo Lookups)` |
 | Watch 下标（M8） | FRAME 11：`dp[1][2] === 6` TRUE、`dp[99][0] === 1` ERROR（Cannot read properties of undefined (reading '0')）；FRAME 1 同一断言 ERROR（dp is not defined，符合 #13d，与裁决预期的 FALSE 不同）；`count = 5` INVALID（assignment）、`window.alert` 与 `height['0']` INVALID（no dot or quotes） |
 | 观察点跳帧（M8） | `→T` 从 FRAME 1 环形扫描到 FRAME 11 / 29 并暂停，落点与 amber 突变格 `6 @ [1,2]` 同帧；无解时胶囊显示 `no TRUE frame` |
+| fib 二级火箭（M9） | Stage-0 31 帧 / `DUP 9`；Stage-1 41 帧 `O(n) Memoized Linear`、`DUP 1 / HIT 2`、`SUBTREE PRUNING: 3 → 0 (-100% Pruned)`、终端 `fib(5) = 5`；Stage-2 11 帧 `dp = [0, 1]`、`PEAK STACK: 6 → 2`、终端 `fibTabulated(5) = 5`、Apply 退场 |
+| comb 二级火箭（M9） | Stage-0 12 帧 `DUP 3`；Stage-1 39 帧 `O(n) Memoized Linear`、缓存键 `JSON.stringify([n, k])`、`HIT×2 / DUP 0`；Stage-2 17 帧二维表、终端 `combTabulated(4, 2) = 6`、判据 `O(M * N) Matrix DP` |
+| 2D 十字准星（M9） | Stage-2 后显微镜渲染 `2D Matrix: dp [5×3]` 共 15 格，第 7 帧出现 `Cursor [3][1]`，`Δ 1 State Mutation` 正常 |
+| Seek 四态（M9） | `→ #11`（前方）/ `→ #12`（同帧再点）/ `↺ #11 (wrapped)`（末帧点）/ `= only @ #4`（单帧断言二次点击，帧号不变）/ `no TRUE frame`（`x === 999`） |
+| Quick-Watch（M9） | 五个预设各 2 条建议芯片，DP 下为 `+ dp[1][2] === 6` / `+ r === 2 && c === 3`，点击即加入（零打字） |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -170,8 +192,15 @@
 - [x] HIT 与 DUP 无法区分，记忆化后的调用树看起来仍在冗余展开（M8：`firstChildCount > 0 && childCount === 0` 纯拓扑判据，实测 climb Stage-1 `DUP 1 / HIT 2`，与 `redundantCallCount = 3` 自洽）
 - [x] Watch 不支持下标，无法断言 dp / grid 单元状态（M8：白名单放行 `[` `]`，实测 `dp[1][2] === 6` TRUE、`dp[99][0] === 1` ERROR 而非崩溃）
 - [x] 缺少 GDB 式条件观察点跳帧（M8：`→T` 环形扫描首个 TRUE 帧，FRAME 1 → FRAME 11 / 29 正落在 `dp[1][2]` 写入帧，与 amber 突变格同帧）
-- [ ] Stage-2 形态覆盖仍限于「单参数 + 二元 + 恒等或常量基线」；多元（comb(n,k)）、变步长（n / 2）与混合算子递推返回 null（见 M8「遗留」）
-- [ ] HIT 判据要求首次调用曾展开子树，对手写自底向上代码不显示剪枝成绩（语义正确但界面缺解释，见 M8「遗留」）
+- [x] Stage-2 形态覆盖仍限于「单参数 + 二元 + 恒等或常量基线」；多元（comb(n,k)）等返回 null（M8 报备 → **M9 闭合**：`sniffTwoParamPascalRecurrence` + `synthesizeTwoParamTabulation` 生成 `dp[r][c]` 二维表，实测 `combTabulated(4, 2) = 6` 且显微镜自动切到 2D 十字准星）
+- [x] HIT 判据要求首次调用曾展开子树，对手写自底向上代码不显示剪枝成绩（M8 报备 → **M9 闭合**：调用树图例加 `title` 说明，并在 `DUP > 0 && HIT === 0` 时显示 `unpruned → click Apply for HIT`、`HIT > 0` 时显示 `memo cache pruned`）
+- [x] `→T` 的绕回/仅当前帧/无解混用一个反馈（M8 报备 → **M9 闭合**：四态徽章 `→ #n` / `↺ #n (wrapped)` / `= only @ #n` / `no TRUE frame`，only 态不移动）
+- [x] fib 预设被历史特判跳过 Stage-1，评委看不到 HIT 剪枝与 SUBTREE PRUNING（M9 取消 `targetFnName === 'fib'` 特判，实测 31 → 41 → 11 帧三段完整）
+- [x] Stage-2 种子公式对 fib 会写出 `dp[2] = 2`（M9 实测暴露并修正为 `baseMax + 1` 起算 + 依赖完备门；climb 无回归，fib 终端 `5` 正确）
+- [x] 二维档把 min-path 专用滚动样例强推给任意二维表（M9：无 `grid` 输入时 `optimizedCode = sourceCode`、Apply 退场）
+- [ ] Stage-2 仍不支持变步长（`n / 2`）与三参数及以上多维状态（见 M9「遗留」）
+- [ ] Quick-Watch 建议按预设 id 取，自定义代码下提示性减弱（见 M9「遗留」）
+- [ ] 二维档滚动样例的门控依赖源码形态，通用「只读输入 + 可滚动状态表」检测未实现（见 M9「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 

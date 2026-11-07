@@ -302,43 +302,75 @@ interface BinaryRecurrence {
 }
 
 /**
- * 嗅探「单参数整数二元递推」形态：fn(p - a) <op> fn(p - b) 且基线为 if (p <= k) return p|常量。
- * 只用于 Stage-2 代码生成；任何不匹配（混合参数、三元递推、非平凡基线、基线过宽）一律返回 null，
- * 由调用方回退到原源码，绝不臆造一个可能算错的递推式。
+ * 嗅探「单参数整数二元递推」形态，支持两种写法：
+ *   直接式：return fn(p - 1) + fn(p - 2);
+ *   拆分式：let a = fn(p - 1); let b = fn(p - 2); return a + b;   （fib 预设即此形态）
+ * 基线必须是 if (p <= k) return p|常量。只用于 Stage-2 代码生成；任何不匹配一律返回 null，
+ * 由调用方回退源码，绝不臆造可能算错的递推式。
  */
 function sniffBinaryRecurrence(info: FnSourceInfo): BinaryRecurrence | null {
   const call = `${info.name}\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*-\\s*(\\d+)\\s*\\)`;
-  const m = info.body.match(new RegExp(`${call}\\s*([+\\-*])\\s*${call}`));
-  if (!m) return null;
-  const [, p1, o1, op, p2, o2] = m;
-  if (p1 !== p2) return null;
+  let param = '';
+  let offsetA = 0;
+  let offsetB = 0;
+  let op = '';
+
+  const direct = info.body.match(new RegExp(`${call}\\s*([+\\-*])\\s*${call}`));
+  if (direct) {
+    const [, p1, o1, opChar, p2, o2] = direct;
+    if (p1 !== p2) return null;
+    param = p1;
+    offsetA = Number(o1);
+    offsetB = Number(o2);
+    op = opChar;
+  } else {
+    // 拆分式：先收集 `var = fn(p - k)`，再要求唯一的 return 恰好组合其中两个变量
+    const assignRe = new RegExp(`([A-Za-z_$][\\w$]*)\\s*=\\s*${call}`, 'g');
+    const assigned: { variable: string; param: string; offset: number }[] = [];
+    let hit: RegExpExecArray | null;
+    while ((hit = assignRe.exec(info.body)) !== null) {
+      assigned.push({ variable: hit[1], param: hit[2], offset: Number(hit[3]) });
+    }
+    if (assigned.length !== 2 || assigned[0].param !== assigned[1].param) return null;
+    const ret = info.body.match(
+      /return\s+([A-Za-z_$][\w$]*)\s*([+\-*])\s*([A-Za-z_$][\w$]*)\s*;/
+    );
+    if (!ret) return null;
+    const names = [ret[1], ret[3]];
+    const found = assigned.filter((a) => names.includes(a.variable));
+    if (found.length !== 2) return null;
+    param = assigned[0].param;
+    offsetA = found[0].offset;
+    offsetB = found[1].offset;
+    op = ret[2];
+  }
+
+  if (offsetA < 1 || offsetB < 1 || offsetA === offsetB) return null;
 
   const base = info.body.match(
-    new RegExp(`if\\s*\\(\\s*${p1}\\s*(<=|<)\\s*(\\d+)\\s*\\)\\s*\\{?\\s*return\\s+([A-Za-z_$][\\w$]*|\\d+)\\s*;`)
+    new RegExp(`if\\s*\\(\\s*${param}\\s*(<=|<)\\s*(\\d+)\\s*\\)\\s*\\{?\\s*return\\s+([A-Za-z_$][\\w$]*|\\d+)\\s*;`)
   );
   if (!base) return null;
   const baseMax = base[1] === '<' ? Number(base[2]) - 1 : Number(base[2]);
   if (baseMax < 0 || baseMax > 8) return null;
-  const baseIsIdentity = base[3] === p1;
+  const baseIsIdentity = base[3] === param;
   const baseLiteral = baseIsIdentity ? 0 : Number(base[3]);
   if (!baseIsIdentity && Number.isNaN(baseLiteral)) return null;
+  // 依赖项必须落在基线覆盖范围内，否则 dp 会出现未初始化的空洞
+  if (Math.max(offsetA, offsetB) > baseMax + 1) return null;
 
-  return {
-    param: p1,
-    op,
-    offsetA: Number(o1),
-    offsetB: Number(o2),
-    baseMax,
-    baseIsIdentity,
-    baseLiteral,
-  };
+  return { param, op, offsetA, offsetB, baseMax, baseIsIdentity, baseLiteral };
 }
 
-/** 由递推形态构造等价的自底向上 1D dp 表：种子取基线值，循环从「所有依赖项都已就位」处起算。 */
+/**
+ * 由递推形态构造等价的自底向上 1D dp 表。
+ * 循环必须从 baseMax + 1 起算：基线只定义 0..baseMax 的值，提前起算会把「未定义的 dp[i]」
+ * 当种子用（例如 fib 若从 3 起算并播 [0,1,2]，dp[2] 会被错写成 2，而 fib(2) = 1）。
+ */
 function synthesizeBottomUpTabulation(info: FnSourceInfo, rec: BinaryRecurrence, argHint: number) {
-  const start = Math.max(rec.baseMax, rec.offsetA, rec.offsetB) + 1;
+  const start = rec.baseMax + 1;
   const seeds: number[] = [];
-  for (let i = 0; i < start; i++) seeds.push(rec.baseIsIdentity ? i : rec.baseLiteral);
+  for (let i = 0; i <= rec.baseMax; i++) seeds.push(rec.baseIsIdentity ? i : rec.baseLiteral);
   return (
     `// Stage-2: 自底向上数组递推，彻底消除递归调用栈（O(1) 栈深，嗅探依据 fn(${rec.param} - ${rec.offsetA}) ${rec.op} fn(${rec.param} - ${rec.offsetB})）\n` +
     `function ${info.name}Tabulated(n) {\n` +
@@ -349,6 +381,58 @@ function synthesizeBottomUpTabulation(info: FnSourceInfo, rec: BinaryRecurrence,
     `  return dp[n];\n` +
     `}\n` +
     `console.log("${info.name}Tabulated(${argHint}) =", ${info.name}Tabulated(${argHint}));`
+  );
+}
+
+interface PascalRecurrence {
+  p1: string;
+  p2: string;
+  baseVal: number;
+}
+
+/** 双参数帕斯卡/组合数递推：if (p2 == 0 || p2 == p1) return 1; fn(p1-1,p2-1) + fn(p1-1,p2)。 */
+function sniffTwoParamPascalRecurrence(info: FnSourceInfo): PascalRecurrence | null {
+  if (info.params.length !== 2) return null;
+  const [p1, p2] = info.params;
+  const baseA = info.body.match(
+    new RegExp(
+      `if\\s*\\(\\s*${p2}\\s*===?\\s*0\\s*\\|\\|\\s*${p2}\\s*===?\\s*${p1}\\s*\\)\\s*\\{?\\s*return\\s+(\\d+)\\s*;`
+    )
+  );
+  const baseB = info.body.match(
+    new RegExp(
+      `if\\s*\\(\\s*${p2}\\s*===?\\s*${p1}\\s*\\|\\|\\s*${p2}\\s*===?\\s*0\\s*\\)\\s*\\{?\\s*return\\s+(\\d+)\\s*;`
+    )
+  );
+  const base = baseA || baseB;
+  if (!base) return null;
+
+  const callA = `${info.name}\\s*\\(\\s*${p1}\\s*-\\s*1\\s*,\\s*${p2}\\s*-\\s*1\\s*\\)`;
+  const callB = `${info.name}\\s*\\(\\s*${p1}\\s*-\\s*1\\s*,\\s*${p2}\\s*\\)`;
+  if (!new RegExp(`${callA}\\s*\\+\\s*${callB}`).test(info.body) && !new RegExp(`${callB}\\s*\\+\\s*${callA}`).test(info.body)) {
+    return null;
+  }
+  return { p1, p2, baseVal: Number(base[1]) };
+}
+
+/** Stage-2 二维表合成：r/c 游标与 dp[r][c] 命名可直接驱动显微镜的 2D Matrix Crosshair 视图。 */
+function synthesizeTwoParamTabulation(info: FnSourceInfo, rec: PascalRecurrence, args: number[]) {
+  const [n, k] = args;
+  return (
+    `// Stage-2: 二维 Pascal 组合递推数组化（dp[r][c] 二维表，消除递归调用栈）\n` +
+    `function ${info.name}Tabulated(${info.params.join(', ')}) {\n` +
+    `  const dp = Array.from({ length: ${rec.p1} + 1 }, (_, r) =>\n` +
+    `    Array.from({ length: ${rec.p2} + 1 }, (__, c) => (c === 0 || c === r ? ${rec.baseVal} : 0))\n` +
+    `  );\n` +
+    `  for (let r = 2; r <= ${rec.p1}; r++) {\n` +
+    `    for (let c = 1; c <= Math.min(r - 1, ${rec.p2}); c++) {\n` +
+    `      dp[r][c] = dp[r - 1][c - 1] + dp[r - 1][c];\n` +
+    `    }\n` +
+    `  }\n` +
+    `  console.log("${info.name}Tabulated(" + ${rec.p1} + ", " + ${rec.p2} + ") =", dp[${rec.p1}][${rec.p2}]);\n` +
+    `  return dp[${rec.p1}][${rec.p2}];\n` +
+    `}\n` +
+    `${info.name}Tabulated(${n}, ${k});`
   );
 }
 
@@ -473,17 +557,13 @@ export async function runAIDiagnostics(
     if (metrics.redundantCallCount >= 2 && metrics.expansiveRedundantCount >= 1) {
       const targetFnName = metrics.dominantRecursiveName;
       const memoInfo = extractFunctionInfo(sourceCode, targetFnName);
-      const classicDP = targetFnName === 'fib';
-      const optimizedCode = classicDP
-        ? `// Optimized: 状态压缩自底向上动态规划 O(n) Time / O(n) Space\nfunction fibDP(n) {\n  const dp = [0, 1];\n  for (let i = 2; i <= n; i++) {\n    dp[i] = dp[i - 1] + dp[i - 2];\n  }\n  console.log("DP optimal fib(" + n + ") =", dp[n]);\n  return dp[n];\n}\nfibDP(6);`
-        : memoInfo
-          ? synthesizeMemoizedSource(sourceCode, memoInfo, metrics.topCallExpr)
-          : sourceCode;
-      const gainA = classicDP
-        ? `Frames: ${frames.length} -> 15 (-${Math.max(50, Math.round((1 - 15 / Math.max(frames.length, 16)) * 100))}% Overhead) | Max Stack: ${metrics.maxStackDepth} -> 2 | Redundant Entries: ${metrics.redundantCallCount} -> 0`
-        : memoInfo
-          ? `Auto-memoization injected into ${targetFnName}() | Expansive repeats: ${metrics.expansiveRedundantCount} -> 0 | Distinct subproblems: ${Object.keys(metrics.signatureHits).length} | 语义与原函数一致`
-          : `未能安全定位 ${targetFnName} 的函数体或形参含默认值/解构，保持原代码不注入记忆化`;
+      // M9：取消 fib 的历史特判——所有重叠递归统一走 Stage-1 记忆化，才能看到 HIT 剪枝与 SUBTREE PRUNING 横幅
+      const optimizedCode = memoInfo
+        ? synthesizeMemoizedSource(sourceCode, memoInfo, metrics.topCallExpr)
+        : sourceCode;
+      const gainA = memoInfo
+        ? `Auto-memoization injected into ${targetFnName}() | Expansive repeats: ${metrics.expansiveRedundantCount} -> 0 | Distinct subproblems: ${Object.keys(metrics.signatureHits).length} | 语义与原函数一致`
+        : `未能安全定位 ${targetFnName} 的函数体或形参含默认值/解构，保持原代码不注入记忆化`;
       return {
         ...metrics,
         timeComplexity: 'O(2^n) Exponential',
@@ -505,10 +585,8 @@ export async function runAIDiagnostics(
           {
             frameIndex: frames.length - 1,
             line: metrics.hotspotLine,
-            tag: classicDP ? 'BOTTOM_UP_DP_CANDIDATE' : 'MEMO_INJECTION_TARGET',
-            issue: classicDP
-              ? 'fib 形态可直接改写为自底向上数组递推，消除全部调用帧'
-              : `目标函数 ${targetFnName}()：可在入口注入 JSON.stringify([参数]) 缓存键、出口写入缓存，保持原语义不变`,
+            tag: 'MEMO_INJECTION_TARGET',
+            issue: `目标函数 ${targetFnName}()：可在入口注入 JSON.stringify([参数]) 缓存键、出口写入缓存，保持原语义不变；随后还可继续 Stage-2 数组化消栈`,
           },
         ],
         optimizedCode,
@@ -518,20 +596,24 @@ export async function runAIDiagnostics(
 
     // 分支 A'：重复入参全部命中缓存、未再展开子树 —— 记忆化已生效，不得继续判指数级
     if (metrics.redundantCallCount >= 2) {
-      // Stage-2：记忆化仍占用 O(n) 调用栈，可继续降维为自底向上数组递推
+      // Stage-2：记忆化仍占用 O(n) 调用栈，可继续降维为数组递推（一维二元 / 二维帕斯卡）
       const stageInfo = extractFunctionInfo(sourceCode, metrics.dominantRecursiveName);
       const stageRec = stageInfo ? sniffBinaryRecurrence(stageInfo) : null;
+      const pascalRec = stageInfo && !stageRec ? sniffTwoParamPascalRecurrence(stageInfo) : null;
+      const pascalArgs = metrics.topCallExpr ? (metrics.topCallExpr.match(/-?\d+/g) || []).map(Number) : [];
       const stageArg = metrics.sampleArg !== null && metrics.sampleArg > 0 ? metrics.sampleArg : 8;
       const stage2Code = stageInfo && stageRec
         ? synthesizeBottomUpTabulation(stageInfo, stageRec, stageArg)
-        : null;
+        : stageInfo && pascalRec && pascalArgs.length >= 2
+          ? synthesizeTwoParamTabulation(stageInfo, pascalRec, pascalArgs)
+          : null;
 
       return {
         ...metrics,
         timeComplexity: 'O(n) Memoized Linear',
         spaceComplexity: `O(n) Memo Table + ${metrics.maxStackDepth} Stack Frames`,
         nextStageLabel: stage2Code ? 'Apply Stage-2: Bottom-Up Tabulation (O(1) Stack)' : undefined,
-        summary: `记忆化缓存命中验证通过：${metrics.dominantRecursiveName}() 共出现 ${Object.keys(metrics.signatureHits).length} 个不同入参签名、累计 ${metrics.redundantCallCount} 次重复进入，但展开型重复为 ${metrics.expansiveRedundantCount}（0 表示重复调用全部在缓存守卫处直接返回，没有再展开子树），因此实际时间复杂度已降为线性。总帧数 ${frames.length}，峰值栈深 ${metrics.maxStackDepth} 层——${stage2Code ? `仍可继续 Stage-2 消栈：把记忆化递归降维为自底向上 dp 数组递推，将峰值栈深压到 1。` : '当前形态未能安全嗅探出二元递推式，暂不提供 Stage-2 消栈。'}`,
+        summary: `记忆化缓存命中验证通过：${metrics.dominantRecursiveName}() 共出现 ${Object.keys(metrics.signatureHits).length} 个不同入参签名、累计 ${metrics.redundantCallCount} 次重复进入，但展开型重复为 ${metrics.expansiveRedundantCount}（0 表示重复调用全部在缓存守卫处直接返回，没有再展开子树），因此实际时间复杂度已降为线性。总帧数 ${frames.length}，峰值栈深 ${metrics.maxStackDepth} 层——${stage2Code ? `仍可继续 Stage-2 消栈：把记忆化递归降维为${stageRec ? '自底向上 dp 一维递推' : '自底向上 dp[r][c] 二维表'}，将峰值栈深压到 1。` : '当前形态未能安全嗅探出可机械推导的递推式，暂不提供 Stage-2 消栈。'}`,
         frameInsights: [
           {
             frameIndex: metrics.bottleneckFrameIndex,
@@ -539,13 +621,15 @@ export async function runAIDiagnostics(
             tag: 'MEMOIZATION_EFFECTIVE',
             issue: `重复入参 ${metrics.topDuplicates.join('，')} 均已命中缓存返回，展开型重复归零`,
           },
-          ...(stage2Code && stageRec
+          ...(stage2Code
             ? [
                 {
                   frameIndex: frames.length - 1,
                   line: metrics.hotspotLine,
                   tag: 'STAGE2_TABULATION_READY',
-                  issue: `检测到二元递推 ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetA}) ${stageRec.op} ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetB})，可数组化消除全部 ${metrics.maxStackDepth} 层调用栈`,
+                  issue: stageRec
+                    ? `检测到二元递推 ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetA}) ${stageRec.op} ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetB})，可数组化消除全部 ${metrics.maxStackDepth} 层调用栈`
+                    : `检测到双参数帕斯卡递推（${pascalRec!.p1} / ${pascalRec!.p2}），可生成 dp[r][c] 二维表消除全部 ${metrics.maxStackDepth} 层调用栈`,
                 },
               ]
             : []),
@@ -629,11 +713,14 @@ export async function runAIDiagnostics(
   }
 
   if (dpShape === 'matrix2d') {
+    // 一维滚动数组样例是 min-path 专用题解：只有源码里确有二维输入 grid 时才提供；
+    // 否则（例如帕斯卡 comb 的二维表）绝不把无关算法塞进用户编辑器（不变量 #13c）。
+    const rollingSampleAvailable = /grid\s*=\s*\[/.test(sourceCode);
     return {
       ...metrics,
       timeComplexity: 'O(M * N) Matrix DP',
       spaceComplexity: 'O(M * N) 2D Tabulation',
-      summary: `二维状态转移表（2D Tabulation）扫描完成。共采集 ${frames.length} 帧，状态转移热点位于 L${metrics.hotspotLine}（累计执行 ${metrics.maxHitCount} 次）。可通过滚动数组将空间复杂度进一步压缩至 O(N)。`,
+      summary: `二维状态转移表（2D Tabulation）扫描完成。共采集 ${frames.length} 帧，状态转移热点位于 L${metrics.hotspotLine}（累计执行 ${metrics.maxHitCount} 次）。${rollingSampleAvailable ? '检测到只读输入矩阵，可通过滚动数组将空间复杂度进一步压缩至 O(N)。' : '当前二维表已是该递推的终端形态（无可滚动压缩的只读输入矩阵），无需继续重构。'}`,
       frameInsights: [
         {
           frameIndex: Math.floor(frames.length * 0.4),
@@ -642,8 +729,12 @@ export async function runAIDiagnostics(
           issue: '二维网格依赖左邻 dp[r][c-1] 与上邻 dp[r-1][c] 完成最优子结构合并',
         },
       ],
-      optimizedCode: `// Optimized: 一维滚动数组空间压缩 O(N) Space\nconst grid = [\n  [1, 3, 1],\n  [1, 5, 1],\n  [4, 2, 1]\n];\nconst dp = [1, 4, 5];\nfor (let r = 1; r < 3; r++) {\n  dp[0] += grid[r][0];\n  for (let c = 1; c < 3; c++) {\n    dp[c] = Math.min(dp[c], dp[c - 1]) + grid[r][c];\n  }\n}\nconsole.log("Compressed 1D DP MinPath =", dp[2]);`,
-      optimizationGain: 'Space Complexity: O(M*N) -> O(N) 1D Rolling Buffer',
+      optimizedCode: rollingSampleAvailable
+        ? `// Optimized: 一维滚动数组空间压缩 O(N) Space\nconst grid = [\n  [1, 3, 1],\n  [1, 5, 1],\n  [4, 2, 1]\n];\nconst dp = [1, 4, 5];\nfor (let r = 1; r < 3; r++) {\n  dp[0] += grid[r][0];\n  for (let c = 1; c < 3; c++) {\n    dp[c] = Math.min(dp[c], dp[c - 1]) + grid[r][c];\n  }\n}\nconsole.log("Compressed 1D DP MinPath =", dp[2]);`
+        : sourceCode,
+      optimizationGain: rollingSampleAvailable
+        ? 'Space Complexity: O(M*N) -> O(N) 1D Rolling Buffer'
+        : 'Terminal 2D Tabulation Reachable Bound | no companion grid to roll',
     };
   }
 
