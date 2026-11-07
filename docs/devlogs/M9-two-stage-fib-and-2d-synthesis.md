@@ -1,6 +1,6 @@
 # M9 · fib 预设并入二级火箭、双参帕斯卡二维表降维与 Seek 四态导航
 
-Commit：本次提交（`git log -1`）— feat(pipeline): 完成 Milestone 9 fib预设二级火箭化、双参comb二维DP合成、Seek四态消歧与一键Watch芯片
+Commit `9bb7835` — feat(pipeline): 完成 Milestone 9 fib预设二级火箭化、双参comb二维DP合成、Seek四态消歧与一键Watch芯片
 
 ## Why · 背景动机
 

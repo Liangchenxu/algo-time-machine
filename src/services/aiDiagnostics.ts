@@ -130,6 +130,37 @@ export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
   };
 }
 
+/**
+ * 二维矩阵读写分离的纯运行时取证：统计每个二维数组在相邻帧之间发生变化的单元格数量。
+ * writeCount === 0 → 只读输入矩阵；> 0 → 可变状态转移表。全程只读时间帧，不碰源码（不变量 #6/#13a）。
+ */
+export function analyzeMatrixWrites(frames: TraceFrame[]): Record<string, number> {
+  const writes: Record<string, number> = {};
+  const prev: Record<string, any[]> = {};
+
+  for (const f of frames) {
+    for (const [name, value] of Object.entries(f.variables)) {
+      if (!Array.isArray(value) || value.length === 0 || !Array.isArray(value[0])) continue;
+      const before = prev[name];
+      if (before) {
+        let changed = 0;
+        for (let r = 0; r < value.length; r++) {
+          const row = value[r];
+          const oldRow = before[r];
+          if (!Array.isArray(row)) continue;
+          for (let c = 0; c < row.length; c++) {
+            if (!Array.isArray(oldRow) || oldRow[c] !== row[c]) changed++;
+          }
+        }
+        if (changed > 0) writes[name] = (writes[name] || 0) + changed;
+      }
+      writes[name] = writes[name] ?? 0;
+      prev[name] = value;
+    }
+  }
+  return writes;
+}
+
 type DpShape = 'none' | 'matrix2d' | 'rolling1d';
 
 /**
@@ -477,6 +508,60 @@ function collectAccumulators(frames: TraceFrame[]) {
   };
 }
 
+/** 折半实参链取证：连续进入事件的第一个数值实参满足 a[k+1] = floor(a[k] / 2)。 */
+function detectHalvingArgs(frames: TraceFrame[]) {
+  const args: number[] = [];
+  for (const f of frames) {
+    if (!f.event.startsWith('函数进入')) continue;
+    const top = f.callStack[f.callStack.length - 1] || '';
+    const m = top.match(/\((\d+)/);
+    if (m) args.push(Number(m[1]));
+  }
+  let steps = 0;
+  while (steps + 1 < args.length && args[steps] > 1 && args[steps + 1] === Math.floor(args[steps] / 2)) {
+    steps++;
+  }
+  return {
+    detected: args.length >= 3 && (args[0] ?? 0) >= 8 && steps >= 2,
+    base: args[0] ?? 0,
+    steps,
+    chain: args.slice(0, steps + 1),
+  };
+}
+
+/** 迭代侧折半取证：任意数值变量在其帧序列上按 floor(v/2) 收敛。 */
+function detectHalvingVariable(frames: TraceFrame[]) {
+  const series = new Map<string, number[]>();
+  for (const f of frames) {
+    for (const [k, v] of Object.entries(f.variables)) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      const arr = series.get(k) || [];
+      if (arr[arr.length - 1] !== v) arr.push(v);
+      series.set(k, arr);
+    }
+  }
+  for (const [name, vals] of series) {
+    if (
+      vals.length >= 3 &&
+      vals[0] >= 8 &&
+      vals[1] === Math.floor(vals[0] / 2) &&
+      vals[2] === Math.floor(vals[1] / 2)
+    ) {
+      return { detected: true, name, chain: vals.slice(0, 4) };
+    }
+  }
+  return { detected: false, name: '', chain: [] as number[] };
+}
+
+function synthesizeHalvingLoop(base: number) {
+  return (
+    `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（${base} 按 floor(n/2) 收敛）\n` +
+    `let curr = ${base};\nlet steps = 0;\n` +
+    `while (curr > 1) {\n  curr = Math.floor(curr / 2);\n  steps += 1;\n}\n` +
+    `console.log("halving steps =", steps);`
+  );
+}
+
 export async function runAIDiagnostics(
   sourceCode: string,
   frames: TraceFrame[],
@@ -548,13 +633,40 @@ export async function runAIDiagnostics(
     };
   }
 
+  // 单链折半递归（O(log n) 栈深）：必须在通用递归分支之前判定，否则会被当成线性递归
+  const halvingRec = detectHalvingArgs(frames);
+  if (metrics.maxStackDepth >= 3 && metrics.redundantCallCount === 0 && halvingRec.detected) {
+    return {
+      ...metrics,
+      timeComplexity: 'O(log n) Logarithmic Recursion',
+      spaceComplexity: `O(log n) Call Stack Depth ${metrics.maxStackDepth}`,
+      summary: `调用栈实参链取证：${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销；可展开为单游标循环把栈压到 O(1)。`,
+      frameInsights: [
+        {
+          frameIndex: metrics.bottleneckFrameIndex,
+          line: metrics.hotspotLine,
+          tag: 'LOGARITHMIC_DESCENT',
+          issue: `实参链 ${halvingRec.chain.join(' → ')} 按 floor(n/2) 收敛，每层无分支展开`,
+        },
+        {
+          frameIndex: frames.length - 1,
+          line: metrics.hotspotLine,
+          tag: 'TAIL_UNROLL_CANDIDATE',
+          issue: '单链折半可展开为 while (curr > 1) curr = Math.floor(curr / 2) 的游标循环，栈深压到 2',
+        },
+      ],
+      optimizedCode: synthesizeHalvingLoop(halvingRec.base),
+      optimizationGain: `Stack: ${metrics.maxStackDepth} -> 2 (iteration) | Steps stay Θ(log2 ${halvingRec.base})`,
+    };
+  }
+
   if (metrics.maxStackDepth >= 4) {
     const fnSig = Object.keys(metrics.signatureHits)[0] || 'fn()';
     const fnName = (fnSig.match(/^([A-Za-z_$][\w$]*)\(/) || [])[1] || 'fn';
     const argHint = metrics.sampleArg !== null && metrics.sampleArg > 0 ? metrics.sampleArg : 8;
 
-    // 分支 A：真·指数级重叠子问题 —— 同实参重复进入，且重复那次确实又展开了一整棵子树
-    if (metrics.redundantCallCount >= 2 && metrics.expansiveRedundantCount >= 1) {
+    // 分支 A：真·指数级重叠子问题 —— 存在「重复进入且又展开子树」的实证（expansiveRedundantCount >= 1）
+    if (metrics.expansiveRedundantCount >= 1) {
       const targetFnName = metrics.dominantRecursiveName;
       const memoInfo = extractFunctionInfo(sourceCode, targetFnName);
       // M9：取消 fib 的历史特判——所有重叠递归统一走 Stage-1 记忆化，才能看到 HIT 剪枝与 SUBTREE PRUNING 横幅
@@ -594,8 +706,10 @@ export async function runAIDiagnostics(
       };
     }
 
-    // 分支 A'：重复入参全部命中缓存、未再展开子树 —— 记忆化已生效，不得继续判指数级
-    if (metrics.redundantCallCount >= 2) {
+    // 分支 A'：存在重复进入但全部命中缓存、未再展开子树 —— 记忆化已生效，不得继续判指数级
+    // （门控从 M5 的 redundant >= 2 放宽为 >= 1：comb(4,2) 记忆化后冗余恰好为 1，
+    //   原阈值依赖 fib/climb 的树形，会把它错判成线性递归）
+    if (metrics.redundantCallCount >= 1) {
       // Stage-2：记忆化仍占用 O(n) 调用栈，可继续降维为数组递推（一维二元 / 二维帕斯卡）
       const stageInfo = extractFunctionInfo(sourceCode, metrics.dominantRecursiveName);
       const stageRec = stageInfo ? sniffBinaryRecurrence(stageInfo) : null;
@@ -713,20 +827,23 @@ export async function runAIDiagnostics(
   }
 
   if (dpShape === 'matrix2d') {
-    // 一维滚动数组样例是 min-path 专用题解：只有源码里确有二维输入 grid 时才提供；
-    // 否则（例如帕斯卡 comb 的二维表）绝不把无关算法塞进用户编辑器（不变量 #13c）。
-    const rollingSampleAvailable = /grid\s*=\s*\[/.test(sourceCode);
+    // 纯运行时读写分离取证：只有同时存在「只读二维输入」与「可变二维状态表」时，
+    // 一维滚动数组压缩才有意义（min-path 特征）；仅有一个可变表（如帕斯卡 comb）时不再推荐任何改动。
+    const writeMap = analyzeMatrixWrites(frames);
+    const readOnlyMatrices = Object.entries(writeMap).filter(([, n]) => n === 0).map(([k]) => k);
+    const mutableMatrices = Object.entries(writeMap).filter(([, n]) => n > 0).map(([k]) => k);
+    const rollingSampleAvailable = readOnlyMatrices.length > 0 && mutableMatrices.length > 0;
     return {
       ...metrics,
       timeComplexity: 'O(M * N) Matrix DP',
       spaceComplexity: 'O(M * N) 2D Tabulation',
-      summary: `二维状态转移表（2D Tabulation）扫描完成。共采集 ${frames.length} 帧，状态转移热点位于 L${metrics.hotspotLine}（累计执行 ${metrics.maxHitCount} 次）。${rollingSampleAvailable ? '检测到只读输入矩阵，可通过滚动数组将空间复杂度进一步压缩至 O(N)。' : '当前二维表已是该递推的终端形态（无可滚动压缩的只读输入矩阵），无需继续重构。'}`,
+      summary: `二维状态转移表（2D Tabulation）扫描完成。共采集 ${frames.length} 帧，状态转移热点位于 L${metrics.hotspotLine}（累计执行 ${metrics.maxHitCount} 次）。运行时读写取证：只读输入矩阵 [${readOnlyMatrices.join(', ') || '无'}]，可变状态表 [${mutableMatrices.map((k) => `${k}×${writeMap[k]}`).join(', ') || '无'}]。${rollingSampleAvailable ? '存在只读输入矩阵，可通过滚动数组将空间复杂度进一步压缩至 O(N)。' : '仅存在可变二维表（无只读输入可滚动），当前已是该递推的终端形态。'}`,
       frameInsights: [
         {
           frameIndex: Math.floor(frames.length * 0.4),
           line: metrics.hotspotLine,
           tag: 'STATE_TRANSITION',
-          issue: '二维网格依赖左邻 dp[r][c-1] 与上邻 dp[r-1][c] 完成最优子结构合并',
+          issue: `二维网格依赖左邻 dp[r][c-1] 与上邻 dp[r-1][c] 完成最优子结构合并（写计数 ${mutableMatrices.map((k) => `${k}=${writeMap[k]}`).join(', ') || '—'}）`,
         },
       ],
       optimizedCode: rollingSampleAvailable
@@ -734,7 +851,7 @@ export async function runAIDiagnostics(
         : sourceCode,
       optimizationGain: rollingSampleAvailable
         ? 'Space Complexity: O(M*N) -> O(N) 1D Rolling Buffer'
-        : 'Terminal 2D Tabulation Reachable Bound | no companion grid to roll',
+        : `Terminal 2D Tabulation | read-only inputs: ${readOnlyMatrices.length}, mutable tables: ${mutableMatrices.length}`,
     };
   }
 
@@ -754,6 +871,27 @@ export async function runAIDiagnostics(
       ],
       optimizedCode: sourceCode,
       optimizationGain: 'Space Compression Verified (O(M*N) -> O(N)) | Time Bound Already Optimal',
+    };
+  }
+
+  // 迭代侧折半取证：折半循环本身也应按对数级表述，而不是笼统的线性扫描
+  const halvingLoop = detectHalvingVariable(frames);
+  if (halvingLoop.detected) {
+    return {
+      ...metrics,
+      timeComplexity: 'O(log n) Iterative Halving',
+      spaceComplexity: 'O(1) Scalar Accumulator',
+      summary: `折半迭代取证：变量 ${halvingLoop.name} 的帧序列为 ${halvingLoop.chain.join(' → ')}，按 floor(v/2) 收敛，循环次数与 log2(${halvingLoop.chain[0]}) 同阶，全程无调用栈开销。`,
+      frameInsights: [
+        {
+          frameIndex: Math.floor(frames.length / 2),
+          line: metrics.hotspotLine,
+          tag: 'HALVING_CONVERGENCE',
+          issue: `游标 ${halvingLoop.name} 每轮折半，总步数与 log n 同阶`,
+        },
+      ],
+      optimizedCode: sourceCode,
+      optimizationGain: 'Already Iterative Halving (O(log n) Time, O(1) Space)',
     };
   }
 

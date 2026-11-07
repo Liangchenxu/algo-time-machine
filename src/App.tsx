@@ -29,6 +29,7 @@ import { instrumentCode, TraceFrame } from './core/instrumenter';
 import {
   runAIDiagnostics,
   analyzeTraceMetrics,
+  analyzeMatrixWrites,
   AIDiagnosticReport,
 } from './services/aiDiagnostics';
 
@@ -154,6 +155,22 @@ function fib(n) {
 
 let result = fib(5);
 console.log("fib(5) =", result);`,
+  },
+  {
+    id: 'pascal-comb',
+    title: 'Pascal Comb (Tree→2D)',
+    category: '2-Param Recursion → 2D DP Matrix',
+    complexity: 'O(2^n)→O(N·K)',
+    code: `// 双参组合数递推：连点两次 Apply，见证「2D 调用树 → HIT 剪枝 → 2D DP 矩阵」跨维转场
+function comb(n, k) {
+  if (k === 0 || k === n) {
+    return 1;
+  }
+  return comb(n - 1, k - 1) + comb(n - 1, k);
+}
+
+let ans = comb(4, 2);
+console.log("comb(4, 2) =", ans);`,
   },
   {
     id: 'infinite-loop',
@@ -370,6 +387,7 @@ const QUICK_WATCH: Record<string, string[]> = {
   'dp-matrix': ['dp[1][2] === 6', 'r === 2 && c === 3'],
   'binary-search': ['guess === target', 'low === high'],
   'fib-tree': ['n === 2', 'leftBranch === 2'],
+  'pascal-comb': ['k === n', 'k === 0'],
   'infinite-loop': ['anomalySum > 500', 'count === 0'],
 };
 
@@ -404,6 +422,81 @@ function evalWatchExpression(expr: string, vars: Record<string, any>): WatchResu
   } catch (e: any) {
     return { state: 'ERROR', detail: (e?.message || 'evaluation failed').slice(0, 48) };
   }
+}
+
+function hasTrueFrame(frames: TraceFrame[], expr: string): boolean {
+  for (const f of frames) {
+    if (evalWatchExpression(expr, f.variables ?? {}).state === 'TRUE') return true;
+  }
+  return false;
+}
+
+/**
+ * 自适应 Quick-Watch：优先保留预设精选断言，但每一条都必须通过「至少一帧为 TRUE」的验证；
+ * 死变量（如 Stage-2 后消失的 leftBranch）会被自动淘汰，不足 2 条时用当前轨迹真实变量补位。
+ * 规则 A（2D dp + r/c）→ 规则 B（1D dp + 游标）→ 规则 C（递归/标量阶段的真实数值变量）。
+ */
+function deriveRuntimeQuickWatches(frames: TraceFrame[], curated: string[]): string[] {
+  if (!frames.length) return [];
+  const derived: string[] = [];
+  // 断言要"有信息量"：优先取最后几个仍持有 dp 的帧（此时表已写满），
+  // 否则会推荐 dp[4][1] === 0 这种"未写入格子"的真值，虽然 →T 能命中但说明不了问题。
+  const lateWithDp: number[] = [];
+  for (let i = frames.length - 1; i >= 0 && lateWithDp.length < 3; i--) {
+    if (Array.isArray(frames[i]?.variables?.dp)) lateWithDp.push(i);
+  }
+  const probes = lateWithDp.length
+    ? [...lateWithDp, Math.floor(frames.length * 0.65), Math.floor(frames.length * 0.4), 0]
+    : [Math.floor(frames.length * 0.65), Math.floor(frames.length * 0.4), frames.length - 1, 0];
+
+  for (const idx of probes) {
+    const v = frames[idx]?.variables ?? {};
+    const mat = v.dp;
+    if (Array.isArray(mat) && Array.isArray(mat[0]) && typeof v.r === 'number' && typeof v.c === 'number') {
+      const val = (mat as any[])[v.r]?.[v.c];
+      if (typeof val === 'number') {
+        derived.push(`dp[${v.r}][${v.c}] === ${val}`, `r === ${v.r} && c === ${v.c}`);
+        break;
+      }
+    }
+  }
+
+  if (!derived.length) {
+    for (const idx of probes) {
+      const v = frames[idx]?.variables ?? {};
+      const arr = v.dp;
+      if (Array.isArray(arr) && arr.length > 0 && !Array.isArray(arr[0])) {
+        const cursor = ['i', 'c', 'idx', 'cursor'].find((k) => typeof v[k] === 'number');
+        if (cursor) {
+          const ci = v[cursor] as number;
+          if (ci >= 0 && ci < arr.length && typeof arr[ci] === 'number') {
+            derived.push(`dp[${ci}] === ${arr[ci]}`, `${cursor} === ${ci}`);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!derived.length) {
+    for (const idx of probes) {
+      const v = frames[idx]?.variables ?? {};
+      const nums = Object.entries(v).filter(([, x]) => typeof x === 'number') as [string, number][];
+      if (nums.length) {
+        for (const [k, val] of nums.slice(0, 2)) derived.push(`${k} === ${val}`);
+        break;
+      }
+    }
+  }
+
+  const valid: string[] = [];
+  for (const expr of [...curated, ...derived]) {
+    if (valid.includes(expr)) continue;
+    if (!hasTrueFrame(frames, expr)) continue;
+    valid.push(expr);
+    if (valid.length >= 2) break;
+  }
+  return valid;
 }
 
 interface DevlogEntry {
@@ -622,7 +715,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M9',
-    commit: '本次提交',
+    commit: '9bb7835',
     doc: 'docs/devlogs/M9-two-stage-fib-and-2d-synthesis.md',
     title: 'fib 预设并入二级火箭、双参帕斯卡二维表降维与 Seek 四态导航',
     why: 'M8 之后还有三处体验与能力缺口：fib 预设因历史特判一步跳到底向上数组，评委看不到 HIT 剪枝与 SUBTREE PRUNING 的关键一幕；Stage-2 只认单参数递推，comb(n, k) 这类双参数组合递推无从数组化；→T 的「绕回」「仅当前帧」「无解」三种情况共用一个反馈，且 Watch 需要手打表达式，零打字体验不成立。',
@@ -647,6 +740,33 @@ const DEVLOGS: DevlogEntry[] = [
       '2D 联动：Stage-2 后显微镜渲染 2D Matrix: dp [5×3] 共 15 格，第 7 帧出现 Cursor [3][1] 十字准星，Δ 1 State Mutation 正常；Apply 在该档已被门控隐藏（无 grid 输入）。',
       '→T 四态实测：DP 预设 FRAME 1 点 Quick-Watch 芯片 + dp[1][2] === 6 后点 →T 显示 → #11 并落在写入帧；同帧再点 → #12；跳到末帧再点显示 ↺ #11 wrapped；单帧成立的 i === 2 && x === 10 二次点击显示 = only @ #4 且帧号不变；x === 999 显示 no TRUE frame。',
       '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、死循环 1334 帧 O(∞) 均未变；14 条不变量逐条复核通过。',
+    ],
+  },
+  {
+    tag: 'M10',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M10-runtime-introspection-and-pascal-preset.md',
+    title: '帕斯卡预设、自适应 Watch 合成、二维读写分离取证与折半递归消栈',
+    why: 'M9 之后三条遗留都指向同一件事：判据与推荐仍然依赖「预设知识」而不是「这一跑的运行时事实」——Quick-Watch 在 Stage-2 后还推荐已消失的 leftBranch，二维滚动样例靠源码 grid 字样判断，折半递归被当成线性递归且没有消栈出口。',
+    what: [
+      'App.tsx：新增第 6 个内置预设 pascal-comb（comb(4,2) 双参递推 → 两次 Apply 见证 2D 调用树 → HIT 剪枝 → dp[r][c] 矩阵）。',
+      'App.tsx：deriveRuntimeQuickWatches 由当前轨迹推导建议——规则 A 取「最后一个仍持有 dp 的帧」的 dp[r][c] 与 (r,c)，规则 B 取一维 dp 与游标，规则 C 取递归阶段的真实数值变量；每条候选都要通过「至少一帧为 TRUE」验证，死变量自动淘汰。',
+      'aiDiagnostics.ts：新增 analyzeMatrixWrites 统计每个二维数组在相邻帧间的单元格变化数，二维档改用「只读输入 + 可变状态表」的运行时证据替代 includes(grid) 源码判断（已彻底移除该字符串检查）。',
+      'aiDiagnostics.ts：新增 detectHalvingArgs / detectHalvingVariable / synthesizeHalvingLoop，折半递归判为 O(log n) Logarithmic Recursion 并生成 while (curr > 1) 游标循环；迭代侧也新增 O(log n) Iterative Halving 档，避免 Apply 后掉回「线性扫描」。',
+      'App.tsx：2D Matrix 卡片右上角新增 READ-ONLY / WRITES: n 徽章（暗灰 / 天蓝），tooltip 说明该数字来自运行时相邻帧单元格比对。',
+    ],
+    conflicts: [
+      '新预设立刻暴露了 M5 递归门控的阈值不稳定：comb(4,2) 记忆化后重复进入恰好只有 1 次（只有 comb(2,1) 被二次调用），而 A′ 档要求 redundantCallCount >= 2，于是被错判成 O(n) Linear Recursion。改为按证据分层：expansiveRedundantCount >= 1 → 指数档；否则 redundantCallCount >= 1 → 记忆化档；否则线性档。旧阈值实际是围绕 fib/climb 的树形调出来的。',
+      '首版自适应芯片取 65% 帧，给 comb Stage-2 推荐了 dp[4][1] === 0（当时该格尚未写入）——真值但无信息量。改为从末尾向前找仍持有 dp 的帧（表已写满），comb 现在给 dp[4][2] === 6、fib 给 dp[5] === 5。',
+      '规则 B 若只按「1D dp + 游标」机械取帧，会取到未写完的中间值；末尾回溯同样修好了这一点，因此「100% 命中」与「命中处有意义」现在是两件事都成立。',
+      '折半消栈后 PEAK STACK 从 7 直降到 1（而非 2）：生成的是顶层游标循环，没有函数调用帧，比递归版少一层 main 之外的包装。',
+    ],
+    impact: [
+      '第 6 预设实测：顶栏出现 6 个预设（切换器 clientW 86 / scrollW 1127 可横滚，顶栏仍 44px 且 scrollWidth == clientWidth == 770）。Stage-0 13 帧 O(2^n) / Stack Depth 5 / DUP 3 → Stage-1 37 帧 O(n) Memoized Linear / Memo Table + 5 Stack Frames、DUP 0 / HIT 1、SUBTREE PRUNING 1 → 0 → Stage-2 17 帧 O(M * N) Matrix DP、WRITES: 5 徽章、Apply 退场、芯片进化为 dp[4][2] === 6 / r === 4 && c === 2。',
+      'Quick-Watch 跨阶段进化实测：fib 在 Stage-0/1 为 n === 2 / leftBranch === 2，Stage-2 后自动变成 dp[5] === 5 / i === 5；点选 dp[5] === 5 后 →T 从 FRAME 1 命中 FRAME 10 并翻绿（第 1 帧的 ERROR 是 TDZ 未声明的诚实反馈，不是死变量）。',
+      '二维读写分离实测（DP 预设第 10 帧）：grid [3×4] 显示 READ-ONLY（暗灰），dp [3×4] 显示 WRITES: 6（天蓝），两者 Cursor [1][2] 十字准星正常；combTabulated 只有单个可变二维表，因此没有再被推荐 min-path 滚动样例。',
+      '折半递归实测 halve(32)：判为 O(log n) Logarithmic Recursion / O(log n) Call Stack Depth 7，实参链 32 → 16 → 8 → 4 → 2 → 1（连续 5 步），标签 LOGARITHMIC_DESCENT + TAIL_UNROLL_CANDIDATE；Apply 后生成 while (curr > 1) 循环，18 帧、横幅 STACK REDUCTION -85.7% / PEAK STACK 7 → 1、终端 halving steps = 5，判据转为 O(log n) Iterative Halving / O(1) Scalar Accumulator。',
+      '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、fib 31 帧 O(2^n) DUP 9、死循环 1334 帧 O(∞) 全部与 M9 基线一致。',
     ],
   },
 ];
@@ -1052,6 +1172,13 @@ export default function App() {
       })),
     [pinnedVars, watchVars]
   );
+  // 场景种子 + 运行时自适应补位：保证芯片里的变量在当前阶段真实存在且 →T 必中
+  const quickWatches = useMemo(
+    () => deriveRuntimeQuickWatches(frames, QUICK_WATCH[selectedPresetId] ?? []),
+    [frames, selectedPresetId]
+  );
+  // 二维矩阵读写分离取证（纯运行时）：0 次写入 = 只读输入，>0 = 可变状态表
+  const matrixWrites = useMemo(() => analyzeMatrixWrites(frames), [frames]);
 
   const togglePin = (name: string) => {
     setPinnedVars((prev) => {
@@ -1516,7 +1643,7 @@ export default function App() {
               >
                 Add
               </button>
-              {(QUICK_WATCH[selectedPresetId] ?? [])
+              {quickWatches
                 .filter((q) => !watchExprs.includes(q) && watchExprs.length < 4)
                 .map((q) => (
                   <button
@@ -1780,6 +1907,20 @@ export default function App() {
                             {mat.data.length}×{mat.data[0]?.length || 0}]
                           </span>
                           <span className="flex items-center gap-2 shrink-0">
+                            <span
+                              className={`rounded px-1 text-[9px] font-mono ${
+                                (matrixWrites[mat.name] ?? 0) === 0
+                                  ? 'bg-zinc-800 text-zinc-400'
+                                  : 'bg-sky-500/15 text-sky-300'
+                              }`}
+                              title={
+                                (matrixWrites[mat.name] ?? 0) === 0
+                                  ? 'Runtime forensics: zero cell writes across the trace — read-only input'
+                                  : `Runtime forensics: ${matrixWrites[mat.name]} cell write(s) across the trace — mutable state table`
+                              }
+                            >
+                              {(matrixWrites[mat.name] ?? 0) === 0 ? 'READ-ONLY' : `WRITES: ${matrixWrites[mat.name]}`}
+                            </span>
                             {activeR !== undefined && activeC !== undefined && (
                               <span className="text-[10px] font-mono text-amber-300 whitespace-nowrap">
                                 Cursor [{activeR}][{activeC}]
@@ -2422,6 +2563,24 @@ export default function App() {
                       <br />• M9: fib preset folded into the same two-stage pipeline (no more fib-only
                       shortcut), two-parameter Pascal recurrences lowered to 2D dp tables, four-state
                       seek feedback, and preset-scoped quick-watch chips for zero-typing demos.
+                      <br />• M10: Pascal preset, runtime-derived quick-watch chips that evolve across
+                      refactor stages, matrix write forensics replacing source-string gating, and
+                      O(log n) halving recursion detection with loop lowering.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-violet-400 font-semibold">10. Runtime Introspection Contracts (M10)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Recommendations and gates now read the trace, not preset knowledge.
+                      analyzeMatrixWrites compares every 2D array against the previous frame: zero cell
+                      changes means READ-ONLY input, any change means a mutable state table, and the
+                      rolling-array refactor is offered only when both kinds coexist (the grid string
+                      check is gone). Quick-watch chips are derived from real frame values - preferring the
+                      last frame that still holds dp so the suggested cell is already written - and each
+                      candidate must have at least one TRUE frame, so dead variables disappear and →T
+                      always lands. Halving recursions (arg chain a, floor(a/2), ...) get their own
+                      O(log n) verdict and a cursor-loop lowering; after applying, the iterative side reports
+                      O(log n) Iterative Halving instead of dropping to a linear scan.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

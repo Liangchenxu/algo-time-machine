@@ -16,7 +16,8 @@
 | M6 | `772ef79` | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
 | M7 | `7de93be` | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
 | M8 | `6da81b1` | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
-| M9 | 本次提交 | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
+| M9 | `9bb7835` | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
+| M10 | 本次提交 | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -98,15 +99,32 @@
     M8 的 `max(baseMax, offsets) + 1` 公式在 climb 上偶然正确、在 fib 上会写出 `dp[2] = 2`（真值 1），
     证明"样本覆盖不足的通过"不等于契约成立——新增递推形态时必须对每个形态单独核对首几项数值。
     （c）**合成产物不得替换成无关算法**：二维档的一维滚动样例是 min-path 专用题解，
-    仅在源码确有 `grid` 二维输入时提供，否则 `optimizedCode = sourceCode` 让 Apply 退场（#13c 的具体化）。
+    仅在「运行时同时存在只读输入矩阵 + 可变状态表」时提供（M10 起为纯运行时判据，见 #16a），
+    否则 `optimizedCode = sourceCode` 让 Apply 退场（#13c 的具体化）。
     （d）**`→T` 四态必须互斥且都可见**：`forward`（`→ #n` 天蓝）/ `wrapped`（`↺ #n (wrapped)` 琥珀）/
     `only`（`= only @ #n` 紫罗兰，不移动）/ `none`（`no TRUE frame` 玫红）。
     `only` 的判定必须来自**扫描完全程后唯一的 TRUE 帧**（从 current+1 环形起点、绕回 current 恰为最后一圈），
     不得用"第一次碰到自己"这种短路判定。
     （e）Quick-Watch 建议芯片只做"加入断言"这一件事，不自动跳帧：加入后用户仍显式点 `→T`，
     保持"观察点 = 断言 + 跳转"两步语义，避免芯片点击产生位置副作用。
+16. **二维矩阵读写分离纯运行时取证与 Quick-Watch 跨阶段无死变量契约**（M10 确立）：
+    （a）**读写分离只能由帧推出**：`analyzeMatrixWrites` 比较相邻帧的每个单元格，
+    `writeCount === 0` 判只读输入、`> 0` 判可变状态表；滚动数组方案仅在两类同时存在时提供。
+    `sourceCode.includes('grid')` 已删除且不得回归（#6/#13a 的又一次具体化）；
+    同时注意该数值是"相邻帧单元格变化数"，同一格反复改写会重复计数，只能做二分类判据、不可当精确写指令数报告。
+    （b）**Quick-Watch 芯片必须绑定当前轨迹**：候选 = 预设种子 + 运行时派生，且**每一条都要通过
+    「至少一帧 TRUE」验证**；派生的取值帧必须从末尾回溯到"仍持有目标容器"的帧
+    （否则会推荐未写入的 `dp[4][1] === 0` 这类真值但无信息量的断言）。
+    死变量（重构后消失的 `leftBranch`）因此自动退场，`→T` 恒可命中。
+    （c）**递归门控按证据类型分层，不得用计数阈值承担分类职责**：
+    `expansive >= 1 → 指数档`；`redundant >= 1 → 记忆化档`；`redundant === 0 → 线性/折半档`。
+    M5 的 `redundant >= 2` 在 fib/climb 上偶然成立，在 `comb(4,2)`（记忆化后冗余恰为 1）上会误判成线性递归。
+    （d）**折半递归必须先于线性递归判定**，且只对"返回值等于步数"的形态生成消栈代码；
+    首参非折半的多参形态（`power(2,16)`）当前不识别，不得静默套用计数型循环。
+    （e）Stage-2/重构后的首帧若因 TDZ 缺少新变量，Watch 显示 `ERROR` 属诚实反馈（#13d），
+    不得为了"好看"把它降级成 FALSE 或隐藏。
 
-## 当前实测基线（M9 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M10 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -114,6 +132,7 @@
 | Min Path Sum (2D DP) | 29 | 1 | `O(M * N) Matrix DP` / `O(M * N) 2D Tabulation` | 热点 L14（6x）；Apply 重跑后 15 帧 `O(M*N) Optimal Scan` / `O(N) Rolling Buffer` |
 | Binary Search Bounds | 10 | 1 | `O(log n) Logarithmic Halving` / `O(1) Constant Pointers` | 空间 11、探测 1 次、对数预算 16 |
 | Naive Fibonacci Tree | 31 | 6 | `O(2^n) Exponential` / `O(n) Stack Depth 6` | 调用树 15 节点 + 9 个 DUP；铁证 `fib(1) ×5, fib(2) ×3, fib(0) ×3, fib(3) ×2`，冗余 9 次；M9 起可点两次 Apply 走完整二级火箭（31 → 41 → 11 帧） |
+| Pascal Comb (Tree→2D) | 13 | 5 | `O(2^n) Exponential` / `O(n) Stack Depth 5` | 第 6 预设（M10）；`DUP 3`，两次 Apply 后 37 帧 `O(n) Memoized Linear`（`DUP 0 / HIT 1`）→ 17 帧 `O(M * N) Matrix DP`、`WRITES: 5` 徽章、Apply 退场 |
 | Infinite Loop Guard | 1334 | 1 | `O(∞) Non-Terminating` / `O(1) Constant Heap` | `[FUSE_STEP_LIMIT]` 横幅 + 1334 帧现场，热点 L5（666x） |
 | 手写 `depth(400)` | 149 | 150 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 150` | **M4 误判项已闭环**：149 个唯一签名、0 个 DUP 节点、树仅渲染前 64 个；`[FUSE_STACK_OVERFLOW]` 保留现场 |
 | 手写 `fact(6)` | 7 | 7 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 7` | 6 个唯一签名、冗余进入 0 次，判为单链线性而非指数 |
@@ -152,6 +171,10 @@
 | 2D 十字准星（M9） | Stage-2 后显微镜渲染 `2D Matrix: dp [5×3]` 共 15 格，第 7 帧出现 `Cursor [3][1]`，`Δ 1 State Mutation` 正常 |
 | Seek 四态（M9） | `→ #11`（前方）/ `→ #12`（同帧再点）/ `↺ #11 (wrapped)`（末帧点）/ `= only @ #4`（单帧断言二次点击，帧号不变）/ `no TRUE frame`（`x === 999`） |
 | Quick-Watch（M9） | 五个预设各 2 条建议芯片，DP 下为 `+ dp[1][2] === 6` / `+ r === 2 && c === 3`，点击即加入（零打字） |
+| 自适应芯片（M10） | fib：Stage-0/1 为 `n === 2` / `leftBranch === 2` → Stage-2 自动变为 `dp[5] === 5` / `i === 5`；点选后 `→T` 从 FRAME 1 命中 FRAME 10（TRUE）；comb Stage-2 为 `dp[4][2] === 6` / `r === 4 && c === 2`；halve 消栈后为 `curr === 4` / `steps === 3` |
+| 二维读写徽章（M10） | DP 第 10 帧：`grid [3×4] READ-ONLY`（暗灰）、`dp [3×4] WRITES: 6`（天蓝），`Cursor [1][2]` 正常；`includes('grid')` 全仓 0 处 |
+| 折半递归（M10） | `halve(32)` → `O(log n) Logarithmic Recursion` / `O(log n) Call Stack Depth 7`，实参链 `32 → 16 → 8 → 4 → 2 → 1`，标签 `LOGARITHMIC_DESCENT` + `TAIL_UNROLL_CANDIDATE` |
+| 折半消栈（M10） | Apply → `while (curr > 1)`、18 帧、`STACK REDUCTION -85.7%`、`PEAK STACK: 7 → 1`、终端 `halving steps = 5`、判据 `O(log n) Iterative Halving` / `O(1) Scalar Accumulator` |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -198,9 +221,14 @@
 - [x] fib 预设被历史特判跳过 Stage-1，评委看不到 HIT 剪枝与 SUBTREE PRUNING（M9 取消 `targetFnName === 'fib'` 特判，实测 31 → 41 → 11 帧三段完整）
 - [x] Stage-2 种子公式对 fib 会写出 `dp[2] = 2`（M9 实测暴露并修正为 `baseMax + 1` 起算 + 依赖完备门；climb 无回归，fib 终端 `5` 正确）
 - [x] 二维档把 min-path 专用滚动样例强推给任意二维表（M9：无 `grid` 输入时 `optimizedCode = sourceCode`、Apply 退场）
-- [ ] Stage-2 仍不支持变步长（`n / 2`）与三参数及以上多维状态（见 M9「遗留」）
-- [ ] Quick-Watch 建议按预设 id 取，自定义代码下提示性减弱（见 M9「遗留」）
-- [ ] 二维档滚动样例的门控依赖源码形态，通用「只读输入 + 可滚动状态表」检测未实现（见 M9「遗留」）
+- [x] Stage-2 仍不支持变步长（`n / 2`）与三参数及以上多维状态（M9 报备 → **M10 部分闭环**：折半递归新增 `O(log n) Logarithmic Recursion` 与游标消栈，实测 `halve(32)` → `halving steps = 5`；三参数及以上仍不支持）
+- [x] Quick-Watch 建议按预设 id 取，自定义代码下提示性减弱（M9 报备 → **M10 闭合**：`deriveRuntimeQuickWatches` 改为运行时派生 + 逐条「至少一帧 TRUE」验证，fib Stage-2 自动从 `leftBranch` 切到 `dp[5] === 5` / `i === 5`）
+- [x] 二维档滚动样例的门控依赖源码形态（M9 报备 → **M10 闭合**：`analyzeMatrixWrites` 纯运行时统计单元格变化，`includes('grid')` 全仓 0 处）
+- [x] 递归门控 `redundant >= 2` 的阈值不稳定（M10 实测暴露：comb(4,2) 记忆化后冗余恰为 1，被误判线性；改为 `expansive>=1 → 指数 / redundant>=1 → 记忆化 / 0 → 线性`）
+- [x] 自适应芯片取中间帧会推荐未写入的格子（M10：改为从末尾回溯到仍持有 dp 的帧，comb 给 `dp[4][2] === 6`）
+- [ ] 折半判定只看首个数值实参，`power(2,16)` 这类"第二参折半"不会被识别，仍落回线性递归（见 M10「遗留」）
+- [ ] 折半消栈只对"返回值等于步数"的形态等价，返回值依赖其它量时应拒绝生成（见 M10「遗留」）
+- [ ] 自适应规则 C 按变量出现顺序取前两个数值变量，复杂作用域下解释力不一定最优（见 M10「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 
