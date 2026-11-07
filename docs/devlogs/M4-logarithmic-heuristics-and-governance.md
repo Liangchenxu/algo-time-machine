@@ -1,6 +1,6 @@
 # M4 · 算法判据闭环、重构前后实测基准与工程治理制度
 
-Commit：本次提交（`git log -1` 可查）— feat(governance): 完成 Milestone 4 算法判据闭环、重构Benchmark对比与docs/devlogs反幻觉心路档案库
+Commit `23e0a6d` — feat(governance): 完成 Milestone 4 算法判据闭环、重构Benchmark对比与docs/devlogs反幻觉心路档案库
 
 ## Why · 背景动机
 
@@ -79,10 +79,15 @@ M3 交出去的界面已经是工业级工具，但留下了三处「说法与�
 | 全仓 emoji 审计 | `instrumenter.ts` / `sandboxRunner.ts` / `App.tsx` / `aiDiagnostics.ts` 全部 `(none)` |
 | 构建 | `npm run build` 零 TypeScript 报错 |
 
-## 唯一未闭合项（如实记录，等待下一轮裁决）
+## 唯一未闭合项（已于 M5 闭环，见 `M5-call-tree-and-breakpoints.md`）
 
 线性但很深的递归（`depth(400)`，单分支自调用）仍会被标为 `Time: O(2^n) Exponential`，
 因为 M4 只把**入口条件**换成运行时栈深，而该分支的**结论文案**仍是「指数级重叠子问题」。
 空间侧 `O(n) Stack Depth 150` 是正确的。要彻底闭环需要再引入一个运行时信号：
 同一函数以相同实参被重复进入的次数（重叠子问题的直接证据），据此在
 `O(2^n) Exponential` 与 `O(n) Linear Recursion` 之间分档。属于新增判据分支，未擅自实施。
+
+> **M5 状态：已闭环。** 为此 M4 的调用栈必须先能表达「同函数不同实参」，
+> 所以 M5 的第一步是把 `__callStack` 从 `fib()` 升级为 `fib(5)`，再按签名进入次数分档。
+> 实测 `depth(400)` 149 个唯一签名、冗余 0 次 → `O(n) Linear Recursion`；
+> `fib(5)` 冗余 9 次 → 维持 `O(2^n) Exponential` 且附带重复清单铁证。

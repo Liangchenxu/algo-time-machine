@@ -13,6 +13,9 @@ Vite + React 18 + TypeScript + Tailwind CSS + `@babel/standalone` + `lucide-reac
 
 函数体额外以 `try ... finally { __exitFn() }` 包裹，保证递归返回时调用栈精准弹出；
 `__trace` 内累计 `__lineHits`，使每一帧自带「截至该帧」的行级执行热力，供热力图与 AI 手术刀定位热点行。
+`__enterFn(name, line, args)` 会把实参一并压栈，调用栈条目是带参签名（`fib(5)` / `dfs(1,2)`，无参 `fn()`，
+单实参序列化截断 24 字符），因此重叠子问题可以直接计数，前端也能由 `callStack` 的演化序列
+确定性还原调用树拓扑与每个激活节点的进出帧区间。
 
 ## 数据流
 
@@ -61,18 +64,30 @@ Key 仅驻留内存，不写入 localStorage。
 
 ```
 1. [FUSE_STEP_LIMIT]        → O(∞) Non-Terminating
-2. maxStackDepth >= 4       → 递归重叠子问题档
+2. maxStackDepth >= 4       → 递归档，再按重叠子问题证据二选一：
+     redundantCallCount >= 2 → O(2^n) Exponential（附重复签名清单）
+     redundantCallCount < 2  → O(n) Linear Recursion（单链下潜，建议尾递归/迭代化）
 3. low/high/mid 三元组，或 帧数 <= ceil(log2 n) * 4  → O(log n) Logarithmic Halving
 4. dp 形态 = 二维表          → O(M*N) Matrix DP（并给出一维滚动数组重构）
 5. dp 降为一维且仍有二维输入  → O(M*N) Optimal Scan / O(N) 1D Rolling Buffer
 6. 兜底                      → O(n) Linear Two-Pointer
 ```
 
+签名进入次数必须按「函数进入」事件帧统计：兄弟调用退栈再压栈时栈深不变，
+用相邻帧栈深增量会整段漏计重复求值（这是 M4 误判 `depth(400)` 的根因，M5 已闭环）。
+
+## 调试器能力
+
+- 行号可点击设断点（`breakpoints: Set<number>`），火焰条顶部渲染断点标记，
+  `Continue to Breakpoint` 与 `F8` / `b` 向后扫描第一个命中帧；切换预设即清空断点。
+- `Call-Tree Topology` 面板仅在 `maxStackDepth >= 2` 且存在多个激活节点时出现，
+  三态着色（active / DUP redundant / retired）并支持点击节点跳到其进入帧。
+
 `optimizedCode === sourceCode` 时界面自动隐藏 Apply 按钮，避免出现「已最优仍提示再优化」。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M4 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M5 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

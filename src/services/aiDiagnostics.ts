@@ -11,12 +11,40 @@ export interface AIDiagnosticReport {
   frameInsights: { frameIndex: number; line: number; tag: string; issue: string }[];
   optimizedCode: string;
   optimizationGain: string;
+  /** 重叠子问题取证：带参签名 -> 实测进入次数，由时间帧轨迹还原而非源码单词匹配 */
+  signatureHits?: Record<string, number>;
+  redundantCallCount?: number;
+  topDuplicates?: string[];
 }
 
-export function analyzeTraceMetrics(frames: TraceFrame[]) {
-  if (!frames.length) {
-    return { hotspotLine: 1, maxHitCount: 0, maxStackDepth: 1, bottleneckFrameIndex: 0 };
-  }
+export interface RecursionForensics {
+  signatureHits: Record<string, number>;
+  redundantCallCount: number;
+  topDuplicates: string[];
+  sampleArg: number | null;
+}
+
+export interface TraceMetrics extends RecursionForensics {
+  hotspotLine: number;
+  maxHitCount: number;
+  maxStackDepth: number;
+  bottleneckFrameIndex: number;
+}
+
+const EMPTY_METRICS: TraceMetrics = {
+  hotspotLine: 1,
+  maxHitCount: 0,
+  maxStackDepth: 1,
+  bottleneckFrameIndex: 0,
+  signatureHits: {},
+  redundantCallCount: 0,
+  topDuplicates: [],
+  sampleArg: null,
+};
+
+export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
+  if (!frames.length) return EMPTY_METRICS;
+
   const lastHits = frames[frames.length - 1].lineHits || {};
   let hotspotLine = 1;
   let maxHitCount = 0;
@@ -34,7 +62,43 @@ export function analyzeTraceMetrics(frames: TraceFrame[]) {
       bottleneckFrameIndex = idx;
     }
   });
-  return { hotspotLine, maxHitCount, maxStackDepth, bottleneckFrameIndex };
+
+  // 带参签名取证：每个「函数进入」帧的栈顶签名就是该函数的一次真实激活，按签名累计进入次数。
+  // 为何不比较相邻帧的栈深增量：兄弟调用（fib(4) 退栈后 fib(3) 在同等深度再次压栈）栈深不变，
+  // 增量法会整段漏计重复求值，只有以进入事件为准才能得到重叠子问题的铁证。
+  const signatureHits: Record<string, number> = {};
+  let sampleArg: number | null = null;
+  for (const f of frames) {
+    if (!f.event.startsWith('函数进入')) continue;
+    const top = f.callStack[f.callStack.length - 1];
+    if (!top || top === 'main()') continue;
+    signatureHits[top] = (signatureHits[top] || 0) + 1;
+    if (sampleArg === null) {
+      const m = top.match(/\((-?\d+)/);
+      if (m) sampleArg = Number(m[1]);
+    }
+  }
+
+  let redundantCallCount = 0;
+  const topDuplicates: string[] = [];
+  for (const [sig, count] of Object.entries(signatureHits)) {
+    if (count > 1) {
+      redundantCallCount += count - 1;
+      topDuplicates.push(`${sig} ×${count}`);
+    }
+  }
+  topDuplicates.sort((a, b) => Number(b.split('×')[1]) - Number(a.split('×')[1]));
+
+  return {
+    hotspotLine,
+    maxHitCount,
+    maxStackDepth,
+    bottleneckFrameIndex,
+    signatureHits,
+    redundantCallCount,
+    topDuplicates: topDuplicates.slice(0, 4),
+    sampleArg,
+  };
 }
 
 type DpShape = 'none' | 'matrix2d' | 'rolling1d';
@@ -170,27 +234,58 @@ export async function runAIDiagnostics(
   }
 
   if (metrics.maxStackDepth >= 4) {
+    const fnSig = Object.keys(metrics.signatureHits)[0] || 'fn()';
+    const fnName = (fnSig.match(/^([A-Za-z_$][\w$]*)\(/) || [])[1] || 'fn';
+    const argHint = metrics.sampleArg !== null && metrics.sampleArg > 0 ? metrics.sampleArg : 8;
+
+    // 分支 A：真·指数级重叠子问题 —— 存在同实参重复进入的铁证
+    if (metrics.redundantCallCount >= 2) {
+      return {
+        ...metrics,
+        timeComplexity: 'O(2^n) Exponential',
+        spaceComplexity: `O(n) Stack Depth ${metrics.maxStackDepth}`,
+        summary: `调用栈轨迹分析捕获到指数级重叠子问题（Overlapping Subproblems）。检测到相同入参子问题重复求值：${metrics.topDuplicates.join('，')}，累计冗余进入 ${metrics.redundantCallCount} 次；在 Frame #${metrics.bottleneckFrameIndex} 达到栈深峰值 ${metrics.maxStackDepth} 层，L${metrics.hotspotLine} 累计触发 ${metrics.maxHitCount} 次，总帧数因此膨胀至 ${frames.length} 帧。`,
+        frameInsights: [
+          {
+            frameIndex: Math.min(6, frames.length - 1),
+            line: metrics.hotspotLine,
+            tag: 'STACK_GROWTH',
+            issue: 'DFS 递归树沿左分支连续压栈，调用帧深度攀升至峰值',
+          },
+          {
+            frameIndex: metrics.bottleneckFrameIndex,
+            line: metrics.hotspotLine,
+            tag: 'REDUNDANT_SUBTREE',
+            issue: `重复入参子问题实测清单：${metrics.topDuplicates.join('，')}`,
+          },
+        ],
+        optimizedCode: `// Optimized: 状态压缩自底向上动态规划 O(n) Time / O(n) Space\nfunction fibDP(n) {\n  const dp = [0, 1];\n  for (let i = 2; i <= n; i++) {\n    dp[i] = dp[i - 1] + dp[i - 2];\n  }\n  console.log("DP optimal fib(" + n + ") =", dp[n]);\n  return dp[n];\n}\nfibDP(6);`,
+        optimizationGain: `Frames: ${frames.length} -> 15 (-${Math.max(50, Math.round((1 - 15 / Math.max(frames.length, 16)) * 100))}% Overhead) | Max Stack: ${metrics.maxStackDepth} -> 2 | Redundant Entries: ${metrics.redundantCallCount} -> 0`,
+      };
+    }
+
+    // 分支 B：单链线性深递归 —— 每个实参只进入一次，无重叠子问题，但付出 O(n) 栈帧开销
     return {
       ...metrics,
-      timeComplexity: 'O(2^n) Exponential',
-      spaceComplexity: `O(n) Stack Depth ${metrics.maxStackDepth}`,
-      summary: `调用栈轨迹分析捕获到指数级重叠子问题（Overlapping Subproblems）。在 Frame #${metrics.bottleneckFrameIndex} 达到栈深峰值 ${metrics.maxStackDepth} 层，L${metrics.hotspotLine} 累计重复触发 ${metrics.maxHitCount} 次，存在严重冗余递归分支。`,
+      timeComplexity: 'O(n) Linear Recursion',
+      spaceComplexity: `O(n) Call Stack Depth ${metrics.maxStackDepth}`,
+      summary: `调用栈呈单链线性下潜：${fnSig} 链路中共 ${Object.keys(metrics.signatureHits).length} 个互不相同的入参签名，实测冗余进入次数为 ${metrics.redundantCallCount}（< 2），不存在重叠子问题，因此不应判为指数级。真实成本是峰值栈深 ${metrics.maxStackDepth} 层带来的 O(n) 栈帧开销与爆栈风险（150 层即触发 [FUSE_STACK_OVERFLOW]），建议改写为 O(1) 空间的尾递归或 while 迭代循环。`,
       frameInsights: [
-        {
-          frameIndex: Math.min(6, frames.length - 1),
-          line: metrics.hotspotLine,
-          tag: 'STACK_GROWTH',
-          issue: 'DFS 递归树沿左分支连续压栈，调用帧深度呈线性攀升',
-        },
         {
           frameIndex: metrics.bottleneckFrameIndex,
           line: metrics.hotspotLine,
-          tag: 'REDUNDANT_SUBTREE',
-          issue: '检测到相同入参子问题被重复求值，引发时间帧膨胀',
+          tag: 'TAIL_RECURSION_CANDIDATE',
+          issue: `栈深线性下潜至 ${metrics.maxStackDepth} 层且无同实参重复进入，可尾递归化或迭代展开以消除 O(n) 栈帧`,
+        },
+        {
+          frameIndex: frames.length - 1,
+          line: metrics.hotspotLine,
+          tag: 'SINGLE_CHAIN_DESCENT',
+          issue: '同一调用链上每层实参均唯一，回溯时不产生兄弟子树',
         },
       ],
-      optimizedCode: `// Optimized: 状态压缩自底向上动态规划 O(n) Time / O(n) Space\nfunction fibDP(n) {\n  const dp = [0, 1];\n  for (let i = 2; i <= n; i++) {\n    dp[i] = dp[i - 1] + dp[i - 2];\n  }\n  console.log("DP optimal fib(" + n + ") =", dp[n]);\n  return dp[n];\n}\nfibDP(6);`,
-      optimizationGain: `Frames: ${frames.length} -> 15 (-${Math.max(50, Math.round((1 - 15 / Math.max(frames.length, 16)) * 100))}% Overhead) | Max Stack: ${metrics.maxStackDepth} -> 2`,
+      optimizedCode: `// Optimized: 单链递归展开为 while 迭代，O(1) 辅助空间\n// 这是脚手架：acc = combine(acc, step(n)) 形态，请把下一行的合并算子换成原递归的返回值组合方式（加法累加器用 0，乘法累加器用 1）\nfunction ${fnName}Iter(n) {\n  let acc = 0;\n  while (n > 0) {\n    acc = acc + 1;\n    n = n - 1;\n  }\n  return acc;\n}\nconsole.log("${fnName}Iter(${argHint}) =", ${fnName}Iter(${argHint}));`,
+      optimizationGain: `Peak Stack: ${metrics.maxStackDepth} -> 1 (iteration, O(1) auxiliary space) | 无重叠子问题，帧数量级不变`,
     };
   }
 

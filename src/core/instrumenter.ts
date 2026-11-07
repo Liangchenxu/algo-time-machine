@@ -99,10 +99,16 @@ export function instrumentCode(sourceCode: string): string {
           if (path.parentPath && path.parentPath.isFunctionDeclaration()) {
             const fnName = path.parentPath.node.id?.name || 'anonymous';
             const line = path.node.loc?.start?.line || 1;
+            // 形参标识符列表：只取 Identifier 形态（解构形参无法安全序列化，直接跳过），
+            // 用于把调用栈签名参数化，例如 fib(5) / dfs(1, 2)。
+            const argNames = (path.parentPath.node.params || [])
+              .filter((p: any) => t.isIdentifier(p))
+              .map((p: any) => p.name);
             const enterStmt = t.expressionStatement(
               t.callExpression(t.identifier('__enterFn'), [
                 t.stringLiteral(fnName),
                 t.numericLiteral(line),
+                t.arrayExpression(argNames.map((name: string) => t.identifier(name))),
               ])
             );
             const enterSnap = buildSnapshotNode(line, `函数进入: ${fnName}()`, path.scope);
@@ -173,9 +179,20 @@ export function instrumentCode(sourceCode: string): string {
       }
     }
 
-    function __enterFn(name, line) {
+    const __fmtArg = (v) => {
+      let s;
+      if (typeof v === 'string') s = v;
+      else if (typeof v === 'function') s = 'fn';
+      else { try { s = JSON.stringify(v); } catch (e) { s = undefined; } if (s === undefined) s = String(v); }
+      return s.length > 24 ? s.slice(0, 21) + '...' : s;
+    };
+
+    // 带实参的调用栈签名：fib(5) / dfs(1,2)，无参为 fn()，单个实参序列化截断在 24 字符内。
+    const __sig = (name, args) => name + '(' + (args || []).map(__fmtArg).join(',') + ')';
+
+    function __enterFn(name, line, args) {
       __guard(line);
-      __callStack.push(name + '()');
+      __callStack.push(__sig(name, args));
       if (__callStack.length > 150) {
         throw new Error(\`[FUSE_STACK_OVERFLOW] 函数 \${name} 递归深度超过 150 层，触发调用栈熔断。\`);
       }
