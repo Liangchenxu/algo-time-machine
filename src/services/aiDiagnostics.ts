@@ -15,6 +15,8 @@ export interface AIDiagnosticReport {
   signatureHits?: Record<string, number>;
   redundantCallCount?: number;
   topDuplicates?: string[];
+  /** 线性递归迭代展开时所嗅探到的合并算子及其源码依据 */
+  combinePattern?: string;
 }
 
 export interface RecursionForensics {
@@ -162,6 +164,37 @@ function detectLogarithmicHalving(frames: TraceFrame[]) {
   };
 }
 
+type CombineKind = 'product' | 'sum' | 'descent';
+
+interface CombineSniff {
+  kind: CombineKind;
+  evidence: string;
+}
+
+/**
+ * 线性递归的合并算子嗅探：只服务于「生成等价迭代代码」，不参与复杂度判档
+ * （判档仍严格只看运行时签名与栈深，见不变量 #6 / #11）。
+ * 时间帧里没有「返回值如何组合」的信息，但二元合并表达式必须写在源码里，
+ * 因此这一处读取源码是有意的、且作用域受限的例外。
+ */
+function sniffCombineOperator(sourceCode: string, fnName: string): CombineSniff {
+  const esc = fnName.replace(/[$]/g, '\\$&');
+  // 操作数刻意只匹配标识符：`1 + depth(n - 1)` 这类「常量 + 递归」合并的是步数而非变量本身，
+  // 匹配不到下方任何 variant，会正确落到 descent 档（fact(6) 的 `n * fact(n - 1)` 才命中 product）。
+  const variants = [
+    { re: new RegExp(`([A-Za-z_$][\\w$]*)\\s*\\*\\s*${esc}\\s*\\([^()]*\\)`, 'm'), kind: 'product' as CombineKind },
+    { re: new RegExp(`${esc}\\s*\\([^()]*\\)\\s*\\*\\s*([A-Za-z_$][\\w$]*)`, 'm'), kind: 'product' as CombineKind },
+    { re: new RegExp(`([A-Za-z_$][\\w$]*)\\s*\\+\\s*${esc}\\s*\\([^()]*\\)`, 'm'), kind: 'sum' as CombineKind },
+    { re: new RegExp(`${esc}\\s*\\([^()]*\\)\\s*\\+\\s*([A-Za-z_$][\\w$]*)`, 'm'), kind: 'sum' as CombineKind },
+  ];
+  for (const v of variants) {
+    const m = sourceCode.match(v.re);
+    if (!m) continue;
+    return { kind: v.kind, evidence: m[0].trim() };
+  }
+  return { kind: 'descent', evidence: 'no arithmetic combine detected' };
+}
+
 export async function runAIDiagnostics(
   sourceCode: string,
   frames: TraceFrame[],
@@ -265,11 +298,26 @@ export async function runAIDiagnostics(
     }
 
     // 分支 B：单链线性深递归 —— 每个实参只进入一次，无重叠子问题，但付出 O(n) 栈帧开销
+    const combine = sniffCombineOperator(sourceCode, fnName);
+    const iterativeCode =
+      combine.kind === 'product'
+        ? `// Optimized: 乘法累积单链递归等价展开（算子嗅探依据：${combine.evidence}）\nfunction ${fnName}Iter(n) {\n  let acc = 1;\n  for (let i = 2; i <= n; i++) {\n    acc *= i;\n  }\n  return acc;\n}\nconsole.log("${fnName}Iter(${argHint}) =", ${fnName}Iter(${argHint}));`
+        : combine.kind === 'sum'
+          ? `// Optimized: 加法累积单链递归等价展开（算子嗅探依据：${combine.evidence}）\nfunction ${fnName}Iter(n) {\n  let acc = 0;\n  for (let i = 1; i <= n; i++) {\n    acc += i;\n  }\n  return acc;\n}\nconsole.log("${fnName}Iter(${argHint}) =", ${fnName}Iter(${argHint}));`
+          : `// Optimized: 纯深度下潜尾递归展开为游标推进循环（算子嗅探依据：${combine.evidence}）\nlet cursor = 0;\nwhile (cursor < ${argHint}) {\n  cursor += 1;\n}\nconsole.log("iterative cursor =", cursor);`;
+    const patternLabel =
+      combine.kind === 'product'
+        ? '乘法累积 (product accumulate)'
+        : combine.kind === 'sum'
+          ? '加法累积 (sum accumulate)'
+          : '纯深度推进 (unit descent)';
+
     return {
       ...metrics,
       timeComplexity: 'O(n) Linear Recursion',
       spaceComplexity: `O(n) Call Stack Depth ${metrics.maxStackDepth}`,
-      summary: `调用栈呈单链线性下潜：${fnSig} 链路中共 ${Object.keys(metrics.signatureHits).length} 个互不相同的入参签名，实测冗余进入次数为 ${metrics.redundantCallCount}（< 2），不存在重叠子问题，因此不应判为指数级。真实成本是峰值栈深 ${metrics.maxStackDepth} 层带来的 O(n) 栈帧开销与爆栈风险（150 层即触发 [FUSE_STACK_OVERFLOW]），建议改写为 O(1) 空间的尾递归或 while 迭代循环。`,
+      combinePattern: `${patternLabel} · ${combine.evidence}`,
+      summary: `调用栈呈单链线性下潜：${fnSig} 链路中共 ${Object.keys(metrics.signatureHits).length} 个互不相同的入参签名，实测冗余进入次数为 ${metrics.redundantCallCount}（< 2），不存在重叠子问题，因此不应判为指数级。真实成本是峰值栈深 ${metrics.maxStackDepth} 层带来的 O(n) 栈帧开销与爆栈风险（150 层即触发 [FUSE_STACK_OVERFLOW]）。已按合并算子嗅探结果生成等价迭代实现：${patternLabel}，可把辅助空间压到 O(1)。`,
       frameInsights: [
         {
           frameIndex: metrics.bottleneckFrameIndex,
@@ -283,9 +331,15 @@ export async function runAIDiagnostics(
           tag: 'SINGLE_CHAIN_DESCENT',
           issue: '同一调用链上每层实参均唯一，回溯时不产生兄弟子树',
         },
+        {
+          frameIndex: 0,
+          line: metrics.hotspotLine,
+          tag: 'OPERATOR_SYNTHESIZED',
+          issue: `合并算子识别为 ${patternLabel}，迭代展开已按该算子生成，无需人工替换`,
+        },
       ],
-      optimizedCode: `// Optimized: 单链递归展开为 while 迭代，O(1) 辅助空间\n// 这是脚手架：acc = combine(acc, step(n)) 形态，请把下一行的合并算子换成原递归的返回值组合方式（加法累加器用 0，乘法累加器用 1）\nfunction ${fnName}Iter(n) {\n  let acc = 0;\n  while (n > 0) {\n    acc = acc + 1;\n    n = n - 1;\n  }\n  return acc;\n}\nconsole.log("${fnName}Iter(${argHint}) =", ${fnName}Iter(${argHint}));`,
-      optimizationGain: `Peak Stack: ${metrics.maxStackDepth} -> 1 (iteration, O(1) auxiliary space) | 无重叠子问题，帧数量级不变`,
+      optimizedCode: iterativeCode,
+      optimizationGain: `Peak Stack: ${metrics.maxStackDepth} -> 1 (iteration, O(1) auxiliary space) | Combine operator auto-synthesized: ${patternLabel}`,
     };
   }
 

@@ -44,6 +44,8 @@ interface BaselineMetrics {
   timeComplexity: string;
   spaceComplexity: string;
   execTimeMs: number;
+  /** 基线那一跑是否被 [FUSE_*] 熔断截断：截断帧数与完整帧数不可做百分比比较 */
+  wasFused: boolean;
 }
 
 const PRESETS: PresetItem[] = [
@@ -255,6 +257,88 @@ function buildCallTree(frames: TraceFrame[]): { nodes: CallTreeNode[]; signature
   return { nodes, signatureHits };
 }
 
+const SVG_NODE_W = 78;
+const SVG_NODE_H = 22;
+const SVG_ROW_H = 46;
+
+interface SvgPosition {
+  node: CallTreeNode;
+  x: number;
+  y: number;
+}
+
+interface SvgEdge {
+  key: string;
+  childId: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * 确定性 2D 树布局：后序遍历给叶子分配递增水平槽位，父节点 x 取其所有子节点 x 的算术平均，
+ * y = (depth - minDepth) * 46 + 24。仅对前 40 个激活节点构图；父节点不在集合内时该节点升为根，
+ * 因此 main() 根帧与长链熔断截断都不会把整棵树挤成一列。
+ */
+function layoutCallTree(nodes: CallTreeNode[], limit = 40) {
+  const selected = nodes.filter((n) => n.signature !== 'main()').slice(0, limit);
+  const selectedIds = new Set(selected.map((n) => n.id));
+  const childrenOf = new Map<number, CallTreeNode[]>();
+  const roots: CallTreeNode[] = [];
+
+  for (const n of selected) {
+    const parentId = n.parentId !== null && selectedIds.has(n.parentId) ? n.parentId : null;
+    if (parentId === null) roots.push(n);
+    else childrenOf.set(parentId, [...(childrenOf.get(parentId) ?? []), n]);
+  }
+
+  const minDepth = selected.length ? Math.min(...selected.map((n) => n.depth)) : 1;
+  const positions: SvgPosition[] = [];
+  const coordById = new Map<number, { x: number; y: number }>();
+  let slot = 0;
+
+  const visit = (n: CallTreeNode): number => {
+    const kids = childrenOf.get(n.id) ?? [];
+    const x = kids.length === 0 ? slot++ : kids.map(visit).reduce((a, b) => a + b, 0) / kids.length;
+    const pos = {
+      x: x * SVG_NODE_W + SVG_NODE_W / 2 + 6,
+      y: (n.depth - minDepth) * SVG_ROW_H + 24,
+    };
+    coordById.set(n.id, pos);
+    positions.push({ node: n, ...pos });
+    return x;
+  };
+  roots.forEach(visit);
+
+  const edges: SvgEdge[] = [];
+  for (const n of selected) {
+    const parentId = n.parentId !== null && selectedIds.has(n.parentId) ? n.parentId : null;
+    if (parentId === null) continue;
+    const from = coordById.get(parentId);
+    const to = coordById.get(n.id);
+    if (!from || !to) continue;
+    edges.push({
+      key: `${parentId}-${n.id}`,
+      childId: n.id,
+      x1: from.x,
+      y1: from.y + SVG_NODE_H / 2,
+      x2: to.x,
+      y2: to.y - SVG_NODE_H / 2,
+    });
+  }
+
+  const maxDepth = selected.length ? Math.max(...selected.map((n) => n.depth)) : minDepth;
+  return {
+    positions,
+    edges,
+    width: Math.max(slot, 1) * SVG_NODE_W + 12,
+    height: (maxDepth - minDepth + 1) * SVG_ROW_H + 16,
+    truncated: selected.length < nodes.filter((n) => n.signature !== 'main()').length,
+    selectedCount: selected.length,
+  };
+}
+
 interface DevlogEntry {
   tag: string;
   commit: string;
@@ -359,7 +443,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M5',
-    commit: '本次提交',
+    commit: 'ef934b0',
     doc: 'docs/devlogs/M5-call-tree-and-breakpoints.md',
     title: '参数化调用栈签名、重叠子问题精确取证、调用树拓扑与行级断点',
     why: 'M4 收尾时留下一个诚实的漏洞：depth(400) 这类单链深递归被报成 O(2^n)，因为递归分支的结论文案写死为指数级；同时调用栈只显示函数名不显示实参，重叠子问题只能靠文字推断，无法在界面上指给评委看。',
@@ -381,6 +465,35 @@ const DEVLOGS: DevlogEntry[] = [
       'M4 未闭合项闭环：depth(400) 判为 O(n) Linear Recursion / O(n) Call Stack Depth 150，149 个唯一签名、冗余 0 次、DUP 节点 0 个；fact(6) 判为 O(n) Linear Recursion / Stack Depth 7。',
       '断点实测：L7 激活后行底 rgba(244,63,94,0.13)、6px 红点可见、火焰轨 7 根条带亮红标记；Continue to Breakpoint 从 FRAME 10 前进到 FRAME 11，快捷键 b 再进到 FRAME 17。',
       '调用树容量保护：depth(400) 轨迹 149 次进入仅渲染前 64 个节点并提示总量，避免长链路拖垮一屏。',
+    ],
+  },
+  {
+    tag: 'M6',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M6-svg-call-tree-and-layout-polish.md',
+    title: '2D SVG 贝塞尔调用树、线性递归算子自动合成与 771px 分屏精修',
+    why: '771×553 分屏截图暴露两类硬伤：每行代码下方一条原生粗灰滚动条，以及 AI 面板标题被挤成四行竖排；同时 M5 留了两条尾巴——扁平缩进的调用树看不出父子拓扑，线性递归的迭代代码要人工替换合并算子。',
+    what: [
+      'index.css：滚动条全局降为 5px 暗色（轨道 #090B10 / 滑块 #27272a / 圆角 3px）并新增 no-scrollbar；单行代码 span 去掉 overflow-x-auto，改由外层滚动容器统一处理，行容器用 inline-block min-w-full 让热力底色铺满最长行。',
+      'App.tsx 顶栏：品牌与按钮全部 shrink-0 + whitespace-nowrap，预设切换器改为 min-w-0 flex-1 overflow-x-auto no-scrollbar，成为唯一可压缩区。',
+      'App.tsx AI 面板：Time / Space / Hotspot / Peak stack / Operator 五枚徽章从 h-9 标题栏迁出到面板内部遥测条；标题长尾与冗余计数提示降级为 xl 以上才显示。',
+      'App.tsx 调用树：新增 2D SVG Tree 与 Compact List 切换；后序遍历分配叶子槽位、父节点 x 取子节点算术平均、y = depth 差值 * 46 + 24；三次贝塞尔连线区分激活路径与历史路径；节点胶囊带 DUP×n 徽章并可点击跳帧。',
+      'aiDiagnostics.ts：sniffCombineOperator 按「标识符 [ + | * ] fn(...)」形态嗅探合并算子，分支 B 分别生成乘法累积、加法累积与纯深度推进三套等价迭代代码，并把嗅探依据回显到界面。',
+      'App.tsx：baselineMetrics 增加 wasFused，熔断截断基线与完整重跑之间不再计算帧数百分比，改显示 STATUS: FUSE_ABORTED → COMPLETED 并明确标注不可比。',
+    ],
+    conflicts: [
+      '把标题栏改成 overflow-hidden 后 771px 下确实不折行了，但 Apply 按钮被裁到可视区外（scrollWidth 823 对 clientWidth 448）——「不折行」不等于「可用」。最终用遥测条迁出徽章 + overflow-x-auto no-scrollbar + 长尾文案 xl 分级，压到 scrollWidth == clientWidth == 448。',
+      '算子嗅探的操作数只允许标识符，因此 `1 + depth(n - 1)` 匹配不到任何 variant 而正确落到 descent；若按字面补一条数字分支反而会把计数型递归误判成求和。',
+      '递归改迭代后帧数上升（fact 7 → 13、depth 截断 149 → 802）是插桩语句变多的真实结果，不做粉饰：收益体现在 PEAK STACK 7 → 2 与 150 → 1，横幅对熔断态显式声明不可比。',
+      '本轮自查清掉两处自产缺陷：AI 标题栏一段 engine 字段判空后返回空串的起草残留（该字段 M3 已下线），以及嗅探函数里一条永远不可达的数字操作数分支。',
+    ],
+    impact: [
+      '单行滚动条清零：代码行 span 的 overflow-x 为 visible，12 行与 20 行预设的行高恒为 28px，没有任何行被滚动条撑高。',
+      '顶栏 44px 且 scrollWidth == clientWidth == 770，Compile & Trace 与 Spec 两个按钮完整可见；AI 面板标题栏 36px 单行且 Apply 完整可见。',
+      'SVG 调用树：fib(5) 渲染 15 个节点组 / 14 条贝塞尔连线 / 9 个 DUP 徽章（与 redundantCallCount = 9 再次互证），viewBox 636×246；点击 DUP fib(3) 精确落到 FRAME 20 / 31，跳帧后激活态为 2 个天蓝节点 + 1 条天蓝连线。',
+      '算子合成闭环：fact(6) 生成 acc *= i 迭代，终端实测 factIter(6) = 720；depth(400) 落到 unit descent，终端实测 iterative cursor = 400，与原递归语义一致。',
+      '熔断态基准语义：横幅实测 STATUS: FUSE_ABORTED (149f) → COMPLETED (802f) + PEAK STACK: 150 → 1，不再输出误导性百分比。',
+      '断点与回归：DP 预设 20 个行号按钮，L14 设断点后 Continue 从 FRAME 10 → 12、F8 再推进到 FRAME 17，火焰轨 6 根亮红标记；Rain 40 帧 / 2 格水体 / 13 枚热力徽章、DP 十字准星 Cursor [1][2] 与 Δ 1 突变均无回归。',
     ],
   },
 ];
@@ -411,6 +524,7 @@ export default function App() {
 
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
+  const [treeView, setTreeView] = useState<'svg' | 'list'>('svg');
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
 
@@ -528,6 +642,16 @@ export default function App() {
     () => callTree.nodes.filter((n) => n.signature !== 'main()').slice(0, 64),
     [callTree]
   );
+  const treeLayout = useMemo(() => layoutCallTree(callTree.nodes), [callTree]);
+  const activeNodeIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const n of callTree.nodes) {
+      if (n.entryFrameIndex <= currentFrameIdx && (n.exitFrameIndex === -1 || n.exitFrameIndex > currentFrameIdx)) {
+        ids.add(n.id);
+      }
+    }
+    return ids;
+  }, [callTree, currentFrameIdx]);
 
   // Compute variable diffs between prevFrame and currentFrame
   const mutatedKeys = useMemo(() => {
@@ -593,6 +717,7 @@ export default function App() {
       timeComplexity: aiReport.timeComplexity,
       spaceComplexity: aiReport.spaceComplexity,
       execTimeMs,
+      wasFused: Boolean(sandboxError && sandboxError.includes('[FUSE_')),
     });
     setSourceCode(aiReport.optimizedCode);
     setEditMode(false);
@@ -604,10 +729,15 @@ export default function App() {
     const from = baselineMetrics.framesCount;
     const to = frames.length;
     const pct = from > 0 ? ((to - from) / from) * 100 : 0;
+    const nowFused = Boolean(sandboxError && sandboxError.includes('[FUSE_'));
     return {
       from,
       to,
       pct,
+      baseFused: baselineMetrics.wasFused,
+      nowFused,
+      /** 基线被截断而重构后完整跑完：帧数不是同一量纲，只报状态与栈深收益 */
+      abortedToCompleted: baselineMetrics.wasFused && !nowFused,
       stackFrom: baselineMetrics.maxStackDepth,
       stackTo: traceMetrics.maxStackDepth,
       timeFrom: baselineMetrics.timeComplexity,
@@ -615,29 +745,29 @@ export default function App() {
       latencyFrom: baselineMetrics.execTimeMs,
       latencyTo: execTimeMs,
     };
-  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs]);
+  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs, sandboxError]);
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
       {/* ==================== TOP INDUSTRIAL WORKBENCH BAR (44px) ==================== */}
       <header className="h-11 shrink-0 border-b border-zinc-800/80 bg-[#0C0E14] px-3 flex items-center justify-between gap-3">
-        {/* Left Brand & Architecture Badge */}
-        <div className="flex items-center gap-2.5">
-          <div className="w-6 h-6 rounded bg-sky-500/10 border border-sky-500/40 flex items-center justify-center text-sky-400">
+        {/* Left Brand & Architecture Badge — 窄视口下不收缩、不折行 */}
+        <div className="flex items-center gap-2.5 shrink-0 whitespace-nowrap">
+          <div className="w-6 h-6 shrink-0 rounded bg-sky-500/10 border border-sky-500/40 flex items-center justify-center text-sky-400">
             <Cpu className="w-3.5 h-3.5" />
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="font-semibold tracking-tight text-xs text-zinc-100">
+          <div className="flex items-baseline gap-2 whitespace-nowrap">
+            <span className="font-semibold tracking-tight text-xs text-zinc-100 whitespace-nowrap">
               ALGO<span className="text-sky-400">TIME</span>MACHINE
             </span>
-            <span className="text-[10px] font-mono text-zinc-500 hidden sm:inline">
+            <span className="text-[10px] font-mono text-zinc-500 hidden sm:inline whitespace-nowrap">
               AST-IR v2.4 · WORKER SANDBOX
             </span>
           </div>
         </div>
 
-        {/* Center Segmented Preset Selector */}
-        <div className="flex items-center bg-zinc-900/90 p-0.5 rounded-md border border-zinc-800/90 overflow-x-auto max-w-[54vw]">
+        {/* Center Segmented Preset Selector — 唯一可横向滚动的压缩区 */}
+        <div className="flex items-center bg-zinc-900/90 p-0.5 rounded-md border border-zinc-800/90 min-w-0 flex-1 overflow-x-auto no-scrollbar">
           {PRESETS.map((p) => {
             const active = selectedPresetId === p.id;
             return (
@@ -664,8 +794,8 @@ export default function App() {
         </div>
 
         {/* Right Telemetry & Actions */}
-        <div className="flex items-center gap-2">
-          <div className="hidden xl:flex items-center gap-3 px-2.5 py-1 rounded bg-zinc-900/70 border border-zinc-800/80 text-[11px] font-mono">
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="hidden xl:flex items-center gap-3 px-2.5 py-1 rounded bg-zinc-900/70 border border-zinc-800/80 text-[11px] font-mono whitespace-nowrap">
             <span className="text-zinc-400">
               LATENCY <strong className="text-emerald-400">{execTimeMs}ms</strong>
             </span>
@@ -681,7 +811,7 @@ export default function App() {
 
           <button
             onClick={() => executeCode(sourceCode)}
-            className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold text-[11px] flex items-center gap-1.5 transition shadow-sm"
+            className="px-2.5 py-1 shrink-0 whitespace-nowrap rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold text-[11px] flex items-center gap-1.5 transition shadow-sm"
           >
             <Zap className="w-3 h-3 fill-current" />
             <span>Compile & Trace</span>
@@ -689,7 +819,7 @@ export default function App() {
 
           <button
             onClick={() => setShowArchModal(true)}
-            className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 text-[11px] flex items-center gap-1.5 transition"
+            className="px-2.5 py-1 shrink-0 whitespace-nowrap rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 text-[11px] flex items-center gap-1.5 transition"
           >
             <GitCommit className="w-3.5 h-3.5 text-violet-400" />
             <span className="hidden md:inline">Qoder Engineering Spec</span>
@@ -764,7 +894,7 @@ export default function App() {
           </div>
 
           {/* Code Body */}
-          <div className="flex-1 min-h-0 overflow-y-auto font-mono text-xs relative">
+          <div className="flex-1 min-h-0 overflow-auto font-mono text-xs relative">
             {codeTab === 'ast' ? (
               <pre className="p-3 text-[11px] leading-relaxed text-amber-200/80 whitespace-pre-wrap select-text">
                 {instrumentedPreview}
@@ -777,7 +907,7 @@ export default function App() {
                 className="w-full h-full bg-[#090B10] text-zinc-100 p-3 font-mono text-xs leading-6 focus:outline-none resize-none select-text"
               />
             ) : (
-              <div className="py-2">
+              <div className="inline-block min-w-full py-2">
                 {codeLines.map((lineText, idx) => {
                   const lineNum = idx + 1;
                   const isCurrentLine = currentFrame?.line === lineNum;
@@ -835,9 +965,9 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Code Text */}
+                      {/* Code Text：单行严禁 overflow-x-auto，由外层滚动容器统一处理横向溢出 */}
                       <span
-                        className={`whitespace-pre overflow-x-auto ${
+                        className={`whitespace-pre ${
                           isCurrentLine ? 'text-zinc-50 font-medium' : 'text-zinc-300'
                         }`}
                       >
@@ -930,69 +1060,193 @@ export default function App() {
               {/* 0. Call-Tree Topology & Subproblem Inspector */}
               {treeVisible && (
                 <div className="p-3 rounded-md bg-[#0E1117] border border-zinc-800/90">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-300">
-                      <ListTree className="w-3.5 h-3.5 text-violet-400" />
-                      Call-Tree Topology &amp; Subproblem Inspector
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-300 whitespace-nowrap min-w-0">
+                      <ListTree className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                      <span className="truncate">Call-Tree Topology &amp; Subproblem Inspector</span>
                     </span>
-                    <span className="flex items-center gap-2 text-[10px] font-mono text-zinc-500">
-                      <span className="flex items-center gap-1">
-                        <span className="h-2 w-2 rounded bg-sky-500/60" />
-                        active
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <span className="h-2 w-2 rounded bg-rose-500/60" />
-                        redundant {traceMetrics.redundantCallCount}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <span className="h-2 w-2 rounded bg-zinc-700" />
-                        retired
-                      </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => setTreeView('svg')}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                          treeView === 'svg'
+                            ? 'bg-violet-500/20 text-violet-200 border-violet-500/50'
+                            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                        }`}
+                      >
+                        2D SVG Tree
+                      </button>
+                      <button
+                        onClick={() => setTreeView('list')}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                          treeView === 'list'
+                            ? 'bg-violet-500/20 text-violet-200 border-violet-500/50'
+                            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                        }`}
+                      >
+                        Compact List
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mb-2 flex items-center gap-2 text-[10px] font-mono text-zinc-500 whitespace-nowrap overflow-x-auto no-scrollbar">
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="h-2 w-2 rounded bg-sky-500/60" />
+                      active
+                    </span>
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="h-2 w-2 rounded bg-rose-500/60" />
+                      redundant {traceMetrics.redundantCallCount}
+                    </span>
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="h-2 w-2 rounded bg-zinc-700" />
+                      retired
+                    </span>
+                    <span className="shrink-0 text-zinc-600">
+                      nodes {treeLayout.selectedCount} · edges {treeLayout.edges.length} · leaves{' '}
+                      {treeLayout.positions.filter(
+                        (p) => !treeLayout.edges.some((e) => e.key.endsWith(`-${p.node.id}`))
+                      ).length}
                     </span>
                   </div>
-                  <div className="scroll-thin max-h-[168px] space-y-[2px] overflow-y-auto">
-                    {treeNodes.map((n) => {
-                      const active =
-                        n.entryFrameIndex <= currentFrameIdx &&
-                        (n.exitFrameIndex === -1 || n.exitFrameIndex > currentFrameIdx);
-                      const future = n.entryFrameIndex > currentFrameIdx;
-                      const stateClass = active
-                        ? 'bg-sky-500/25 border-sky-400 text-sky-200'
-                        : n.isDuplicate
-                          ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
-                          : 'bg-zinc-900/80 border-zinc-800 text-zinc-400';
-                      return (
-                        <button
-                          key={n.id}
-                          onClick={() => {
-                            setIsPlaying(false);
-                            setCurrentFrameIdx(n.entryFrameIndex);
-                          }}
-                          title={`Jump to entry frame #${n.entryFrameIndex}`}
-                          style={{ marginLeft: n.depth * 10 }}
-                          className={`flex w-full items-center gap-2 rounded border px-1.5 py-[2px] text-[10px] font-mono transition ${stateClass} ${
-                            future ? 'opacity-40' : ''
-                          }`}
-                        >
-                          <span className="text-zinc-500">d{n.depth}</span>
-                          <span className="font-semibold">{n.signature}</span>
-                          {n.isDuplicate && (
-                            <span className="rounded border border-rose-400/60 bg-rose-500/30 px-1 text-[9px] font-bold text-rose-100">
-                              DUP ×{n.duplicateCount}
+
+                  {treeView === 'svg' ? (
+                    <div className="max-h-[232px] overflow-auto rounded border border-zinc-800/70 bg-[#090B10]">
+                      <svg
+                        width={treeLayout.width}
+                        height={treeLayout.height}
+                        className="block"
+                        role="img"
+                        aria-label="Call tree topology"
+                      >
+                        {treeLayout.edges.map((e) => {
+                          const active = activeNodeIds.has(e.childId);
+                          const midY = (e.y1 + e.y2) / 2;
+                          return (
+                            <path
+                              key={e.key}
+                              d={`M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${e.y2}`}
+                              fill="none"
+                              stroke={active ? '#38bdf8' : '#27272a'}
+                              strokeWidth={active ? 1.4 : 1}
+                            />
+                          );
+                        })}
+                        {treeLayout.positions.map(({ node: n, x, y }) => {
+                          const active = activeNodeIds.has(n.id);
+                          const future = n.entryFrameIndex > currentFrameIdx;
+                          const palette = active
+                            ? { fill: '#082f49', stroke: '#38bdf8', text: '#bae6fd' }
+                            : n.isDuplicate
+                              ? { fill: '#2b0a12', stroke: '#f43f5e', text: '#fda4af' }
+                              : { fill: '#18181b', stroke: '#27272a', text: '#a1a1aa' };
+                          return (
+                            <g
+                              key={n.id}
+                              onClick={() => {
+                                setIsPlaying(false);
+                                setCurrentFrameIdx(n.entryFrameIndex);
+                              }}
+                              className="cursor-pointer"
+                              opacity={future ? 0.4 : 1}
+                            >
+                              <title>{`Jump to entry frame #${n.entryFrameIndex}`}</title>
+                              <rect
+                                x={x - SVG_NODE_W / 2}
+                                y={y - SVG_NODE_H / 2}
+                                width={SVG_NODE_W}
+                                height={SVG_NODE_H}
+                                rx={4}
+                                fill={palette.fill}
+                                stroke={palette.stroke}
+                                strokeWidth={1}
+                              />
+                              <text
+                                x={x}
+                                y={y + 3}
+                                textAnchor="middle"
+                                fontSize={9}
+                                fontFamily="ui-monospace, monospace"
+                                fill={palette.text}
+                              >
+                                {n.signature.length > 11 ? `${n.signature.slice(0, 10)}…` : n.signature}
+                              </text>
+                              {n.isDuplicate && (
+                                <g>
+                                  <rect
+                                    x={x + SVG_NODE_W / 2 - 24}
+                                    y={y - SVG_NODE_H / 2 - 5}
+                                    width={26}
+                                    height={10}
+                                    rx={3}
+                                    fill="#4c0519"
+                                    stroke="#f43f5e"
+                                    strokeWidth={0.8}
+                                  />
+                                  <text
+                                    x={x + SVG_NODE_W / 2 - 11}
+                                    y={y - SVG_NODE_H / 2 + 2.5}
+                                    textAnchor="middle"
+                                    fontSize={7}
+                                    fontFamily="ui-monospace, monospace"
+                                    fill="#fecdd3"
+                                  >
+                                    DUP×{n.duplicateCount}
+                                  </text>
+                                </g>
+                              )}
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    </div>
+                  ) : (
+                    <div className="max-h-[168px] space-y-[2px] overflow-y-auto">
+                      {treeNodes.map((n) => {
+                        const active =
+                          n.entryFrameIndex <= currentFrameIdx &&
+                          (n.exitFrameIndex === -1 || n.exitFrameIndex > currentFrameIdx);
+                        const future = n.entryFrameIndex > currentFrameIdx;
+                        const stateClass = active
+                          ? 'bg-sky-500/25 border-sky-400 text-sky-200'
+                          : n.isDuplicate
+                            ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                            : 'bg-zinc-900/80 border-zinc-800 text-zinc-400';
+                        return (
+                          <button
+                            key={n.id}
+                            onClick={() => {
+                              setIsPlaying(false);
+                              setCurrentFrameIdx(n.entryFrameIndex);
+                            }}
+                            title={`Jump to entry frame #${n.entryFrameIndex}`}
+                            style={{ marginLeft: n.depth * 10 }}
+                            className={`flex w-full items-center gap-2 rounded border px-1.5 py-[2px] text-[10px] font-mono transition ${stateClass} ${
+                              future ? 'opacity-40' : ''
+                            }`}
+                          >
+                            <span className="text-zinc-500">d{n.depth}</span>
+                            <span className="font-semibold">{n.signature}</span>
+                            {n.isDuplicate && (
+                              <span className="rounded border border-rose-400/60 bg-rose-500/30 px-1 text-[9px] font-bold text-rose-100">
+                                DUP ×{n.duplicateCount}
+                              </span>
+                            )}
+                            <span className="ml-auto text-zinc-500">
+                              #{n.entryFrameIndex}
+                              <span className="mx-0.5">→</span>
+                              {n.exitFrameIndex === -1 ? 'live' : `#${n.exitFrameIndex}`}
                             </span>
-                          )}
-                          <span className="ml-auto text-zinc-500">
-                            #{n.entryFrameIndex}
-                            <span className="mx-0.5">→</span>
-                            {n.exitFrameIndex === -1 ? 'live' : `#${n.exitFrameIndex}`}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {callTree.nodes.length - 1 > treeNodes.length && (
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {treeLayout.truncated && (
                     <p className="mt-1 text-[10px] text-zinc-500">
-                      仅渲染前 {treeNodes.length} 个激活节点，本轨迹共观测 {Math.max(0, callTree.nodes.length - 1)} 次函数进入
+                      构图仅取前 {treeLayout.selectedCount} 个激活节点，本轨迹共观测{' '}
+                      {Math.max(0, callTree.nodes.length - 1)} 次函数进入
                     </p>
                   )}
                 </div>
@@ -1225,28 +1479,23 @@ export default function App() {
 
           {/* BOTTOM RIGHT (42%): AI SURGICAL COMPLEXITY PROFILER & CODE DIFF */}
           <div className="h-[42%] flex flex-col min-h-0 bg-[#0B0D13]">
-            <div className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-3.5 h-3.5 text-violet-400" />
-                <span className="text-xs font-medium text-zinc-200">
-                  AI Complexity Profiler & Frame Diagnostics
+            <div className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between gap-2 whitespace-nowrap overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-2 shrink-0">
+                <Sparkles className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                <span className="text-xs font-medium text-zinc-200 whitespace-nowrap">
+                  AI Complexity Profiler
+                  <span className="hidden xl:inline"> &amp; Frame Diagnostics</span>
                 </span>
                 {aiReport && (
-                  <div className="flex items-center gap-1.5 ml-2 font-mono text-[10px]">
-                    <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
-                      Time: {aiReport.timeComplexity}
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
-                      Space: {aiReport.spaceComplexity}
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                      Hotspot: L{aiReport.hotspotLine} ({aiReport.maxHitCount}x)
-                    </span>
-                  </div>
+                  <span className="hidden xl:inline text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                    {traceMetrics.redundantCallCount > 0
+                      ? `redundant entries ${traceMetrics.redundantCallCount}`
+                      : 'no redundant entries'}
+                  </span>
                 )}
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 {showKeyInput ? (
                   <div className="flex items-center gap-1">
                     <input
@@ -1269,14 +1518,16 @@ export default function App() {
                     className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[10px] font-mono text-zinc-400 flex items-center gap-1"
                   >
                     <KeyRound className="w-3 h-3" />
-                    <span>{apiKey ? 'DeepSeek Key Active' : 'Engine: Deterministic + API'}</span>
+                    <span className="hidden lg:inline">
+                      {apiKey ? 'DeepSeek Key Active' : 'Engine: Deterministic + API'}
+                    </span>
                   </button>
                 )}
 
                 {aiReport && aiReport.optimizedCode !== sourceCode && (
                   <button
                     onClick={handleApplyOptimized}
-                    className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm"
+                    className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm shrink-0 whitespace-nowrap"
                   >
                     <Zap className="w-3 h-3" />
                     <span>Apply O(n) Refactor & Re-Trace</span>
@@ -1292,10 +1543,30 @@ export default function App() {
                   VERIFIED REFACTOR BENCHMARK
                 </span>
                 <span className="whitespace-nowrap">
-                  FRAMES: <strong className="text-emerald-100">{benchmarkDelta.from}</strong> →{' '}
-                  <strong className="text-emerald-100">{benchmarkDelta.to}</strong>{' '}
-                  ({benchmarkDelta.pct <= 0 ? '-' : '+'}
-                  {Math.abs(benchmarkDelta.pct).toFixed(1)}%) | PEAK STACK:{' '}
+                  {benchmarkDelta.abortedToCompleted ||
+                  (benchmarkDelta.baseFused && benchmarkDelta.nowFused) ||
+                  (!benchmarkDelta.baseFused && benchmarkDelta.nowFused) ? (
+                    <>
+                      STATUS:{' '}
+                      <strong className="text-emerald-100">
+                        {benchmarkDelta.baseFused ? 'FUSE_ABORTED' : 'COMPLETED'} ({benchmarkDelta.from}f)
+                      </strong>{' '}
+                      →{' '}
+                      <strong className="text-emerald-100">
+                        {benchmarkDelta.nowFused ? 'FUSE_ABORTED' : 'COMPLETED'} ({benchmarkDelta.to}f)
+                      </strong>{' '}
+                      | (frame counts across a fuse boundary are not comparable)
+                    </>
+                  ) : (
+                    <>
+                      FRAMES:{' '}
+                      <strong className="text-emerald-100">{benchmarkDelta.from}</strong> →{' '}
+                      <strong className="text-emerald-100">{benchmarkDelta.to}</strong>{' '}
+                      ({benchmarkDelta.pct <= 0 ? '-' : '+'}
+                      {Math.abs(benchmarkDelta.pct).toFixed(1)}%)
+                    </>
+                  )}{' '}
+                  | PEAK STACK:{' '}
                   <strong className="text-emerald-100">
                     {benchmarkDelta.stackFrom} → {benchmarkDelta.stackTo}
                   </strong>{' '}
@@ -1319,6 +1590,29 @@ export default function App() {
             <div className="flex-1 min-h-0 grid grid-cols-12 divide-x divide-zinc-800/80 overflow-hidden">
               {/* Left 7 cols: Summary & Bottleneck Frame Jumpers */}
               <div className="col-span-7 p-3 overflow-y-auto space-y-2.5">
+                {/* Telemetry Strip — 复杂度徽章从 h-9 标题栏迁出，771px 下不再折行 */}
+                {aiReport && (
+                  <div className="flex items-center gap-1.5 font-mono text-[10px] overflow-x-auto no-scrollbar whitespace-nowrap">
+                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                      Time: {aiReport.timeComplexity}
+                    </span>
+                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      Space: {aiReport.spaceComplexity}
+                    </span>
+                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                      Hotspot: L{aiReport.hotspotLine} ({aiReport.maxHitCount}x)
+                    </span>
+                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-800/90 text-zinc-400 border border-zinc-700/70">
+                      Peak stack: {traceMetrics.maxStackDepth}
+                    </span>
+                    {aiReport.combinePattern && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                        Operator: {aiReport.combinePattern}
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {isAnalyzing ? (
                   <div className="text-xs font-mono text-zinc-500 animate-pulse">
                     Analyzing AST execution trace & control-flow hotspots...
@@ -1595,6 +1889,9 @@ export default function App() {
                       before/after refactor benchmark.
                       <br />• M5: Parametrized call-stack signatures, call-tree reconstruction with duplicate
                       subproblem detection, and line-level breakpoints with continue-to-breakpoint.
+                      <br />• M6: 2D SVG bezier call-tree topology, auto-synthesized iterative rewrites from
+                      the sniffed combine operator, fuse-aware benchmark semantics, and the 771px
+                      narrow-viewport layout cleanup (no per-line scrollbars, no clipped actions).
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
@@ -1616,6 +1913,21 @@ export default function App() {
                       stack is a single descending chain, so the verdict is O(n) Linear Recursion tagged
                       [TAIL_RECURSION_CANDIDATE] with an iterative rewrite scaffold. Sibling calls keep the
                       stack depth unchanged, which is why entry events are counted instead of depth deltas.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">6. Layout &amp; Synthesis Contracts (M6)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Narrow-viewport contract: the 44px top bar and every h-9 sub-header must stay on one
+                      line with scrollWidth == clientWidth (no clipped actions), and no code line may own a
+                      horizontal scrollbar - per-line overflow is forbidden; the outer scroll container owns
+                      it with a global 5px dark scrollbar. Complexity chips live in a telemetry strip inside
+                      the profiler body, not in its header.
+                      <br />• Call tree: post-order leaf slotting, parent x = mean(child x), cubic-bezier
+                      edges, clickable capsules jumping to entryFrameIndex.
+                      <br />• Linear-recursion refactors are code-generated from the sniffed combine
+                      operator (product / sum / descent), and a fuse-truncated baseline is never compared
+                      against a completed run by frame-count percentage.
                     </p>
                   </div>
                 </>

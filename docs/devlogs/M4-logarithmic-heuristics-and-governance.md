@@ -70,8 +70,8 @@ M3 交出去的界面已经是工业级工具，但留下了三处「说法与�
 | Binary Search Bounds | `O(log n) Logarithmic Halving` / `O(1) Constant Pointers`；证据文本「搜索空间长度 11，共完成 1 次折半探测（总帧数 10，对数预算 ceil(log2 n) * 4 = 16）」；Apply 按钮隐藏 |
 | Min Path Sum 优化前 | `O(M * N) Matrix DP` / `O(M * N) 2D Tabulation`，29 帧，热点 L14（6x） |
 | Min Path Sum 点击 Apply 后 | `O(M * N) Optimal Scan` / `O(N) 1D Rolling Buffer (Compressed)`，15 帧，热点 L10（4x），Apply 自动退场 |
-| Benchmark 横幅 | `FRAMES: 29 → 15 (-48.3%) | PEAK STACK: 1 → 1 | SPACE: O(M * N) 2D Tabulation → O(N) 1D Rolling Buffer (Compressed) | TIME: O(M * N) Matrix DP → O(M * N) Optimal Scan | LATENCY: 1ms → 1ms` |
-| Naive Fibonacci 宣称 vs 实测 | 引擎文案宣称 `Frames: 31 -> 15 (-52% Overhead)`，同沙箱实测 `FRAMES: 31 → 14 (-54.8%) | PEAK STACK: 6 → 2` —— 实测优于宣称，横幅以实测为准 |
+| Benchmark 横幅 | `FRAMES: 29 → 15 (-48.3%)` \| `PEAK STACK: 1 → 1` \| `SPACE: O(M * N) 2D Tabulation → O(N) 1D Rolling Buffer (Compressed)` \| `TIME: O(M * N) Matrix DP → O(M * N) Optimal Scan` \| `LATENCY: 1ms → 1ms` |
+| Naive Fibonacci 宣称 vs 实测 | 引擎文案宣称 `Frames: 31 -> 15 (-52% Overhead)`，同沙箱实测 `FRAMES: 31 → 14 (-54.8%)` \| `PEAK STACK: 6 → 2` —— 实测优于宣称，横幅以实测为准 |
 | Infinite Loop Guard | 横幅 `[FUSE_STEP_LIMIT] 疑似死循环：第 5 行附近执行已超过 2000 步上限…`，保留 1334 帧，诊断仍正确命中 `O(∞) Non-Terminating`（谓词切换后未退化） |
 | 手写 `depth(400)` 深递归 | `[FUSE_STACK_OVERFLOW] 函数 depth 递归深度超过 150 层`，保留 149 帧，`Space: O(n) Stack Depth 150` |
 | 预设切换 | 基准清空，横幅消失（已验证 `bannerClearedOnPresetSwitch = true`） |

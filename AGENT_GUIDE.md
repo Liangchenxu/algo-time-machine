@@ -76,18 +76,26 @@ Key 仅驻留内存，不写入 localStorage。
 签名进入次数必须按「函数进入」事件帧统计：兄弟调用退栈再压栈时栈深不变，
 用相邻帧栈深增量会整段漏计重复求值（这是 M4 误判 `depth(400)` 的根因，M5 已闭环）。
 
-## 调试器能力
+## 调试器与可视化能力
 
 - 行号可点击设断点（`breakpoints: Set<number>`），火焰条顶部渲染断点标记，
   `Continue to Breakpoint` 与 `F8` / `b` 向后扫描第一个命中帧；切换预设即清空断点。
-- `Call-Tree Topology` 面板仅在 `maxStackDepth >= 2` 且存在多个激活节点时出现，
-  三态着色（active / DUP redundant / retired）并支持点击节点跳到其进入帧。
+- `Call-Tree Topology` 面板仅在 `maxStackDepth >= 2` 且存在多个激活节点时出现，提供
+  `2D SVG Tree`（默认，后序槽位 + 父节点 x 取子节点均值 + 三次贝塞尔连线）与 `Compact List` 两种视图；
+  三态着色（active 电光蓝 / DUP 玫红 / retired 暗灰，未来节点 opacity-40），点击节点跳到其进入帧。
+- 线性递归的迭代改写由合并算子嗅探自动生成（乘法累积 / 加法累积 / 纯深度推进三种形态），
+  嗅探仅作用于代码生成，复杂度判档仍严格只看运行时签名与栈深。
+- 窄视口布局契约：44px 顶栏与各 `h-9` 子标题栏必须单行且 `scrollWidth == clientWidth`
+  （不折行不等于可达，禁止用 `overflow-hidden` 裁掉操作按钮）；单行代码严禁自带 `overflow-x-auto`，
+  横向滚动责任在外层容器，滚动条外观由 `src/index.css` 全局统一为 5px 暗色。
+- 基准对比语义：基线若被 `[FUSE_*]` 截断而重跑完整，横幅只显示
+  `STATUS: FUSE_ABORTED → COMPLETED` 与栈深收益，不得计算帧数百分比。
 
 `optimizedCode === sourceCode` 时界面自动隐藏 Apply 按钮，避免出现「已最优仍提示再优化」。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M5 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M6 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

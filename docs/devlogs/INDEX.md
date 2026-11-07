@@ -12,7 +12,8 @@
 | M2 | `638022a` | [M2-stack-unwinding-and-profiler.md](./M2-stack-unwinding-and-profiler.md) | `try...finally { __exitFn() }` 修复递归退栈，引入逐帧 `lineHits` 与双引擎诊断 |
 | M3 | `41ad788` | [M3-industrial-workbench-and-2d-dp.md](./M3-industrial-workbench-and-2d-dp.md) | 100vh 工业工作台：2D DP 十字准星、帧间 Diff、火焰图轨、AST IR 透视，判据改为运行时证据 |
 | M4 | `23e0a6d` | [M4-logarithmic-heuristics-and-governance.md](./M4-logarithmic-heuristics-and-governance.md) | `O(log n)` 判据闭环、滚动数组状态识别、`[FUSE_*]` 前缀标准化、实测 Benchmark Delta 与 ADR 制度 |
-| M5 | 本次提交 | [M5-call-tree-and-breakpoints.md](./M5-call-tree-and-breakpoints.md) | 带参调用栈签名、重叠子问题精确取证与 A/B 分档、可点击调用树拓扑、行级断点与 Continue to Breakpoint |
+| M5 | `ef934b0` | [M5-call-tree-and-breakpoints.md](./M5-call-tree-and-breakpoints.md) | 带参调用栈签名、重叠子问题精确取证与 A/B 分档、可点击调用树拓扑、行级断点与 Continue to Breakpoint |
+| M6 | 本次提交 | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -45,8 +46,18 @@
     （c）`buildCallTree` 用相邻帧 `callStack` 的**最长公共前缀**做 push/pop 事件建模，每个激活节点独立 id 与
     进出帧区间；按签名路径字符串建索引会让不同兄弟子树撞成同一节点。
     另外调用栈根帧恒为字符串 `main()`，`__exitFn` 仅在 `length > 1` 时 pop，任何签名改造都不得影响这两条。
+12. **771px 窄视口顶栏与禁止单行滚动条契约**（M6 实测确立，截图审查是它的守门人）：
+    （a）顶栏 `h-11` 与所有 `h-9` 子标题栏必须 `whitespace-nowrap` 单行，且验收标准是
+    `scrollWidth == clientWidth`（不折行还不够——`overflow-hidden` 会把 Apply 按钮裁到可视区外，控件必须可达）；
+    （b）**严禁在单行代码 `<span>` 上使用 `overflow-x-auto`**，横向滚动责任属于外层容器
+    （`overflow-auto` + 行容器 `inline-block min-w-full`），否则 Chromium 会给每一行各画一条原生粗灰滚动条；
+    滚动条外观统一由 `src/index.css` 全局给出（5px / 轨道 `#090B10` / 滑块 `#27272a` / 圆角 3px），
+    窄视口可压缩区仅允许预设切换器（`min-w-0 flex-1 overflow-x-auto no-scrollbar`）；
+    （c）复杂度徽章放在面板内部遥测条，不塞进 `h-9` 标题栏；长尾文案用 `xl:` 分级隐藏而非缩小字号；
+    （d）熔断截断的基线与完整重跑之间**禁止计算帧数百分比**，只能显示
+    `STATUS: FUSE_ABORTED → COMPLETED`；帧数变化在非截断态才可用 `FRAMES: a → b (x%)` 表述。
 
-## 当前实测基线（M5 全预设复测，视口 771×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M6 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -58,7 +69,7 @@
 | 手写 `depth(400)` | 149 | 150 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 150` | **M4 误判项已闭环**：149 个唯一签名、0 个 DUP 节点、树仅渲染前 64 个；`[FUSE_STACK_OVERFLOW]` 保留现场 |
 | 手写 `fact(6)` | 7 | 7 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 7` | 6 个唯一签名、冗余进入 0 次，判为单链线性而非指数 |
 
-### M5 调试器交互实测
+### M5 / M6 调试器与可视化交互实测
 
 | 能力 | 实测结果 |
 | --- | --- |
@@ -68,6 +79,14 @@
 | 火焰图联动 | 火焰轨出现 7 根带 `bg-rose-400` 顶部标记的竖条（对应 L7 的 7 次命中帧） |
 | Continue to Breakpoint | FRAME 10 → FRAME 11（下一命中帧）；快捷键 `b` 再推进至 FRAME 17 |
 | 容量保护 | 149 次激活仅渲染前 64 节点并提示总量，长链路不卡屏 |
+| 单行滚动条（M6） | 代码行 span `overflow-x` 计算值 `visible`，12 / 20 行预设行高恒 28px，无一行被滚动条撑高 |
+| 顶栏（M6） | 44px，`scrollWidth == clientWidth == 770`，Compile 与 Spec 按钮右边缘均在容器内；切换器压缩至 88px 可横滚 |
+| AI 标题栏（M6） | 36px 单行，`scrollWidth == clientWidth == 448`，Apply 按钮完整可见；五枚徽章迁至面板内遥测条 |
+| SVG 调用树（M6） | fib(5)：15 节点组 / 14 条三次贝塞尔连线 / 9 个 DUP 徽章，viewBox 636×246；DUP 数与 `redundantCallCount = 9` 互证 |
+| SVG 跳帧（M6） | 点击 DUP `fib(3)` → FRAME 20 / 31；激活态回算为 2 个 `#38bdf8` 节点 + 1 条天蓝连线；Compact List 与 SVG 双向切换正常 |
+| 算子合成（M6） | `fact(6)` → 乘法累积 `n * fact(n - 1)`，终端实测 `factIter(6) = 720`；`depth(400)` → 纯深度推进，实测 `iterative cursor = 400` |
+| 熔断态基准（M6） | `STATUS: FUSE_ABORTED (149f) → COMPLETED (802f)` + `PEAK STACK: 150 → 1`，不再输出帧数百分比 |
+| 断点回归（M6） | DP 预设 20 个行号按钮；L14 断点 Continue `FRAME 10 → 12`、F8 续跳 `→ 17`；火焰轨 6 根亮红标记 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -87,7 +106,16 @@
 - [x] 兄弟调用漏计重叠子问题（M5：增量法栈深不变会漏，改用「函数进入」事件计数）
 - [x] 调用树按签名路径建索引导致兄弟子树撞节点（M5：改为前缀差异的 push/pop 事件建模）
 - [x] 文档曾把 M4 的「线性递归闭环」写得过满（M5 复核时拆成两条，未修的明确标注）
-- [ ] 迭代展开脚手架的合并算子仍需人工替换（`acc = acc + 1` 按加法幺元给出，见 M5「遗留」）
+- [x] 迭代展开脚手架的合并算子仍需人工替换（M5 报备 → **M6 闭环**：`sniffCombineOperator` 按 `n * fact(n-1)` /
+  `n + sum(n-1)` / 无算子三种形态生成等价迭代代码，实测 `factIter(6) = 720`、`iterative cursor = 400`）
+- [x] 调用树只是 depth 缩进列表、看不出父子拓扑（M5 报备 → **M6 闭环**：后序槽位 + 均值父坐标 + 贝塞尔连线 SVG 布局）
+- [x] 熔断截断基线与完整重跑之间被算成帧数百分比（M5 报备 → **M6 闭环**：`wasFused` + `STATUS: FUSE_ABORTED → COMPLETED`）
+- [x] 771px 下每行代码下方一条原生粗灰滚动条（M6：单行 span 去掉 overflow-x-auto，外层容器统一滚动 + 全局 5px 暗色条）
+- [x] 771px 下 AI 面板标题被挤成四行竖排（M6：徽章迁出标题栏至遥测条 + 长尾文案 xl 分级 + 容器横滚不裁控件）
+- [x] `overflow-hidden` 修折行时把 Apply 按钮整段裁掉（M6：验收标准从「不折行」升级为 `scrollWidth == clientWidth`）
+- [x] DevLog Markdown 表格行内未转义竖线导致表格被切列（M4 文档 2 行 + M6 文档 1 行，M6 复核时用列数一致性脚本扫出并修）
+- [ ] 单链递归迭代化后落到兜底档，被判据文案称为「Linear Two-Pointer」（量级正确、措辞不符，见 M6「遗留」）
+- [ ] 分支 A 的 DP 优化样例仍偏 fib 专用，通用记忆化模板未提供（见 M6「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 
