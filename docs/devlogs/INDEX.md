@@ -17,7 +17,8 @@
 | M7 | `7de93be` | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
 | M8 | `6da81b1` | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
 | M9 | `9bb7835` | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
-| M10 | 本次提交 | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
+| M10 | `ee2d94c` | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
+| M11 | 本次提交 | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -123,8 +124,21 @@
     首参非折半的多参形态（`power(2,16)`）当前不识别，不得静默套用计数型循环。
     （e）Stage-2/重构后的首帧若因 TDZ 缺少新变量，Watch 显示 `ERROR` 属诚实反馈（#13d），
     不得为了"好看"把它降级成 FALSE 或隐藏。
+17. **折半合成语义等价门控与 A/B 轨迹无损往返契约**（M11 确立）：
+    （a）折半判定必须**按参数槽位**收集实参序列：`power(2,16)` 的槽位 0 恒为底数、槽位 1 才收敛，
+    只看首参会漏判；命中后必须把发生收敛的槽位（能定位参数名时连同名字）写进摘要。
+    （b）**识别与合成解耦**：识别只决定判档；消栈代码必须单独过形态门——
+    计数型（`1 + fn(...)` 且基线 `return 0`）→ `steps++` 游标循环；快速幂型（双参、折半槽位 > 0、
+    函数体含 `*`、顶层实参 ≥2）→ 迭代二进制快速幂；其余一律 `optimizedCode = sourceCode`、
+    Apply 隐藏、标签 `[SEMANTICS_PRESERVED]`。#13c 在此的具体化：宁可少给，不可给错。
+    （c）**A/B 切换不得触发诊断重算**：`⇄` 只通过 `runForComparison` 重跑沙箱，
+    `abState` 冻结两侧帧数/栈深/展开重复数，横幅在整个往返过程保持不变；
+    基线视图必须显示 `VIEWING BASELINE TRACE` 提示（判据芯片描述的是另一侧），
+    且仅切换预设才清空 `baselineMetrics` 与 `abState`。
+    （d）Quick-Watch 兜底排序按**突变熵**（全轨迹 distinct 取值数降序）挑选动态变量，
+    `distinct === 1` 的静态输入仅在无动态变量时兜底，避免推荐恒真且无信息量的断言。
 
-## 当前实测基线（M10 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M11 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -175,6 +189,11 @@
 | 二维读写徽章（M10） | DP 第 10 帧：`grid [3×4] READ-ONLY`（暗灰）、`dp [3×4] WRITES: 6`（天蓝），`Cursor [1][2]` 正常；`includes('grid')` 全仓 0 处 |
 | 折半递归（M10） | `halve(32)` → `O(log n) Logarithmic Recursion` / `O(log n) Call Stack Depth 7`，实参链 `32 → 16 → 8 → 4 → 2 → 1`，标签 `LOGARITHMIC_DESCENT` + `TAIL_UNROLL_CANDIDATE` |
 | 折半消栈（M10） | Apply → `while (curr > 1)`、18 帧、`STACK REDUCTION -85.7%`、`PEAK STACK: 7 → 1`、终端 `halving steps = 5`、判据 `O(log n) Iterative Halving` / `O(1) Scalar Accumulator` |
+| 多参槽位折半（M11） | `power(2, 16)`：槽位 1（exp）链 `16 → 8 → 4 → 2 → 1`，12 帧、栈深 7，判 `O(log n) Logarithmic Recursion`；`halve(32)` 仍命中槽位 0 |
+| 快速幂等价合成（M11） | Apply → 迭代二进制快速幂，终端 `powerIter(2, 16) = 65536`（与原递归一致）、22 帧、`STACK REDUCTION -71.4%`、`PEAK STACK: 7 → 2`、判据 `O(log n) Iterative Halving` |
+| 非等价拦截（M11） | `weirdHalve(32)`（`n ^ fn(n/2)`）仍判对数级，但 Apply 隐藏、标签 `[SEMANTICS_PRESERVED]`、收益文案说明保留源码 |
+| A/B 往返（M11） | `⇄ Inspect Baseline (12f)` → 12 帧 + 调用树重现 + `VIEWING BASELINE TRACE` → `⇄ Return to Optimized (22f)` → 22 帧；横幅全程冻结在 `STACK REDUCTION -71.4% / PEAK STACK 7 → 2` |
+| 突变熵芯片（M11） | 自定义循环得 `+ acc === 6` / `+ i === 4`，恒定 `target` 被排除 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -226,9 +245,14 @@
 - [x] 二维档滚动样例的门控依赖源码形态（M9 报备 → **M10 闭合**：`analyzeMatrixWrites` 纯运行时统计单元格变化，`includes('grid')` 全仓 0 处）
 - [x] 递归门控 `redundant >= 2` 的阈值不稳定（M10 实测暴露：comb(4,2) 记忆化后冗余恰为 1，被误判线性；改为 `expansive>=1 → 指数 / redundant>=1 → 记忆化 / 0 → 线性`）
 - [x] 自适应芯片取中间帧会推荐未写入的格子（M10：改为从末尾回溯到仍持有 dp 的帧，comb 给 `dp[4][2] === 6`）
-- [ ] 折半判定只看首个数值实参，`power(2,16)` 这类"第二参折半"不会被识别，仍落回线性递归（见 M10「遗留」）
-- [ ] 折半消栈只对"返回值等于步数"的形态等价，返回值依赖其它量时应拒绝生成（见 M10「遗留」）
-- [ ] 自适应规则 C 按变量出现顺序取前两个数值变量，复杂作用域下解释力不一定最优（见 M10「遗留」）
+- [x] 折半判定只看首个数值实参，`power(2,16)` 这类「第二参折半」不会被识别（M10 报备 → **M11 闭合**：按参数槽位收集序列，实测命中槽位 1（exp）`16 → 8 → 4 → 2 → 1`）
+- [x] 折半消栈只对「返回值等于步数」的形态等价（M10 报备 → **M11 闭合**：形态门控——计数型 / 快速幂型 / 其余拒绝生成，实测 `weirdHalve` 隐藏 Apply 并标 `[SEMANTICS_PRESERVED]`）
+- [x] 自适应规则 C 按变量出现顺序取前两个数值变量（M10 报备 → **M11 闭合**：按突变熵 `distinctCount` 降序，静态输入降级，实测 `target` 被排除、`acc` / `i` 入选）
+- [x] 缺少优化前后轨迹的 A/B 对比能力（M11：`abState` + `runForComparison` + `⇄` 按钮，横幅冻结、12 ↔ 22 帧往返无损）
+- [ ] 折半识别要求实参全部是数字，对象/字符串实参的递归会被跳过（见 M11「遗留」）
+- [ ] 快速幂合成未显式拒绝负数指数与非交换算子（见 M11「遗留」）
+- [ ] A/B 只保存最后一次 Apply 的两侧，连续二级火箭后无法回溯到 Stage-0（见 M11「遗留」）
+- [ ] 基线视图只加提示，未为两侧各存一份诊断报告（见 M11「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 

@@ -479,13 +479,29 @@ function deriveRuntimeQuickWatches(frames: TraceFrame[], curated: string[]): str
   }
 
   if (!derived.length) {
+    // 规则 C：按「变量突变熵」排序——全轨迹取值集合越大说明状态演化越丰富，优先推荐；
+    // 恒定不变的输入常量（target / limit 这类 distinctCount === 1）降级，仅在无动态变量时兜底。
+    const distinct = new Map<string, Set<number>>();
+    for (const f of frames) {
+      for (const [k, v] of Object.entries(f.variables)) {
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        const set = distinct.get(k) ?? new Set<number>();
+        set.add(v);
+        distinct.set(k, set);
+      }
+    }
+    const ranked = Array.from(distinct.entries())
+      .map(([name, set]) => ({ name, distinct: set.size }))
+      .sort((a, b) => b.distinct - a.distinct);
+    const dynamic = ranked.filter((r) => r.distinct >= 2);
+    const ordered = dynamic.length ? dynamic : ranked;
     for (const idx of probes) {
       const v = frames[idx]?.variables ?? {};
-      const nums = Object.entries(v).filter(([, x]) => typeof x === 'number') as [string, number][];
-      if (nums.length) {
-        for (const [k, val] of nums.slice(0, 2)) derived.push(`${k} === ${val}`);
-        break;
+      for (const { name } of ordered) {
+        if (derived.length >= 2) break;
+        if (typeof v[name] === 'number') derived.push(`${name} === ${v[name]}`);
       }
+      if (derived.length) break;
     }
   }
 
@@ -744,7 +760,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M10',
-    commit: '本次提交',
+    commit: 'ee2d94c',
     doc: 'docs/devlogs/M10-runtime-introspection-and-pascal-preset.md',
     title: '帕斯卡预设、自适应 Watch 合成、二维读写分离取证与折半递归消栈',
     why: 'M9 之后三条遗留都指向同一件事：判据与推荐仍然依赖「预设知识」而不是「这一跑的运行时事实」——Quick-Watch 在 Stage-2 后还推荐已消失的 leftBranch，二维滚动样例靠源码 grid 字样判断，折半递归被当成线性递归且没有消栈出口。',
@@ -767,6 +783,33 @@ const DEVLOGS: DevlogEntry[] = [
       '二维读写分离实测（DP 预设第 10 帧）：grid [3×4] 显示 READ-ONLY（暗灰），dp [3×4] 显示 WRITES: 6（天蓝），两者 Cursor [1][2] 十字准星正常；combTabulated 只有单个可变二维表，因此没有再被推荐 min-path 滚动样例。',
       '折半递归实测 halve(32)：判为 O(log n) Logarithmic Recursion / O(log n) Call Stack Depth 7，实参链 32 → 16 → 8 → 4 → 2 → 1（连续 5 步），标签 LOGARITHMIC_DESCENT + TAIL_UNROLL_CANDIDATE；Apply 后生成 while (curr > 1) 循环，18 帧、横幅 STACK REDUCTION -85.7% / PEAK STACK 7 → 1、终端 halving steps = 5，判据转为 O(log n) Iterative Halving / O(1) Scalar Accumulator。',
       '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、fib 31 帧 O(2^n) DUP 9、死循环 1334 帧 O(∞) 全部与 M9 基线一致。',
+    ],
+  },
+  {
+    tag: 'M11',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M11-positional-halving-and-ab-toggle.md',
+    title: '多参槽位折半、快速幂等价合成、突变熵 Watch 排序与 A/B 轨迹切换',
+    why: 'M10 的折半判定只看首参，power(2, 16) 这类"收敛在第二参"的递归识别不到；折半消栈又对任何折半递归都生成计数循环，遇到自定义返回值必然算错；Quick-Watch 的兜底排序按变量出现顺序，会挑中恒定的输入常量；评委想回看优化前的调用树时，只能重新点预设、横幅随之消失。',
+    what: [
+      'aiDiagnostics.ts：detectHalvingArgs 改为按参数槽位收集实参序列，任意槽位满足连续折半即命中，并回传 slot 供摘要标注「槽位 1（exp）」。',
+      'aiDiagnostics.ts：synthesizeHalvingLowering 增加严格语义等价门控——形态 A（1 + fn(...) 且基线返回 0）生成 steps 游标循环；形态 B（双参、槽位 1 折半、函数体含乘法）生成迭代二进制快速幂；其余形态返回 null，optimizedCode 回填源码并使 Apply 退场。',
+      'App.tsx：deriveRuntimeQuickWatches 规则 C 改为按变量突变熵排序（全轨迹 distinctCount 降序，distinct === 1 的静态输入仅作兜底），生成后段帧真实取值的断言。',
+      'App.tsx：新增 abState（两侧源码 + 冻结的帧数/栈深/展开重复数 + viewing），Benchmark 横幅右侧加 ⇄ Inspect Baseline / ⇄ Return to Optimized 按钮；切换走 runForComparison（只重跑沙箱、不重算诊断），因此横幅与判据芯片保持冻结；仅切换预设才清空 A/B。',
+      'App.tsx：基线视图下在遥测条显示 VIEWING BASELINE TRACE 提示，避免把优化后判据与基线轨迹混读；WRITES 徽章 tooltip 明确该数值是「相邻帧单元格变化数」。',
+    ],
+    conflicts: [
+      '多参槽位的判定必须先按位置切分实参再做收敛检查：power(2,16) 的槽位 0 恒为 2（不收敛），只看首参会把它当线性递归；改后摘要能指出「槽位 1（exp）16 → 8 → 4 → 2 → 1」。',
+      '折半合成的等价性不能靠"看起来像"：同一套游标循环对 halve 输出正确、对 power 会算错，对 weirdHalve（n ^ fn(n/2)）更是无从等价。因此合成器先做形态校验再做代码生成，未命中就明确拒绝并说明原因（不变量 #13c）。',
+      'A/B 切换若复用 executeCode（含诊断），横幅会随基线报告被重算成"31 → 31"。改为独立的 runForComparison 只重跑沙箱，横幅与芯片因此在整个往返过程中一字不变。',
+      '冻结指标而不是实时取值的代价是：基线视图下 AI 面板的判据仍描述优化后版本，用 VIEWING BASELINE TRACE 芯片显式标注，而不是让两套语义混在一起。',
+    ],
+    impact: [
+      'halve(32) 回归：仍判 O(log n) Logarithmic Recursion，摘要升级为「槽位 0（n）的收敛链 32 → 16 → 8 → 4 → 2 → 1」，按计数型生成 steps 循环，Apply 正常可见。',
+      'power(2, 16)：槽位 1（exp）链 16 → 8 → 4 → 2 → 1（连续 4 步）、12 帧、栈深 7；Apply 后生成迭代快速幂，终端实测 powerIter(2, 16) = 65536（与原递归一致），22 帧、横幅 STACK REDUCTION -71.4% / PEAK STACK 7 → 2、判据 O(log n) Iterative Halving / O(1) Scalar Accumulator。',
+      'weirdHalve(32)（n ^ fn(n/2)）：仍判 O(log n) Logarithmic Recursion / Stack Depth 7，但 Apply 按钮隐藏、标签为 [SEMANTICS_PRESERVED]，收益文案写明 custom return composition → source preserved。',
+      'A/B 往返：按钮 ⇄ Inspect Baseline (12f) → 基线 12 帧且出现调用树与 VIEWING BASELINE TRACE → ⇄ Return to Optimized (22f) → 回到 22 帧；横幅全程保持 STACK REDUCTION -71.4% / PEAK STACK 7 → 2 不变。',
+      '突变熵芯片：自定义循环代码得到 acc === 6 / i === 4（两者 distinct ≥ 2），恒定的 target 被排除；回归三预设（Rain 40、fib 31、DP 29）判据与帧数不变，切预设后 ⇄ 按钮消失。',
     ],
   },
 ];
@@ -794,6 +837,17 @@ export default function App() {
 
   // 点击 Apply Refactor 之前锁定一份基准，重跑完成后与当前实测值对齐成收益横幅
   const [baselineMetrics, setBaselineMetrics] = useState<BaselineMetrics | null>(null);
+  // A/B 轨迹对比：保存两侧源码与冻结的指标，切换只换沙箱轨迹、不清横幅
+  const [abState, setAbState] = useState<{
+    baselineCode: string;
+    optimizedCode: string;
+    baseFrames: number;
+    optFrames: number;
+    baseStack: number;
+    optStack: number;
+    optExpansive: number;
+    viewing: 'optimized' | 'baseline';
+  } | null>(null);
 
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
@@ -829,6 +883,29 @@ export default function App() {
     const report = await runAIDiagnostics(codeToRun, res.frames || [], res.error, apiKey);
     setAiReport(report);
     setIsAnalyzing(false);
+
+    const m = analyzeTraceMetrics(res.frames || []);
+    return {
+      framesCount: (res.frames || []).length,
+      maxStackDepth: m.maxStackDepth,
+      expansive: m.expansiveRedundantCount,
+    };
+  };
+
+  // A/B 对比专用：只重跑沙箱、不重算诊断，从而让 Benchmark 横幅的数据保持冻结不闪烁
+  const runForComparison = async (codeToRun: string) => {
+    setIsPlaying(false);
+    const res = await runInSandbox(codeToRun);
+    setExecTimeMs(res.executionTimeMs);
+    setSandboxError(res.error);
+    setFrames(res.frames || []);
+    setCurrentFrameIdx(0);
+    const m = analyzeTraceMetrics(res.frames || []);
+    return {
+      framesCount: (res.frames || []).length,
+      maxStackDepth: m.maxStackDepth,
+      expansive: m.expansiveRedundantCount,
+    };
   };
 
   useEffect(() => {
@@ -997,30 +1074,59 @@ export default function App() {
     setSourceCode(preset.code);
     setEditMode(false);
     setBaselineMetrics(null);
+    setAbState(null);
     setBreakpoints(new Set<number>());
     executeCode(preset.code);
   };
 
-  const handleApplyOptimized = () => {
+  const handleApplyOptimized = async () => {
     if (!aiReport?.optimizedCode) return;
+    const baselineCode = sourceCode;
+    const baseFrames = frames.length;
+    const baseStack = traceMetrics.maxStackDepth;
+    const baseExpansive = traceMetrics.expansiveRedundantCount;
     setBaselineMetrics({
-      framesCount: frames.length,
-      maxStackDepth: traceMetrics.maxStackDepth,
+      framesCount: baseFrames,
+      maxStackDepth: baseStack,
       timeComplexity: aiReport.timeComplexity,
       spaceComplexity: aiReport.spaceComplexity,
       execTimeMs,
       wasFused: Boolean(sandboxError && sandboxError.includes('[FUSE_')),
-      expansiveRedundantCount: traceMetrics.expansiveRedundantCount,
+      expansiveRedundantCount: baseExpansive,
     });
-    setSourceCode(aiReport.optimizedCode);
+    const optimizedCode = aiReport.optimizedCode;
+    setSourceCode(optimizedCode);
     setEditMode(false);
-    executeCode(aiReport.optimizedCode);
+    const after = await executeCode(optimizedCode);
+    setAbState({
+      baselineCode,
+      optimizedCode,
+      baseFrames,
+      optFrames: after.framesCount,
+      baseStack,
+      optStack: after.maxStackDepth,
+      optExpansive: after.expansive,
+      viewing: 'optimized',
+    });
+  };
+
+  // ⇄ A/B：只换沙箱轨迹（不重跑诊断），因此 Benchmark 横幅与判据 chip 保持冻结
+  const handleToggleAb = async () => {
+    if (!abState || isAnalyzing) return;
+    const nextView = abState.viewing === 'optimized' ? 'baseline' : 'optimized';
+    setAbState({ ...abState, viewing: nextView });
+    const code = nextView === 'baseline' ? abState.baselineCode : abState.optimizedCode;
+    setSourceCode(code);
+    await runForComparison(code);
   };
 
   const benchmarkDelta = useMemo(() => {
     if (!baselineMetrics || !aiReport) return null;
-    const from = baselineMetrics.framesCount;
-    const to = frames.length;
+    // 有 A/B 快照时一律使用冻结值：切换视图不会让横幅数字跟着跳
+    const from = abState ? abState.baseFrames : baselineMetrics.framesCount;
+    const to = abState ? abState.optFrames : frames.length;
+    const stackTo = abState ? abState.optStack : traceMetrics.maxStackDepth;
+    const expansiveTo = abState ? abState.optExpansive : traceMetrics.expansiveRedundantCount;
     const pct = from > 0 ? ((to - from) / from) * 100 : 0;
     const nowFused = Boolean(sandboxError && sandboxError.includes('[FUSE_'));
     return {
@@ -1034,9 +1140,9 @@ export default function App() {
         !baselineMetrics.wasFused &&
         !nowFused &&
         baselineMetrics.expansiveRedundantCount > 0 &&
-        traceMetrics.expansiveRedundantCount === 0,
+        expansiveTo === 0,
       expansiveFrom: baselineMetrics.expansiveRedundantCount,
-      expansiveTo: traceMetrics.expansiveRedundantCount,
+      expansiveTo,
       /** 基线被截断而重构后完整跑完：帧数不是同一量纲，只报状态与栈深收益 */
       abortedToCompleted: baselineMetrics.wasFused && !nowFused,
       /** 递归转迭代的栈空间降维型重构：迭代体语句展开会让帧数上升，主锚点必须换成栈收益 */
@@ -1044,20 +1150,20 @@ export default function App() {
         !baselineMetrics.wasFused &&
         !nowFused &&
         baselineMetrics.maxStackDepth >= 4 &&
-        traceMetrics.maxStackDepth <= 2 &&
-        frames.length > baselineMetrics.framesCount,
+        stackTo <= 2 &&
+        to > from,
       stackDropPct:
         baselineMetrics.maxStackDepth > 0
-          ? ((baselineMetrics.maxStackDepth - traceMetrics.maxStackDepth) / baselineMetrics.maxStackDepth) * 100
+          ? ((baselineMetrics.maxStackDepth - stackTo) / baselineMetrics.maxStackDepth) * 100
           : 0,
       stackFrom: baselineMetrics.maxStackDepth,
-      stackTo: traceMetrics.maxStackDepth,
+      stackTo,
       timeFrom: baselineMetrics.timeComplexity,
       spaceFrom: baselineMetrics.spaceComplexity,
       latencyFrom: baselineMetrics.execTimeMs,
       latencyTo: execTimeMs,
     };
-  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs, sandboxError]);
+  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs, sandboxError, abState]);
 
   // 横幅语义分段：熔断态 > 栈收益锚点 > 帧数百分比，三类互斥且都只使用实测值
   const benchmarkSegments = useMemo(() => {
@@ -1915,8 +2021,8 @@ export default function App() {
                               }`}
                               title={
                                 (matrixWrites[mat.name] ?? 0) === 0
-                                  ? 'Runtime forensics: zero cell writes across the trace — read-only input'
-                                  : `Runtime forensics: ${matrixWrites[mat.name]} cell write(s) across the trace — mutable state table`
+                                  ? 'Runtime forensics: zero cell transitions between adjacent frames — read-only input matrix'
+                                  : `Runtime forensics: ${matrixWrites[mat.name]} cell transitions between adjacent frames — mutable state table (0 would mean read-only; repeated writes to the same cell are counted per transition)`
                               }
                             >
                               {(matrixWrites[mat.name] ?? 0) === 0 ? 'READ-ONLY' : `WRITES: ${matrixWrites[mat.name]}`}
@@ -2245,6 +2351,22 @@ export default function App() {
                     <strong className={s.emphatic ? 'text-emerald-50' : 'text-emerald-100'}>{s.value}</strong>
                   </span>
                 ))}
+                {abState && (
+                  <button
+                    onClick={handleToggleAb}
+                    disabled={isAnalyzing}
+                    title={
+                      abState.viewing === 'optimized'
+                        ? 'Re-run the pre-refactor trace without losing the benchmark'
+                        : 'Return to the optimized trace'
+                    }
+                    className="ml-auto shrink-0 whitespace-nowrap rounded border border-emerald-400/60 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100 transition hover:bg-emerald-500/30 disabled:opacity-50"
+                  >
+                    {abState.viewing === 'optimized'
+                      ? `⇄ Inspect Baseline (${abState.baseFrames}f)`
+                      : `⇄ Return to Optimized (${abState.optFrames}f)`}
+                  </button>
+                )}
               </div>
             )}
 
@@ -2270,6 +2392,14 @@ export default function App() {
                     {aiReport.combinePattern && (
                       <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                         Operator: {aiReport.combinePattern}
+                      </span>
+                    )}
+                    {abState?.viewing === 'baseline' && (
+                      <span
+                        className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                        title="Sandbox is replaying the pre-refactor source; the verdict chips still describe the optimized run"
+                      >
+                        VIEWING BASELINE TRACE
                       </span>
                     )}
                   </div>
@@ -2566,6 +2696,24 @@ export default function App() {
                       <br />• M10: Pascal preset, runtime-derived quick-watch chips that evolve across
                       refactor stages, matrix write forensics replacing source-string gating, and
                       O(log n) halving recursion detection with loop lowering.
+                      <br />• M11: positional halving across argument slots, fast-power lowering behind a
+                      strict equivalence gate, mutation-entropy watch ranking, and one-click A/B trace
+                      toggling that keeps the benchmark banner frozen.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">11. A/B Trace &amp; Equivalence Gates (M11)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Halving is detected per argument slot, so power(2, 16) is recognised through slot 1
+                      (exp: 16 → 8 → 4 → 2 → 1) even though slot 0 never converges. Lowering is gated by
+                      shape: count form (1 + fn(...) with a zero base) becomes a steps cursor loop, the
+                      two-parameter multiply form becomes iterative binary exponentiation, and anything else
+                      keeps its source with Apply hidden (SEMANTICS_PRESERVED) rather than guessing.
+                      <br />• Quick-watch fallback ranks scalars by mutation entropy (distinct values across
+                      the trace) so static inputs drop out.
+                      <br />• A/B keeps both sources plus frozen metrics: switching replays the chosen side
+                      through the sandbox only (no diagnostics), so the benchmark banner never recomputes,
+                      and a VIEWING BASELINE TRACE chip marks when verdict chips describe the other side.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

@@ -509,24 +509,90 @@ function collectAccumulators(frames: TraceFrame[]) {
 }
 
 /** 折半实参链取证：连续进入事件的第一个数值实参满足 a[k+1] = floor(a[k] / 2)。 */
+/**
+ * 折半实参链取证（按参数槽位）：每次进入事件的实参按位置拆分，任意槽位满足
+ * a[k+1] = floor(a[k]/2)（≥2 步、首值 ≥8）即命中。
+ * power(2, 16) 的槽位 0 恒为底数、槽位 1 才收敛，因此必须逐槽扫描而不是只看首参。
+ */
 function detectHalvingArgs(frames: TraceFrame[]) {
-  const args: number[] = [];
+  const slots: number[][] = [];
   for (const f of frames) {
     if (!f.event.startsWith('函数进入')) continue;
     const top = f.callStack[f.callStack.length - 1] || '';
-    const m = top.match(/\((\d+)/);
-    if (m) args.push(Number(m[1]));
+    const m = top.match(/\(([^)]*)\)/);
+    if (!m) continue;
+    const nums = m[1].split(',').map((s) => Number(s.trim()));
+    if (!nums.length || nums.some((n) => !Number.isFinite(n))) continue;
+    nums.forEach((n, i) => {
+      slots[i] = slots[i] || [];
+      slots[i].push(n);
+    });
   }
-  let steps = 0;
-  while (steps + 1 < args.length && args[steps] > 1 && args[steps + 1] === Math.floor(args[steps] / 2)) {
-    steps++;
+  for (let slot = 0; slot < slots.length; slot++) {
+    const seq = slots[slot];
+    let steps = 0;
+    while (steps + 1 < seq.length && seq[steps] > 1 && seq[steps + 1] === Math.floor(seq[steps] / 2)) {
+      steps++;
+    }
+    if (seq.length >= 3 && seq[0] >= 8 && steps >= 2) {
+      return { detected: true, slot, base: seq[0], steps, chain: seq.slice(0, steps + 1) };
+    }
   }
-  return {
-    detected: args.length >= 3 && (args[0] ?? 0) >= 8 && steps >= 2,
-    base: args[0] ?? 0,
-    steps,
-    chain: args.slice(0, steps + 1),
-  };
+  return { detected: false, slot: -1, base: 0, steps: 0, chain: [] as number[] };
+}
+
+interface HalvingLowering {
+  code: string;
+  shape: 'count' | 'fastpow';
+  label: string;
+}
+
+/**
+ * 折半消栈的严格语义等价门控（不变量 #13c）：
+ *   形态 A 计数型（1 + fn(...) 且基线返回 0）→ 游标 steps++ 循环；
+ *   形态 B 快速幂（双参、槽位 1 折半、函数体含乘法）→ 迭代二进制快速幂；
+ *   其余形态一律返回 null，由调用方保留原递归源码。
+ */
+function synthesizeHalvingLowering(
+  info: FnSourceInfo,
+  rec: { slot: number; base: number },
+  args: number[]
+): HalvingLowering | null {
+  const body = info.body;
+  const countPattern = /(^|[^A-Za-z0-9_$])1\s*\+\s*[A-Za-z_$][\w$]*\s*\(/;
+  const baseReturnsZero = /if\s*\([^)]*\)\s*\{?\s*return\s+0\s*;/.test(body);
+
+  if (info.params.length === 1 && countPattern.test(body) && baseReturnsZero) {
+    return {
+      shape: 'count',
+      label: '计数型折半（1 + fn(n/2)，基线返回 0）',
+      code:
+        `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（${rec.base} 按 floor(n/2) 收敛）\n` +
+        `let curr = ${rec.base};\nlet steps = 0;\n` +
+        `while (curr > 1) {\n  curr = Math.floor(curr / 2);\n  steps += 1;\n}\n` +
+        `console.log("halving steps =", steps);`,
+    };
+  }
+
+  if (info.params.length === 2 && rec.slot > 0 && body.includes('*') && args.length >= 2) {
+    const [p0, p1] = info.params;
+    return {
+      shape: 'fastpow',
+      label: `快速幂折半（槽位 ${rec.slot} = ${p1} 按 floor/2 收敛，函数体含乘法）`,
+      code:
+        `// Stage-2: 折半递归等价展开为迭代二进制快速幂，O(1) 栈空间\n` +
+        `function ${info.name}Iter(${p0}, ${p1}) {\n` +
+        `  let result = 1;\n  let b = ${p0};\n  let curr = ${p1};\n` +
+        `  while (curr > 0) {\n` +
+        `    if (curr % 2 === 1) {\n      result = result * b;\n    }\n` +
+        `    b = b * b;\n    curr = Math.floor(curr / 2);\n  }\n` +
+        `  console.log("${info.name}Iter(" + ${p0} + ", " + ${p1} + ") =", result);\n` +
+        `  return result;\n}\n` +
+        `${info.name}Iter(${args[0]}, ${args[1]});`,
+    };
+  }
+
+  return null;
 }
 
 /** 迭代侧折半取证：任意数值变量在其帧序列上按 floor(v/2) 收敛。 */
@@ -551,15 +617,6 @@ function detectHalvingVariable(frames: TraceFrame[]) {
     }
   }
   return { detected: false, name: '', chain: [] as number[] };
-}
-
-function synthesizeHalvingLoop(base: number) {
-  return (
-    `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（${base} 按 floor(n/2) 收敛）\n` +
-    `let curr = ${base};\nlet steps = 0;\n` +
-    `while (curr > 1) {\n  curr = Math.floor(curr / 2);\n  steps += 1;\n}\n` +
-    `console.log("halving steps =", steps);`
-  );
 }
 
 export async function runAIDiagnostics(
@@ -636,27 +693,42 @@ export async function runAIDiagnostics(
   // 单链折半递归（O(log n) 栈深）：必须在通用递归分支之前判定，否则会被当成线性递归
   const halvingRec = detectHalvingArgs(frames);
   if (metrics.maxStackDepth >= 3 && metrics.redundantCallCount === 0 && halvingRec.detected) {
+    const stageInfo = extractFunctionInfo(sourceCode, metrics.dominantRecursiveName);
+    const callArgs = metrics.topCallExpr ? (metrics.topCallExpr.match(/-?\d+/g) || []).map(Number) : [];
+    const lowering = stageInfo ? synthesizeHalvingLowering(stageInfo, halvingRec, callArgs) : null;
+    const slotLabel = stageInfo?.params[halvingRec.slot]
+      ? `槽位 ${halvingRec.slot}（${stageInfo.params[halvingRec.slot]}）`
+      : `槽位 ${halvingRec.slot}`;
     return {
       ...metrics,
       timeComplexity: 'O(log n) Logarithmic Recursion',
       spaceComplexity: `O(log n) Call Stack Depth ${metrics.maxStackDepth}`,
-      summary: `调用栈实参链取证：${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销；可展开为单游标循环把栈压到 O(1)。`,
+      summary: `调用栈实参链取证：${slotLabel} 的收敛链 ${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销。${lowering ? `已按「${lowering.label}」生成等价的 O(1) 栈迭代形态。` : '因返回值含自定义非线性组合，无法机械推导等价迭代形态，按不变量 #13c 保留原递归以保证语义等价。'}`,
       frameInsights: [
         {
           frameIndex: metrics.bottleneckFrameIndex,
           line: metrics.hotspotLine,
           tag: 'LOGARITHMIC_DESCENT',
-          issue: `实参链 ${halvingRec.chain.join(' → ')} 按 floor(n/2) 收敛，每层无分支展开`,
+          issue: `${slotLabel} 的实参链 ${halvingRec.chain.join(' → ')} 按 floor(a/2) 收敛，每层无分支展开`,
         },
-        {
-          frameIndex: frames.length - 1,
-          line: metrics.hotspotLine,
-          tag: 'TAIL_UNROLL_CANDIDATE',
-          issue: '单链折半可展开为 while (curr > 1) curr = Math.floor(curr / 2) 的游标循环，栈深压到 2',
-        },
+        lowering
+          ? {
+              frameIndex: frames.length - 1,
+              line: metrics.hotspotLine,
+              tag: 'TAIL_UNROLL_CANDIDATE',
+              issue: `${lowering.label}：可展开为 O(1) 栈的迭代循环`,
+            }
+          : {
+              frameIndex: frames.length - 1,
+              line: metrics.hotspotLine,
+              tag: 'SEMANTICS_PRESERVED',
+              issue: '返回值组合形状未命中计数/快速幂模板，保留原递归、不生成猜测性代码',
+            },
       ],
-      optimizedCode: synthesizeHalvingLoop(halvingRec.base),
-      optimizationGain: `Stack: ${metrics.maxStackDepth} -> 2 (iteration) | Steps stay Θ(log2 ${halvingRec.base})`,
+      optimizedCode: lowering ? lowering.code : sourceCode,
+      optimizationGain: lowering
+        ? `Stack: ${metrics.maxStackDepth} -> O(1) iteration (${lowering.shape}) | Θ(log n) steps preserved`
+        : `Logarithmic recursion detected | custom return composition → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`,
     };
   }
 

@@ -1,6 +1,6 @@
 # M10 · 帕斯卡预设、自适应 Watch 合成、二维读写分离取证与折半递归消栈
 
-Commit：本次提交（`git log -1`）— feat(introspection): 完成 Milestone 10 帕斯卡树转矩阵预设、自适应Watch合成、二维表读写分离与O(log n)折半递归
+Commit `ee2d94c` — feat(introspection): 完成 Milestone 10 帕斯卡树转矩阵预设、自适应Watch合成、二维表读写分离与O(log n)折半递归
 
 ## Why · 背景动机
 
