@@ -17,6 +17,8 @@ export interface AIDiagnosticReport {
   topDuplicates?: string[];
   /** 线性递归迭代展开时所嗅探到的合并算子及其源码依据 */
   combinePattern?: string;
+  /** Stage-2 可降维时给前端的按钮文案（不存在则表示无需/无法继续重构） */
+  nextStageLabel?: string;
 }
 
 export interface RecursionForensics {
@@ -289,6 +291,67 @@ function synthesizeMemoizedSource(sourceCode: string, info: FnSourceInfo, topCal
   return `// Optimized: 自动注入 Top-Down 记忆化缓存（语义等价，重复子问题命中缓存直接返回）\n${replaced}${echo}`;
 }
 
+interface BinaryRecurrence {
+  param: string;
+  op: string;
+  offsetA: number;
+  offsetB: number;
+  baseMax: number;
+  baseIsIdentity: boolean;
+  baseLiteral: number;
+}
+
+/**
+ * 嗅探「单参数整数二元递推」形态：fn(p - a) <op> fn(p - b) 且基线为 if (p <= k) return p|常量。
+ * 只用于 Stage-2 代码生成；任何不匹配（混合参数、三元递推、非平凡基线、基线过宽）一律返回 null，
+ * 由调用方回退到原源码，绝不臆造一个可能算错的递推式。
+ */
+function sniffBinaryRecurrence(info: FnSourceInfo): BinaryRecurrence | null {
+  const call = `${info.name}\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*-\\s*(\\d+)\\s*\\)`;
+  const m = info.body.match(new RegExp(`${call}\\s*([+\\-*])\\s*${call}`));
+  if (!m) return null;
+  const [, p1, o1, op, p2, o2] = m;
+  if (p1 !== p2) return null;
+
+  const base = info.body.match(
+    new RegExp(`if\\s*\\(\\s*${p1}\\s*(<=|<)\\s*(\\d+)\\s*\\)\\s*\\{?\\s*return\\s+([A-Za-z_$][\\w$]*|\\d+)\\s*;`)
+  );
+  if (!base) return null;
+  const baseMax = base[1] === '<' ? Number(base[2]) - 1 : Number(base[2]);
+  if (baseMax < 0 || baseMax > 8) return null;
+  const baseIsIdentity = base[3] === p1;
+  const baseLiteral = baseIsIdentity ? 0 : Number(base[3]);
+  if (!baseIsIdentity && Number.isNaN(baseLiteral)) return null;
+
+  return {
+    param: p1,
+    op,
+    offsetA: Number(o1),
+    offsetB: Number(o2),
+    baseMax,
+    baseIsIdentity,
+    baseLiteral,
+  };
+}
+
+/** 由递推形态构造等价的自底向上 1D dp 表：种子取基线值，循环从「所有依赖项都已就位」处起算。 */
+function synthesizeBottomUpTabulation(info: FnSourceInfo, rec: BinaryRecurrence, argHint: number) {
+  const start = Math.max(rec.baseMax, rec.offsetA, rec.offsetB) + 1;
+  const seeds: number[] = [];
+  for (let i = 0; i < start; i++) seeds.push(rec.baseIsIdentity ? i : rec.baseLiteral);
+  return (
+    `// Stage-2: 自底向上数组递推，彻底消除递归调用栈（O(1) 栈深，嗅探依据 fn(${rec.param} - ${rec.offsetA}) ${rec.op} fn(${rec.param} - ${rec.offsetB})）\n` +
+    `function ${info.name}Tabulated(n) {\n` +
+    `  const dp = [${seeds.join(', ')}];\n` +
+    `  for (let i = ${start}; i <= n; i++) {\n` +
+    `    dp[i] = dp[i - ${rec.offsetA}] ${rec.op} dp[i - ${rec.offsetB}];\n` +
+    `  }\n` +
+    `  return dp[n];\n` +
+    `}\n` +
+    `console.log("${info.name}Tabulated(${argHint}) =", ${info.name}Tabulated(${argHint}));`
+  );
+}
+
 /**
  * 双指针判据：必须有作用域内同时可见的一对经典边界指针，且 (i, j) 形态还要求同帧存在数组，
  * 避免把「一个游标 + 一个累加器」的单重迭代误称为双指针夹逼。
@@ -455,11 +518,20 @@ export async function runAIDiagnostics(
 
     // 分支 A'：重复入参全部命中缓存、未再展开子树 —— 记忆化已生效，不得继续判指数级
     if (metrics.redundantCallCount >= 2) {
+      // Stage-2：记忆化仍占用 O(n) 调用栈，可继续降维为自底向上数组递推
+      const stageInfo = extractFunctionInfo(sourceCode, metrics.dominantRecursiveName);
+      const stageRec = stageInfo ? sniffBinaryRecurrence(stageInfo) : null;
+      const stageArg = metrics.sampleArg !== null && metrics.sampleArg > 0 ? metrics.sampleArg : 8;
+      const stage2Code = stageInfo && stageRec
+        ? synthesizeBottomUpTabulation(stageInfo, stageRec, stageArg)
+        : null;
+
       return {
         ...metrics,
         timeComplexity: 'O(n) Memoized Linear',
         spaceComplexity: `O(n) Memo Table + ${metrics.maxStackDepth} Stack Frames`,
-        summary: `记忆化缓存命中验证通过：${metrics.dominantRecursiveName}() 共出现 ${Object.keys(metrics.signatureHits).length} 个不同入参签名、累计 ${metrics.redundantCallCount} 次重复进入，但展开型重复为 ${metrics.expansiveRedundantCount}（0 表示重复调用全部在缓存守卫处直接返回，没有再展开子树），因此实际时间复杂度已降为线性。总帧数 ${frames.length}，峰值栈深 ${metrics.maxStackDepth} 层。`,
+        nextStageLabel: stage2Code ? 'Apply Stage-2: Bottom-Up Tabulation (O(1) Stack)' : undefined,
+        summary: `记忆化缓存命中验证通过：${metrics.dominantRecursiveName}() 共出现 ${Object.keys(metrics.signatureHits).length} 个不同入参签名、累计 ${metrics.redundantCallCount} 次重复进入，但展开型重复为 ${metrics.expansiveRedundantCount}（0 表示重复调用全部在缓存守卫处直接返回，没有再展开子树），因此实际时间复杂度已降为线性。总帧数 ${frames.length}，峰值栈深 ${metrics.maxStackDepth} 层——${stage2Code ? `仍可继续 Stage-2 消栈：把记忆化递归降维为自底向上 dp 数组递推，将峰值栈深压到 1。` : '当前形态未能安全嗅探出二元递推式，暂不提供 Stage-2 消栈。'}`,
         frameInsights: [
           {
             frameIndex: metrics.bottleneckFrameIndex,
@@ -467,9 +539,21 @@ export async function runAIDiagnostics(
             tag: 'MEMOIZATION_EFFECTIVE',
             issue: `重复入参 ${metrics.topDuplicates.join('，')} 均已命中缓存返回，展开型重复归零`,
           },
+          ...(stage2Code && stageRec
+            ? [
+                {
+                  frameIndex: frames.length - 1,
+                  line: metrics.hotspotLine,
+                  tag: 'STAGE2_TABULATION_READY',
+                  issue: `检测到二元递推 ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetA}) ${stageRec.op} ${metrics.dominantRecursiveName}(${stageRec.param} - ${stageRec.offsetB})，可数组化消除全部 ${metrics.maxStackDepth} 层调用栈`,
+                },
+              ]
+            : []),
         ],
-        optimizedCode: sourceCode,
-        optimizationGain: `Expansive repeats: ${metrics.redundantCallCount} -> 0 (cache hits) | 无需继续重构`,
+        optimizedCode: stage2Code ?? sourceCode,
+        optimizationGain: stage2Code
+          ? `Stage-2 lowering available | Peak Stack: ${metrics.maxStackDepth} -> 1 | Memo Table eliminated | Expansive repeats already 0`
+          : `Expansive repeats: ${metrics.redundantCallCount} -> 0 (cache hits) | Stage-2 tabulation not synthesizable for this shape`,
       };
     }
 

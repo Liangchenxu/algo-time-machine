@@ -14,7 +14,8 @@
 | M4 | `23e0a6d` | [M4-logarithmic-heuristics-and-governance.md](./M4-logarithmic-heuristics-and-governance.md) | `O(log n)` 判据闭环、滚动数组状态识别、`[FUSE_*]` 前缀标准化、实测 Benchmark Delta 与 ADR 制度 |
 | M5 | `ef934b0` | [M5-call-tree-and-breakpoints.md](./M5-call-tree-and-breakpoints.md) | 带参调用栈签名、重叠子问题精确取证与 A/B 分档、可点击调用树拓扑、行级断点与 Continue to Breakpoint |
 | M6 | `772ef79` | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
-| M7 | 本次提交 | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
+| M7 | `7de93be` | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
+| M8 | 本次提交 | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -58,19 +59,37 @@
     （d）熔断截断的基线与完整重跑之间**禁止计算帧数百分比**，只能显示
     `STATUS: FUSE_ABORTED → COMPLETED`；帧数变化在非截断态才可用 `FRAMES: a → b (x%)` 表述。
 13. **合成一致性契约**（M7 确立，防止「判据与自家产物打架」这类反复出现的病灶）：
-    （a）**源码嗅探只能服务于代码生成**——`extractFunctionInfo` / `sniffCombineOperator` 读源码定位函数体与
-    合并算子；复杂度判档（A / A′ / B、log、矩阵 vs 滚动数组、双指针 vs 迭代累积）必须只看时间帧证据，
+    （a）**合成可用源码、判据不得用源码**（本条口号，AGENT_GUIDE 与各篇 DevLog 引用时请逐字一致）：
+    `extractFunctionInfo` / `sniffCombineOperator` / `sniffBinaryRecurrence` 可以读源码定位函数体、
+    形参与合并算子；复杂度判档（A / A′ / B、log、矩阵 vs 滚动数组、双指针 vs 迭代累积）必须只看时间帧证据，
     不得新增任何 `sourceCode.includes(...)` 型判据（不变量 #6 的延伸与边界划定）。
     （b）**重叠递归的判据是「展开型重复」而非「重复进入」**：记忆化包装后重复入参照样触发 `__enterFn`
     （缓存守卫在其之后），`redundantCallCount` 不归零；只有 `expansiveRedundantCount`（下一帧栈更深）
     才能证明真的又重算了一整棵子树。改动该指标会让 A′（`O(n) Memoized Linear`）误回落到 A（`O(2^n)`）。
     （c）**合成失败必须放弃注入并说明原因**：形参含默认值/解构、或大括号配对定位失败时返回原源码，
     绝不输出语法残破的"优化代码"；`optimizedCode === sourceCode` 时 Apply 按钮自动隐藏。
-    （d）**Watch 断言的白名单**：字符集不含 `[` `]`（下标访问一律 INVALID），拒绝 `ident(` 调用形态与
+    （d）**Watch 断言的白名单**：拒绝 `ident(` 调用形态与
     `this/window/globalThis/self/document/location/Function/eval/constructor/prototype/process/require/import`
     等宿主名；作用域缺变量必须返回 ERROR 带原因，**不得谎报 FALSE**。
+    （下标访问边界自 M8 起放宽，见 #14(d)。）
+14. **纯运行时剪枝判据与 Watch 下标安全边界**（M8 确立）：
+    （a）调用树里 `HIT`（缓存剪枝）与 `DUP`（冗余展开）**只能由拓扑推出**：同签名首次激活
+    `firstChildCount > 0` 且本次激活 `childCount === 0` 才判 `pruned`，否则判 `expansive`。
+    前置条件不可省略——天然基线叶子首次就没有子节点，去掉它会把基线误报成剪枝成绩。
+    配色优先级固定 `active > pruned > expansive > retired`，但 HIT/DUP 徽章始终显示，
+    两类信息不得互相覆盖；判据不读源码，仍受 #6 / #13(a) 约束。
+    （b）`SUBTREE PRUNING` 锚点与 A′ 判据同源（`expansiveRedundantCount` 由 >0 归零）；
+    改动该取证口径必须同步复核 `benchmarkSegments` 的优先级链
+    `STATUS(熔断) > SUBTREE PRUNING > STACK REDUCTION > FRAMES`，并保留 `emitTailComplexityRows`
+    这类防重复渲染开关。
+    （c）Stage-2 递推合成只接受「单参数 + 二元 + 恒等或常量基线」这一可机械推导形态，
+    其余一律返回 `null` 回退源码：**宁可少一级火箭，不得生成算错的 dp 递推**。
+    （d）Watch 放行 `[` `]` 下标断言（`dp[1][2] === 6`、`grid[r][c] > 0`），但仍禁止点号、引号与
+    单等号赋值（切断 `obj.constructor` / `obj["constructor"]` 两条成员注入路径，
+    `===` `!==` `<=` `>=` `==` `!=` 不受影响）；越界与缺变量返回 ERROR；
+    `→T` 观察点跳帧需先暂停再瞬移，全轨迹无解时必须给出可见反馈而不是静默。
 
-## 当前实测基线（M7 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M8 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -106,6 +125,11 @@
 | 栈收益锚点（M7） | `STACK REDUCTION: -71.4% Call Frames` \| `PEAK STACK: 7 → 2` \| `TRACE STEPS: 7 → 13 (Unrolled Loop)` |
 | SVG 自动聚焦（M7） | 跳帧时 `scrollLeft 193 → 0`、`scrollTop 0 → 26`（内容 246px / 可视 220px，clamp 正确） |
 | Watch 守卫（M7） | `r === 1 && c === 2` TRUE、裸 `r` TRUE（tooltip 回显 `1`）、`dp[1][2] === 6` INVALID（白名单禁下标）、`alert(n)` INVALID、越界 `n > 5` ERROR；表达式上限 4 条 |
+| HIT/DUP 取证（M8） | fib(5) 31 帧：`DUP 9 / HIT 0`（等于 redundantCallCount 9）；climb Stage-1 29 帧：`DUP 1 / HIT 2`，HIT 节点 fill `#052e16` stroke `#10b981` text `#6ee7b7` 徽章 `HIT×2` |
+| 二级火箭（M8） | climb(5)：Stage-0 10 帧 `O(2^n)` → Stage-1 29 帧 `O(n) Memoized Linear`（终端 `memoized climb(5) = 8`）→ Stage-2 9 帧 `O(n) Linear Iterative Scan`、`PEAK STACK: 5 → 2`（终端 `climbTabulated(5) = 8`）；按钮自动换标 `Apply Stage-2: Bottom-Up Tabulation (O(1) Stack)` |
+| 剪枝锚点（M8） | `SUBTREE PRUNING: Expansive Redundant Subtrees 1 → 0 (-100% Pruned)` \| `TIME: O(2^n) Exponential → O(n) Memoized Linear` \| `SPACE: … → O(n) Memo Table + 5 Stack Frames` \| `TRACE STEPS: 10 → 29 (Includes O(1) Memo Lookups)` |
+| Watch 下标（M8） | FRAME 11：`dp[1][2] === 6` TRUE、`dp[99][0] === 1` ERROR（Cannot read properties of undefined (reading '0')）；FRAME 1 同一断言 ERROR（dp is not defined，符合 #13d，与裁决预期的 FALSE 不同）；`count = 5` INVALID（assignment）、`window.alert` 与 `height['0']` INVALID（no dot or quotes） |
+| 观察点跳帧（M8） | `→T` 从 FRAME 1 环形扫描到 FRAME 11 / 29 并暂停，落点与 amber 突变格 `6 @ [1,2]` 同帧；无解时胶囊显示 `no TRUE frame` |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -141,8 +165,13 @@
 - [x] 记忆化版本被自家判据再次判为 O(2^n)（M7 实测暴露：重复进入不等于重复展开；补 `expansiveRedundantCount` 三档化）
 - [x] 栈收益型重构被帧数上升掩盖（M7：横幅 segment 化，`STACK REDUCTION` 抢占主锚点，`TRACE STEPS (Unrolled Loop)` 明确不冒充收益）
 - [x] Watch 求值若直接 new Function 等于开放任意代码执行入口（M7：三道闸门 + 宿主名黑名单 + 下标禁用，实测 alert/process 全 INVALID）
-- [ ] 通用自底向上 tabulation 合成仍只覆盖 fib；任意重叠递归的数组化需要推断状态维度与转移方程（见 M7「遗留」）
-- [ ] 记忆化场景 FRAMES 列无信息量（缓存命中也要进入函数一次），暂未对 A′ 档隐藏该列（见 M7「遗留」）
+- [x] 通用自底向上 tabulation 合成仍只覆盖 fib（M7 报备 → **M8 闭环**：`sniffBinaryRecurrence` + `synthesizeBottomUpTabulation`，实测 `climb` 降维为 `dp = [0, 1, 2]` 循环，终端 `climbTabulated(5) = 8`，峰值栈深 5 → 2）
+- [x] 记忆化场景 FRAMES 列无信息量（M7 报备 → **M8 闭环**：`subtreePruningAnchor` 让 `SUBTREE PRUNING: 1 → 0 (-100% Pruned)` 抢占主锚点，帧数上升明确标注 `TRACE STEPS … (Includes O(1) Memo Lookups)`）
+- [x] HIT 与 DUP 无法区分，记忆化后的调用树看起来仍在冗余展开（M8：`firstChildCount > 0 && childCount === 0` 纯拓扑判据，实测 climb Stage-1 `DUP 1 / HIT 2`，与 `redundantCallCount = 3` 自洽）
+- [x] Watch 不支持下标，无法断言 dp / grid 单元状态（M8：白名单放行 `[` `]`，实测 `dp[1][2] === 6` TRUE、`dp[99][0] === 1` ERROR 而非崩溃）
+- [x] 缺少 GDB 式条件观察点跳帧（M8：`→T` 环形扫描首个 TRUE 帧，FRAME 1 → FRAME 11 / 29 正落在 `dp[1][2]` 写入帧，与 amber 突变格同帧）
+- [ ] Stage-2 形态覆盖仍限于「单参数 + 二元 + 恒等或常量基线」；多元（comb(n,k)）、变步长（n / 2）与混合算子递推返回 null（见 M8「遗留」）
+- [ ] HIT 判据要求首次调用曾展开子树，对手写自底向上代码不显示剪枝成绩（语义正确但界面缺解释，见 M8「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 

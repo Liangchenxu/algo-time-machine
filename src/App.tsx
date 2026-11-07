@@ -48,6 +48,8 @@ interface BaselineMetrics {
   execTimeMs: number;
   /** 基线那一跑是否被 [FUSE_*] 熔断截断：截断帧数与完整帧数不可做百分比比较 */
   wasFused: boolean;
+  /** 基线的展开型重复数：从 >0 降到 0 即记忆化剪枝成功，此时帧数上升不构成负优化 */
+  expansiveRedundantCount: number;
 }
 
 const PRESETS: PresetItem[] = [
@@ -207,6 +209,8 @@ interface CallTreeNode {
   parentId: number | null;
   isDuplicate: boolean;
   duplicateCount: number;
+  /** 纯运行时拓扑判据：expansive = 重复且又展开了子树；pruned = 重复但零子节点直接退栈（缓存命中） */
+  dupKind: 'expansive' | 'pruned' | null;
 }
 
 /**
@@ -244,6 +248,7 @@ function buildCallTree(frames: TraceFrame[]): { nodes: CallTreeNode[]; signature
         parentId: i > 0 ? stackIds[stackIds.length - 1] : null,
         isDuplicate: signature !== 'main()' && (signatureHits[signature] || 0) > 1,
         duplicateCount: signatureHits[signature] || 1,
+        dupKind: null,
       };
       nodes.push(node);
       stackIds.push(node.id);
@@ -254,6 +259,24 @@ function buildCallTree(frames: TraceFrame[]): { nodes: CallTreeNode[]; signature
   while (stackIds.length > 0) {
     const id = stackIds.pop() as number;
     nodes[id].exitFrameIndex = Math.max(0, frames.length - 1);
+  }
+
+  // 纯运行时剪枝取证：同签名首次调用展开了若干直接子节点，而本次重复调用一个子节点都没有、
+  // 进入即退栈 —— 拓扑上只能是被缓存守卫拦截，据此把 DUP（玫红）细分出 HIT（翠绿）。全程不读源码。
+  const childCounts = new Map<number, number>();
+  for (const n of nodes) {
+    if (n.parentId !== null) childCounts.set(n.parentId, (childCounts.get(n.parentId) || 0) + 1);
+  }
+  const firstChildCount = new Map<string, number>();
+  for (const n of nodes) {
+    if (n.signature === 'main()') continue;
+    if (!firstChildCount.has(n.signature)) firstChildCount.set(n.signature, childCounts.get(n.id) || 0);
+  }
+  for (const n of nodes) {
+    if (!n.isDuplicate) continue;
+    const kids = childCounts.get(n.id) || 0;
+    const firstKids = firstChildCount.get(n.signature) || 0;
+    n.dupKind = firstKids > 0 && kids === 0 ? 'pruned' : 'expansive';
   }
 
   return { nodes, signatureHits };
@@ -354,8 +377,12 @@ type WatchResult = { state: 'TRUE' | 'FALSE' | 'INVALID' | 'ERROR'; detail: stri
 function evalWatchExpression(expr: string, vars: Record<string, any>): WatchResult {
   const trimmed = expr.trim();
   if (!trimmed) return { state: 'INVALID', detail: 'empty expression' };
-  if (!/^[\w$.\s()<>=!+\-*/%&|,:?'"]+$/.test(trimmed)) {
-    return { state: 'INVALID', detail: 'only variables, numbers and operators' };
+  // 放行下标括号；点号与引号一律拒绝，切断 obj.constructor / obj["constructor"] 两条成员注入路径
+  if (!/^[\w$\s()\[\]<>=!+\-*/%&|,:]+$/.test(trimmed) || /[.']/.test(trimmed)) {
+    return { state: 'INVALID', detail: 'only variables, indices and operators (no dot or quotes)' };
+  }
+  if (/(^|[^=!<>])=([^=]|$)/.test(trimmed)) {
+    return { state: 'INVALID', detail: 'assignment not allowed, use === / !== / <= / >=' };
   }
   if (/\w\s*\(/.test(trimmed)) return { state: 'INVALID', detail: 'function calls are not allowed' };
   if (WATCH_FORBIDDEN.test(trimmed)) return { state: 'INVALID', detail: 'host objects are not allowed' };
@@ -529,7 +556,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M7',
-    commit: '本次提交',
+    commit: '7de93be',
     doc: 'docs/devlogs/M7-auto-memo-and-watch-guards.md',
     title: '通用自动记忆化合成、迭代累积判据分档、栈收益锚点与 SVG 树自动聚焦',
     why: 'M6 收尾有三处不体面：所有重叠递归都被塞进 fib 专用 DP 样例，非 fib 函数点 Apply 会得到一段语义无关的代码；迭代化之后的 factIter 被兜底档称作「双指针」；长链 SVG 调用树超出 232px 视口后还要手动翻找当前激活节点。',
@@ -554,6 +581,34 @@ const DEVLOGS: DevlogEntry[] = [
       'Rain 回归：仍判 O(n) Linear Two-Pointer，摘要新增指针对证据「left / right 同帧可见」，40 帧与热点 L9（11x）不变。',
       'SVG 自动聚焦：跳帧时容器 scrollLeft 193 → 0、scrollTop 0 → 26（246px 内容高度被正确 clamp 到上限），激活节点始终落在可视区内。',
       'Watch 四态实测：FRAME 1 的 n === 5 为 TRUE；FRAME 4 为 FALSE；alert(n) 与 process.exit() 为 INVALID（function calls are not allowed）；Rain 预设下 n > 5 为 ERROR（n is not defined），作用域缺失返回可读原因而不是静默假值。',
+    ],
+  },
+  {
+    tag: 'M8',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M8-subtree-pruning-and-watchpoints.md',
+    title: '记忆化 HIT 剪枝拓扑取证、二阶段递推降维合成与 Watch 下标观察点',
+    why: 'M7 之后还剩三处不闭环：记忆化生效时调用树仍把所有重复画成玫红 DUP，看不出「这次重复其实被缓存拦截」；A′ 档的 optimizedCode 直接回填源码，二级火箭只有半程，栈深依旧 5 层；Watch 不支持下标，无法断言 dp[1][2] 这类真正体现算法状态的命题，也没有「跳到条件成立的那一帧」的能力。',
+    what: [
+      'App.tsx buildCallTree：构图后追加一遍拓扑取证——统计每个激活节点的直接子节点数 childCounts 与同签名首次调用的 firstChildCount；isDuplicate 节点若 firstChildCount > 0 且 childCount === 0（首次展开了子树、这次零子节点直接退栈）判 dupKind = pruned，否则 expansive。全程只看帧与父子关系，不读源码，符合不变量 #6 与 #13。',
+      'App.tsx 调用树视图：pruned 节点渲染为翠绿（SVG fill #052e16 / stroke #10b981 / text #6ee7b7，Compact List 用 emerald 边框），右上角徽章按类型显示 HIT×n 或 DUP×n；图例拆成 DUP / HIT 双计数；active 优先级仍高于配色，保证「当前在栈上」始终一眼可辨。',
+      'App.tsx 横幅：BaselineMetrics 记录 expansiveRedundantCount，新增 subtreePruningAnchor（两侧均未熔断且展开型重复由 >0 归零）；命中时主锚点输出 SUBTREE PRUNING: Expansive Redundant Subtrees a → 0 (-100% Pruned) + TIME + SPACE + TRACE STEPS: a → b (Includes O(1) Memo Lookups)，并由 emitTailComplexityRows 标志避免与公共尾段重复。',
+      'aiDiagnostics.ts Stage-2：sniffBinaryRecurrence 从函数体嗅探 fn(p - a) <op> fn(p - b) 与 if (p <= k) return p|常量 基线（含 < 与 <= 两种），synthesizeBottomUpTabulation 据此生成种子数组与从 max(baseMax, offsets) + 1 起算的自底向上 dp 循环；任何不匹配（混合参数、三元递推、基线过宽、定位失败）返回 null 并回退源码；A′ 档通过 nextStageLabel 让按钮显示 Apply Stage-2: Bottom-Up Tabulation (O(1) Stack)。',
+      'App.tsx Watch：白名单加入方括号以支持 dp[1][2] === 6、grid[r][c] > 0，同时禁止点号与引号以切断 obj.constructor 与 obj["constructor"] 两条注入路径，新增单等号赋值拒绝分支；每条断言右侧加 →T 按钮，从 (currentFrameIdx + 1) % total 起环形扫描首个 TRUE 帧并暂停瞬移，全轨迹无解时在胶囊上标 no TRUE frame。',
+    ],
+    conflicts: [
+      '裁决预期「DP 预设第 1 帧 dp[1][2] === 6 显示 FALSE」，实测为 ERROR（dp is not defined）：第 1 帧是 const grid 语句的快照，dp 因 TDZ 安全读取被过滤出变量表，作用域里根本没有 dp。按不变量 #13d「缺变量必须 ERROR、不得谎报 FALSE」保留现状——下标解析本身已生效（同一断言在 FRAME 11 为 TRUE）。',
+      'HIT 判据不能只看 childCount === 0：基线叶子（如首次 climb(2)）本来就无子节点，若据此标绿会把「天然基线」误报成「缓存剪枝」。因此必须叠加 firstChildCount > 0 这一前置条件，实测 climb 的 3 个重复节点正确分成为 DUP 1 / HIT 2。',
+      'Stage-2 的种子值取自基线语义而非运行时结果（帧里不携带返回值），因此合成器只在「基线是 return p 或 return 常量」这种可机械推导的形态下工作，其余一律放弃注入，避免编造一个看似合理实则错误的递推式。',
+      '记忆化后 FRAMES 从 10 涨到 29 属正常（缓存守卫自身也要进入函数），M7 遗留的这一列在 M8 由 SUBTREE PRUNING 锚点接管解释，Stage-2 之后帧数回落到 9，三段曲线自证单调。',
+    ],
+    impact: [
+      '二级火箭实测：Stage-0 climb(5) 10 帧 / O(2^n) Exponential / DUP 4、HIT 0 → Stage-1 记忆化 29 帧 / O(n) Memoized Linear / DUP 1、HIT 2（HIT 节点 fill #052e16 边框 #10b981，徽章 HIT×2）/ 终端 memoized climb(5) = 8 → Stage-2 数组递推 9 帧 / O(n) Linear Iterative Scan / PEAK STACK 5 → 2 / 终端 climbTabulated(5) = 8。',
+      '剪枝锚点实测横幅：SUBTREE PRUNING: Expansive Redundant Subtrees 1 → 0 (-100% Pruned) | TIME: O(2^n) Exponential → O(n) Memoized Linear | SPACE: O(n) Stack Depth 5 → O(n) Memo Table + 5 Stack Frames | TRACE STEPS: 10 → 29 (Includes O(1) Memo Lookups) | PEAK STACK: 5 → 5。',
+      'Stage-2 生成代码与裁决示例一致：const dp = [0, 1, 2]; for (let i = 3; i <= n; i++) { dp[i] = dp[i - 1] + dp[i - 2]; } return dp[n]; 按钮文案 Apply Stage-2: Bottom-Up Tabulation (O(1) Stack) 自动换标。',
+      'DUP 计数交叉验证：fib(5) 31 帧下 DUP 9 / HIT 0，与 redundantCallCount = 9 一致；记忆化 climb 的 HIT 2 + DUP 1 = 3 等于其 redundantCallCount = 3。',
+      'Watch 下标与跳帧实测：FRAME 11 下 dp[1][2] === 6 → TRUE 且 dp[99][0] === 1 → ERROR（Cannot read properties of undefined (reading 0)，越界不崩溃）；FRAME 1 同一断言 → ERROR（dp is not defined：TDZ 过滤后该帧作用域里还没有 dp，与裁决预期的 FALSE 不同）；count = 5 → INVALID（assignment not allowed）；引号下标写法与 window.alert → INVALID（no dot or quotes）；→T 从 FRAME 1 精确瞬移到 FRAME 11 / 29，与 amber 突变格 6 @ [1,2] 同一帧。',
+      '回归与纪律：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)、死循环 1334 帧 O(∞) 与 [FUSE_STEP_LIMIT] 横幅全部未变；13 条不变量逐条复核通过，npm run build 零报错，src/** emoji 扫描无命中，控制台零 error/warn。',
     ],
   },
 ];
@@ -589,6 +644,7 @@ export default function App() {
   const [pinnedVars, setPinnedVars] = useState<Set<string>>(new Set<string>());
   const [watchExprs, setWatchExprs] = useState<string[]>([]);
   const [watchDraft, setWatchDraft] = useState<string>('');
+  const [seekState, setSeekState] = useState<{ expr: string; found: boolean; frameIndex: number } | null>(null);
   const svgScrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
@@ -708,6 +764,15 @@ export default function App() {
     [callTree]
   );
   const treeLayout = useMemo(() => layoutCallTree(callTree.nodes), [callTree]);
+  const pruneStats = useMemo(() => {
+    let pruned = 0;
+    let expansive = 0;
+    for (const n of callTree.nodes) {
+      if (n.dupKind === 'pruned') pruned++;
+      else if (n.dupKind === 'expansive') expansive++;
+    }
+    return { pruned, expansive };
+  }, [callTree]);
   const activeNodeIds = useMemo(() => {
     const ids = new Set<number>();
     for (const n of callTree.nodes) {
@@ -783,6 +848,7 @@ export default function App() {
       spaceComplexity: aiReport.spaceComplexity,
       execTimeMs,
       wasFused: Boolean(sandboxError && sandboxError.includes('[FUSE_')),
+      expansiveRedundantCount: traceMetrics.expansiveRedundantCount,
     });
     setSourceCode(aiReport.optimizedCode);
     setEditMode(false);
@@ -801,6 +867,14 @@ export default function App() {
       pct,
       baseFused: baselineMetrics.wasFused,
       nowFused,
+      /** 记忆化剪枝锚点：展开型重复从 >0 归零，即「指数冗余 → 缓存剪枝」的成功叙事 */
+      subtreePruningAnchor:
+        !baselineMetrics.wasFused &&
+        !nowFused &&
+        baselineMetrics.expansiveRedundantCount > 0 &&
+        traceMetrics.expansiveRedundantCount === 0,
+      expansiveFrom: baselineMetrics.expansiveRedundantCount,
+      expansiveTo: traceMetrics.expansiveRedundantCount,
       /** 基线被截断而重构后完整跑完：帧数不是同一量纲，只报状态与栈深收益 */
       abortedToCompleted: baselineMetrics.wasFused && !nowFused,
       /** 递归转迭代的栈空间降维型重构：迭代体语句展开会让帧数上升，主锚点必须换成栈收益 */
@@ -834,6 +908,8 @@ export default function App() {
       value: `${d.stackFrom} → ${d.stackTo}`,
       emphatic: false,
     };
+    // 记忆化剪枝档自行给出 TIME/SPACE 顺序，避免与公共尾部重复渲染
+    let emitTailComplexityRows = true;
 
     if (d.baseFused || d.nowFused) {
       segs.push({
@@ -844,6 +920,33 @@ export default function App() {
         } (${d.to}f)${d.baseFused && !d.nowFused ? ' | frame counts across a fuse boundary are not comparable' : ''}`,
         emphatic: true,
       });
+    } else if (d.subtreePruningAnchor) {
+      segs.push({
+        key: 'anchor',
+        label: 'SUBTREE PRUNING',
+        value: `Expansive Redundant Subtrees ${d.expansiveFrom} → 0 (-100% Pruned)`,
+        emphatic: true,
+      });
+      segs.push({
+        key: 'time',
+        label: 'TIME',
+        value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
+        emphatic: false,
+      });
+      segs.push({
+        key: 'space',
+        label: 'SPACE',
+        value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
+        emphatic: false,
+      });
+      segs.push({
+        key: 'trace',
+        label: 'TRACE STEPS',
+        value: `${d.from} → ${d.to} (Includes O(1) Memo Lookups)`,
+        emphatic: false,
+      });
+      segs.push(stackSeg);
+      emitTailComplexityRows = false;
     } else if (d.stackReductionAnchor) {
       segs.push({
         key: 'anchor',
@@ -869,18 +972,20 @@ export default function App() {
     }
 
     if (!segs.some((s) => s.key === 'stack')) segs.push(stackSeg);
-    segs.push({
-      key: 'space',
-      label: 'SPACE',
-      value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
-      emphatic: false,
-    });
-    segs.push({
-      key: 'time',
-      label: 'TIME',
-      value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
-      emphatic: false,
-    });
+    if (emitTailComplexityRows) {
+      segs.push({
+        key: 'space',
+        label: 'SPACE',
+        value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
+        emphatic: false,
+      });
+      segs.push({
+        key: 'time',
+        label: 'TIME',
+        value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
+        emphatic: false,
+      });
+    }
     segs.push({
       key: 'latency',
       label: 'LATENCY',
@@ -920,6 +1025,28 @@ export default function App() {
     if (!expr) return;
     setWatchExprs((prev) => (prev.includes(expr) || prev.length >= 4 ? prev : [...prev, expr]));
     setWatchDraft('');
+    setSeekState(null);
+  };
+
+  const removeWatchExpression = (expr: string) => {
+    setWatchExprs((prev) => prev.filter((x) => x !== expr));
+    setSeekState((prev) => (prev && prev.expr === expr ? null : prev));
+  };
+
+  // 条件观察点跳帧：从下一帧起环形扫描整条轨迹，停在第一个使断言为 TRUE 的帧
+  const seekNextTrue = (expr: string) => {
+    if (frames.length === 0) return;
+    const start = (currentFrameIdx + 1) % frames.length;
+    for (let step = 0; step < frames.length; step++) {
+      const idx = (start + step) % frames.length;
+      if (evalWatchExpression(expr, frames[idx].variables ?? {}).state === 'TRUE') {
+        setIsPlaying(false);
+        setCurrentFrameIdx(idx);
+        setSeekState({ expr, found: true, frameIndex: idx });
+        return;
+      }
+    }
+    setSeekState({ expr, found: false, frameIndex: -1 });
   };
 
   // SVG 调用树自动聚焦：把当前激活路径上最深的节点滚到视口中心
@@ -1289,8 +1416,18 @@ export default function App() {
                 >
                   <span className="font-semibold">{expr}</span>
                   <span className="rounded bg-black/40 px-1">{result.state}</span>
+                  {seekState && seekState.expr === expr && !seekState.found && (
+                    <span className="rounded bg-amber-500/20 px-1 text-amber-200">no TRUE frame</span>
+                  )}
                   <button
-                    onClick={() => setWatchExprs((prev) => prev.filter((x) => x !== expr))}
+                    onClick={() => seekNextTrue(expr)}
+                    title="Seek next frame where expression is TRUE"
+                    className="rounded border border-zinc-700 bg-zinc-900 px-1 text-[9px] text-sky-300 transition hover:border-sky-400/60 hover:text-sky-200"
+                  >
+                    →T
+                  </button>
+                  <button
+                    onClick={() => removeWatchExpression(expr)}
                     title={`Remove watch ${expr}`}
                     className="text-zinc-500 hover:text-rose-300"
                   >
@@ -1357,7 +1494,11 @@ export default function App() {
                     </span>
                     <span className="flex items-center gap-1 shrink-0">
                       <span className="h-2 w-2 rounded bg-rose-500/60" />
-                      redundant {traceMetrics.redundantCallCount}
+                      DUP {pruneStats.expansive}
+                    </span>
+                    <span className="flex items-center gap-1 shrink-0">
+                      <span className="h-2 w-2 rounded bg-emerald-500/60" />
+                      HIT {pruneStats.pruned}
                     </span>
                     <span className="flex items-center gap-1 shrink-0">
                       <span className="h-2 w-2 rounded bg-zinc-700" />
@@ -1401,9 +1542,14 @@ export default function App() {
                           const future = n.entryFrameIndex > currentFrameIdx;
                           const palette = active
                             ? { fill: '#082f49', stroke: '#38bdf8', text: '#bae6fd' }
-                            : n.isDuplicate
-                              ? { fill: '#2b0a12', stroke: '#f43f5e', text: '#fda4af' }
-                              : { fill: '#18181b', stroke: '#27272a', text: '#a1a1aa' };
+                            : n.dupKind === 'pruned'
+                              ? { fill: '#052e16', stroke: '#10b981', text: '#6ee7b7' }
+                              : n.isDuplicate
+                                ? { fill: '#2b0a12', stroke: '#f43f5e', text: '#fda4af' }
+                                : { fill: '#18181b', stroke: '#27272a', text: '#a1a1aa' };
+                          const badgeFill = n.dupKind === 'pruned' ? '#064e3b' : '#4c0519';
+                          const badgeStroke = n.dupKind === 'pruned' ? '#10b981' : '#f43f5e';
+                          const badgeText = n.dupKind === 'pruned' ? '#6ee7b7' : '#fecdd3';
                           return (
                             <g
                               key={n.id}
@@ -1443,8 +1589,8 @@ export default function App() {
                                     width={26}
                                     height={10}
                                     rx={3}
-                                    fill="#4c0519"
-                                    stroke="#f43f5e"
+                                    fill={badgeFill}
+                                    stroke={badgeStroke}
                                     strokeWidth={0.8}
                                   />
                                   <text
@@ -1453,9 +1599,9 @@ export default function App() {
                                     textAnchor="middle"
                                     fontSize={7}
                                     fontFamily="ui-monospace, monospace"
-                                    fill="#fecdd3"
+                                    fill={badgeText}
                                   >
-                                    DUP×{n.duplicateCount}
+                                    {n.dupKind === 'pruned' ? 'HIT' : 'DUP'}×{n.duplicateCount}
                                   </text>
                                 </g>
                               )}
@@ -1473,9 +1619,11 @@ export default function App() {
                         const future = n.entryFrameIndex > currentFrameIdx;
                         const stateClass = active
                           ? 'bg-sky-500/25 border-sky-400 text-sky-200'
-                          : n.isDuplicate
-                            ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
-                            : 'bg-zinc-900/80 border-zinc-800 text-zinc-400';
+                          : n.dupKind === 'pruned'
+                            ? 'bg-emerald-500/15 border-emerald-500/60 text-emerald-200'
+                            : n.isDuplicate
+                              ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                              : 'bg-zinc-900/80 border-zinc-800 text-zinc-400';
                         return (
                           <button
                             key={n.id}
@@ -1492,8 +1640,14 @@ export default function App() {
                             <span className="text-zinc-500">d{n.depth}</span>
                             <span className="font-semibold">{n.signature}</span>
                             {n.isDuplicate && (
-                              <span className="rounded border border-rose-400/60 bg-rose-500/30 px-1 text-[9px] font-bold text-rose-100">
-                                DUP ×{n.duplicateCount}
+                              <span
+                                className={`rounded border px-1 text-[9px] font-bold ${
+                                  n.dupKind === 'pruned'
+                                    ? 'border-emerald-400/60 bg-emerald-500/30 text-emerald-100'
+                                    : 'border-rose-400/60 bg-rose-500/30 text-rose-100'
+                                }`}
+                              >
+                                {n.dupKind === 'pruned' ? 'HIT' : 'DUP'} ×{n.duplicateCount}
                               </span>
                             )}
                             <span className="ml-auto text-zinc-500">
@@ -1836,7 +1990,9 @@ export default function App() {
                     className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm shrink-0 whitespace-nowrap"
                   >
                     <Zap className="w-3 h-3" />
-                    <span>Apply O(n) Refactor & Re-Trace</span>
+                    <span className="whitespace-nowrap">
+                      {aiReport.nextStageLabel ?? 'Apply O(n) Refactor & Re-Trace'}
+                    </span>
                   </button>
                 )}
               </div>
@@ -2167,6 +2323,25 @@ export default function App() {
                       <br />• M7: Generic top-down memoization synthesis for any overlapping recursion,
                       two-pointer vs iterative-accumulator split, stack-reduction benchmark anchor, SVG
                       auto-focus on the active node, and guarded watch expressions.
+                      <br />• M8: Runtime-only HIT vs DUP pruning forensics in the call tree, Stage-2
+                      bottom-up tabulation lowering, subtree-pruning benchmark anchor, and watch
+                      subscripts with Seek-Next-TRUE watchpoints.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">8. Pruning Forensics &amp; Watchpoints (M8)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      A duplicate activation is labeled pruned (green HIT) only when the same signature's
+                      FIRST activation had children while this one produced none and returned immediately -
+                      topology proof that a memo guard intercepted it. Baseline leaves are excluded by the
+                      firstChildCount &gt; 0 precondition, so natural bases (climb(2)) stay DUP, not HIT.
+                      Everything is derived from frames and parent-child counts; no source reading.
+                      <br />• Stage-2 lowering sniffs fn(p - a) op fn(p - b) plus an identity/literal base
+                      case and emits bottom-up dp seeds; unsupported shapes return null and keep the source.
+                      <br />• Watch accepts subscripts but forbids dot, quotes and assignment, so member and
+                      string-key injection paths are closed; out-of-range access reports ERROR with the
+                      caught TypeError instead of a fake FALSE. →T scans forward (wrapping) and stops on the
+                      first TRUE frame.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
