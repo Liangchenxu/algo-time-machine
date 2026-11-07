@@ -13,7 +13,8 @@
 | M3 | `41ad788` | [M3-industrial-workbench-and-2d-dp.md](./M3-industrial-workbench-and-2d-dp.md) | 100vh 工业工作台：2D DP 十字准星、帧间 Diff、火焰图轨、AST IR 透视，判据改为运行时证据 |
 | M4 | `23e0a6d` | [M4-logarithmic-heuristics-and-governance.md](./M4-logarithmic-heuristics-and-governance.md) | `O(log n)` 判据闭环、滚动数组状态识别、`[FUSE_*]` 前缀标准化、实测 Benchmark Delta 与 ADR 制度 |
 | M5 | `ef934b0` | [M5-call-tree-and-breakpoints.md](./M5-call-tree-and-breakpoints.md) | 带参调用栈签名、重叠子问题精确取证与 A/B 分档、可点击调用树拓扑、行级断点与 Continue to Breakpoint |
-| M6 | 本次提交 | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
+| M6 | `772ef79` | [M6-svg-call-tree-and-layout-polish.md](./M6-svg-call-tree-and-layout-polish.md) | 2D SVG 贝塞尔调用树、线性递归算子自动合成、熔断态 Benchmark 语义与 771px 分屏布局精修 |
+| M7 | 本次提交 | [M7-auto-memo-and-watch-guards.md](./M7-auto-memo-and-watch-guards.md) | 通用 Top-Down 自动记忆化合成、双指针 vs 迭代累积分档、栈收益 Benchmark 锚点、SVG 树自动聚焦与 Watch 条件守卫 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -56,8 +57,20 @@
     （c）复杂度徽章放在面板内部遥测条，不塞进 `h-9` 标题栏；长尾文案用 `xl:` 分级隐藏而非缩小字号；
     （d）熔断截断的基线与完整重跑之间**禁止计算帧数百分比**，只能显示
     `STATUS: FUSE_ABORTED → COMPLETED`；帧数变化在非截断态才可用 `FRAMES: a → b (x%)` 表述。
+13. **合成一致性契约**（M7 确立，防止「判据与自家产物打架」这类反复出现的病灶）：
+    （a）**源码嗅探只能服务于代码生成**——`extractFunctionInfo` / `sniffCombineOperator` 读源码定位函数体与
+    合并算子；复杂度判档（A / A′ / B、log、矩阵 vs 滚动数组、双指针 vs 迭代累积）必须只看时间帧证据，
+    不得新增任何 `sourceCode.includes(...)` 型判据（不变量 #6 的延伸与边界划定）。
+    （b）**重叠递归的判据是「展开型重复」而非「重复进入」**：记忆化包装后重复入参照样触发 `__enterFn`
+    （缓存守卫在其之后），`redundantCallCount` 不归零；只有 `expansiveRedundantCount`（下一帧栈更深）
+    才能证明真的又重算了一整棵子树。改动该指标会让 A′（`O(n) Memoized Linear`）误回落到 A（`O(2^n)`）。
+    （c）**合成失败必须放弃注入并说明原因**：形参含默认值/解构、或大括号配对定位失败时返回原源码，
+    绝不输出语法残破的"优化代码"；`optimizedCode === sourceCode` 时 Apply 按钮自动隐藏。
+    （d）**Watch 断言的白名单**：字符集不含 `[` `]`（下标访问一律 INVALID），拒绝 `ident(` 调用形态与
+    `this/window/globalThis/self/document/location/Function/eval/constructor/prototype/process/require/import`
+    等宿主名；作用域缺变量必须返回 ERROR 带原因，**不得谎报 FALSE**。
 
-## 当前实测基线（M6 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M7 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -87,6 +100,12 @@
 | 算子合成（M6） | `fact(6)` → 乘法累积 `n * fact(n - 1)`，终端实测 `factIter(6) = 720`；`depth(400)` → 纯深度推进，实测 `iterative cursor = 400` |
 | 熔断态基准（M6） | `STATUS: FUSE_ABORTED (149f) → COMPLETED (802f)` + `PEAK STACK: 150 → 1`，不再输出帧数百分比 |
 | 断点回归（M6） | DP 预设 20 个行号按钮；L14 断点 Continue `FRAME 10 → 12`、F8 续跳 `→ 17`；火焰轨 6 根亮红标记 |
+| 判据三档（M7） | fib(5)：冗余 9 且展开型重复 ≥ 1 → `O(2^n) Exponential`（31 帧 / 栈深 6，与 M6 基线一致，未误落 A′）；记忆化 climb：冗余 3、展开型 0 → `O(n) Memoized Linear` |
+| 通用合成（M7） | 非 fib 的 `climb(5)` 由 `dominantRecursiveName` 定位，注入 `const __memo = {}` 与 `JSON.stringify([n])` 守卫，终端实测 `memoized climb(5) = 8` |
+| 迭代累积分档（M7） | `factIter` → `O(n) Linear Iterative Scan` \| `O(1) Scalar Accumulator`，全文无 Two-Pointer；Rain 仍为 Two-Pointer 并附「left / right 同帧可见」证据 |
+| 栈收益锚点（M7） | `STACK REDUCTION: -71.4% Call Frames` \| `PEAK STACK: 7 → 2` \| `TRACE STEPS: 7 → 13 (Unrolled Loop)` |
+| SVG 自动聚焦（M7） | 跳帧时 `scrollLeft 193 → 0`、`scrollTop 0 → 26`（内容 246px / 可视 220px，clamp 正确） |
+| Watch 守卫（M7） | `r === 1 && c === 2` TRUE、裸 `r` TRUE（tooltip 回显 `1`）、`dp[1][2] === 6` INVALID（白名单禁下标）、`alert(n)` INVALID、越界 `n > 5` ERROR；表达式上限 4 条 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -114,8 +133,16 @@
 - [x] 771px 下 AI 面板标题被挤成四行竖排（M6：徽章迁出标题栏至遥测条 + 长尾文案 xl 分级 + 容器横滚不裁控件）
 - [x] `overflow-hidden` 修折行时把 Apply 按钮整段裁掉（M6：验收标准从「不折行」升级为 `scrollWidth == clientWidth`）
 - [x] DevLog Markdown 表格行内未转义竖线导致表格被切列（M4 文档 2 行 + M6 文档 1 行，M6 复核时用列数一致性脚本扫出并修）
-- [ ] 单链递归迭代化后落到兜底档，被判据文案称为「Linear Two-Pointer」（量级正确、措辞不符，见 M6「遗留」）
-- [ ] 分支 A 的 DP 优化样例仍偏 fib 专用，通用记忆化模板未提供（见 M6「遗留」）
+- [x] 单链递归迭代化后落到兜底档，被判据文案称为「Linear Two-Pointer」（M6 报备 → **M7 闭环**：
+  `detectTwoPointerEvidence` 要求同帧可见成对指针，否则判 `O(n) Linear Iterative Scan` / `O(1) Scalar Accumulator`）
+- [x] 分支 A 的 DP 优化样例仍偏 fib 专用，通用记忆化模板未提供（M6 报备 → **M7 闭环**：
+  `extractFunctionInfo` + `synthesizeMemoizedSource` 对任意函数名生成 Top-Down 缓存包装，实测 `memoized climb(5) = 8`）
+- [x] SVG 调用树不自动聚焦激活节点（M6 报备 → **M7 闭环**：帧号变化时把最深激活节点平滑滚入视口中心并 clamp）
+- [x] 记忆化版本被自家判据再次判为 O(2^n)（M7 实测暴露：重复进入不等于重复展开；补 `expansiveRedundantCount` 三档化）
+- [x] 栈收益型重构被帧数上升掩盖（M7：横幅 segment 化，`STACK REDUCTION` 抢占主锚点，`TRACE STEPS (Unrolled Loop)` 明确不冒充收益）
+- [x] Watch 求值若直接 new Function 等于开放任意代码执行入口（M7：三道闸门 + 宿主名黑名单 + 下标禁用，实测 alert/process 全 INVALID）
+- [ ] 通用自底向上 tabulation 合成仍只覆盖 fib；任意重叠递归的数组化需要推断状态维度与转移方程（见 M7「遗留」）
+- [ ] 记忆化场景 FRAMES 列无信息量（缓存命中也要进入函数一次），暂未对 A′ 档隐藏该列（见 M7「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 

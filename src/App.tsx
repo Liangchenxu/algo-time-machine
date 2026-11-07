@@ -20,6 +20,8 @@ import {
   KeyRound,
   ListTree,
   CircleDot,
+  Pin,
+  Sigma,
   X,
 } from 'lucide-react';
 import { runInSandbox } from './core/sandboxRunner';
@@ -339,6 +341,35 @@ function layoutCallTree(nodes: CallTreeNode[], limit = 40) {
   };
 }
 
+const WATCH_FORBIDDEN =
+  /(^|[^.\w$])(this|window|globalThis|self|top|parent|document|location|Function|eval|constructor|prototype|process|require|import)([^.\w$]|$)/;
+
+type WatchResult = { state: 'TRUE' | 'FALSE' | 'INVALID' | 'ERROR'; detail: string };
+
+/**
+ * 条件断言求值：只在当前帧的变量快照上计算，且先过三道白名单闸门
+ * （字符集、禁止调用形态、禁止宿主对象），因此求值面等价于一次纯算术比较，
+ * 不给页面全局对象留入口。求值失败返回 ERROR 而不是抛出。
+ */
+function evalWatchExpression(expr: string, vars: Record<string, any>): WatchResult {
+  const trimmed = expr.trim();
+  if (!trimmed) return { state: 'INVALID', detail: 'empty expression' };
+  if (!/^[\w$.\s()<>=!+\-*/%&|,:?'"]+$/.test(trimmed)) {
+    return { state: 'INVALID', detail: 'only variables, numbers and operators' };
+  }
+  if (/\w\s*\(/.test(trimmed)) return { state: 'INVALID', detail: 'function calls are not allowed' };
+  if (WATCH_FORBIDDEN.test(trimmed)) return { state: 'INVALID', detail: 'host objects are not allowed' };
+
+  const names = Object.keys(vars).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+  try {
+    // eslint-disable-next-line no-new-func
+    const value = new Function(...names, `return (${trimmed});`)(...names.map((n) => vars[n]));
+    return { state: value ? 'TRUE' : 'FALSE', detail: String(value) };
+  } catch (e: any) {
+    return { state: 'ERROR', detail: (e?.message || 'evaluation failed').slice(0, 48) };
+  }
+}
+
 interface DevlogEntry {
   tag: string;
   commit: string;
@@ -469,7 +500,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M6',
-    commit: '本次提交',
+    commit: '772ef79',
     doc: 'docs/devlogs/M6-svg-call-tree-and-layout-polish.md',
     title: '2D SVG 贝塞尔调用树、线性递归算子自动合成与 771px 分屏精修',
     why: '771×553 分屏截图暴露两类硬伤：每行代码下方一条原生粗灰滚动条，以及 AI 面板标题被挤成四行竖排；同时 M5 留了两条尾巴——扁平缩进的调用树看不出父子拓扑，线性递归的迭代代码要人工替换合并算子。',
@@ -494,6 +525,35 @@ const DEVLOGS: DevlogEntry[] = [
       '算子合成闭环：fact(6) 生成 acc *= i 迭代，终端实测 factIter(6) = 720；depth(400) 落到 unit descent，终端实测 iterative cursor = 400，与原递归语义一致。',
       '熔断态基准语义：横幅实测 STATUS: FUSE_ABORTED (149f) → COMPLETED (802f) + PEAK STACK: 150 → 1，不再输出误导性百分比。',
       '断点与回归：DP 预设 20 个行号按钮，L14 设断点后 Continue 从 FRAME 10 → 12、F8 再推进到 FRAME 17，火焰轨 6 根亮红标记；Rain 40 帧 / 2 格水体 / 13 枚热力徽章、DP 十字准星 Cursor [1][2] 与 Δ 1 突变均无回归。',
+    ],
+  },
+  {
+    tag: 'M7',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M7-auto-memo-and-watch-guards.md',
+    title: '通用自动记忆化合成、迭代累积判据分档、栈收益锚点与 SVG 树自动聚焦',
+    why: 'M6 收尾有三处不体面：所有重叠递归都被塞进 fib 专用 DP 样例，非 fib 函数点 Apply 会得到一段语义无关的代码；迭代化之后的 factIter 被兜底档称作「双指针」；长链 SVG 调用树超出 232px 视口后还要手动翻找当前激活节点。',
+    what: [
+      'aiDiagnostics.ts：新增 expansiveRedundantCount 取证——重复签名只有在「下一帧栈更深」时才说明它真的又展开了一整棵子树；分支 A 需同时满足 redundantCallCount >= 2 与 expansiveRedundantCount >= 1，重复全部命中缓存时展开型重复为 0，落入新档 O(n) Memoized Linear。',
+      'aiDiagnostics.ts：extractFunctionInfo 用大括号配对定位目标函数体与形参，synthesizeMemoizedSource 生成 const __memo = {} 与 JSON.stringify([参数]) 缓存键的 Top-Down 包装版，原函数体整体塞进 IIFE 以保持 return 语义；fib 仍走经典自底向上 fibDP 数组递推；形参含默认值/解构或函数体定位失败时原样返回源码并说明原因。',
+      'aiDiagnostics.ts：兜底档拆成两路——同帧可见 left/right、slow/fast 或作用于数组的 i/j 才判 O(n) Linear Two-Pointer，否则判 O(n) Linear Iterative Scan / O(1) Scalar Accumulator 并打 [ITERATIVE_CONVERGENCE]。',
+      'App.tsx：benchmarkDelta 增加 stackReductionAnchor 与 stackDropPct，横幅重构为 segment 序列统一渲染；栈收益型重构主锚点为 STACK REDUCTION，TRACE STEPS 明确标注 Unrolled Loop 而不冒充收益。',
+      'App.tsx：SVG 容器绑定 ref，帧号变化时把激活路径上最深的节点平滑滚动到视口中心（越界自动 clamp）；新增 Watch 表达式栏与变量置顶，断言在当前帧变量快照上求值并显示 TRUE / FALSE / INVALID / ERROR。',
+    ],
+    conflicts: [
+      '按裁决原文 redundantCallCount >= 2 即判指数级，会让刚生成的记忆化版本再次被判成 O(2^n)：记忆化后重复入参照样进入函数（缓存守卫在 __enterFn 之后），冗余计数并不归零。补上 expansiveRedundantCount 这层证据后，「重复进入」与「重复展开」被区分开，Apply 前后的结论才构成真正的递进叙事。',
+      '算子与函数体嗅探确实读了源码，但只服务于代码生成；复杂度判档仍只看帧证据。因此不变量 #13 把边界写成「合成可用源码、判据不得用源码」，防止后来者顺手把嗅探挪进判档。',
+      'Watch 求值若直接 new Function 用户字符串，等于在页面开一个任意代码执行入口。加了三道闸门：字符白名单、拒绝任何 ident( 调用形态、拒绝 this/window/globalThis/constructor/eval 等宿主对象名；实测 alert(n) 与 process.exit() 均返回 INVALID 而非被执行。',
+      '大括号配对不解析字符串字面量，遇到体内含未闭合花括号的极端源码时 extractFunctionInfo 返回 null；此时合成器明确放弃注入并回显原因，而不是产出一段语法残破的「优化代码」。',
+      '本轮自查修掉两处自产瑕疵：横幅一度同时输出 -71.4% 与 71.4% frames（语义重复且后一个丢了负号，读起来像增长）；以及一次 Edit 误删了 const 声明间的换行。',
+    ],
+    impact: [
+      'fact(6)：Apply 后判据由 O(n) Linear Recursion 变为 O(n) Linear Iterative Scan / O(1) Scalar Accumulator，全文再无 Two-Pointer；横幅 STACK REDUCTION: -71.4% Call Frames | PEAK STACK: 7 → 2 | TRACE STEPS: 7 → 13 (Unrolled Loop)。',
+      '手写 climb(5)（非 fib）：取证 climb(2) ×3 / climb(3) ×2 / climb(1) ×2，冗余 4 次、展开型重复 1 次 → 命中分支 A；生成的记忆化代码终端实测 memoized climb(5) = 8，语义与原函数一致。',
+      '记忆化生效后：5 个不同入参签名、重复进入 3 次而展开型重复 0 次 → 判为 O(n) Memoized Linear / O(n) Memo Table + 5 Stack Frames；SVG 树 DUP 徽章从 4 降至 3 并等于 redundantCallCount；Apply 按钮自动退场。',
+      'Rain 回归：仍判 O(n) Linear Two-Pointer，摘要新增指针对证据「left / right 同帧可见」，40 帧与热点 L9（11x）不变。',
+      'SVG 自动聚焦：跳帧时容器 scrollLeft 193 → 0、scrollTop 0 → 26（246px 内容高度被正确 clamp 到上限），激活节点始终落在可视区内。',
+      'Watch 四态实测：FRAME 1 的 n === 5 为 TRUE；FRAME 4 为 FALSE；alert(n) 与 process.exit() 为 INVALID（function calls are not allowed）；Rain 预设下 n > 5 为 ERROR（n is not defined），作用域缺失返回可读原因而不是静默假值。',
     ],
   },
 ];
@@ -525,6 +585,11 @@ export default function App() {
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
   const [treeView, setTreeView] = useState<'svg' | 'list'>('svg');
+  // Watch 守卫栏：置顶变量 + 条件断言（断言只在当前帧的快照数据上求值）
+  const [pinnedVars, setPinnedVars] = useState<Set<string>>(new Set<string>());
+  const [watchExprs, setWatchExprs] = useState<string[]>([]);
+  const [watchDraft, setWatchDraft] = useState<string>('');
+  const svgScrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
 
@@ -738,6 +803,17 @@ export default function App() {
       nowFused,
       /** 基线被截断而重构后完整跑完：帧数不是同一量纲，只报状态与栈深收益 */
       abortedToCompleted: baselineMetrics.wasFused && !nowFused,
+      /** 递归转迭代的栈空间降维型重构：迭代体语句展开会让帧数上升，主锚点必须换成栈收益 */
+      stackReductionAnchor:
+        !baselineMetrics.wasFused &&
+        !nowFused &&
+        baselineMetrics.maxStackDepth >= 4 &&
+        traceMetrics.maxStackDepth <= 2 &&
+        frames.length > baselineMetrics.framesCount,
+      stackDropPct:
+        baselineMetrics.maxStackDepth > 0
+          ? ((baselineMetrics.maxStackDepth - traceMetrics.maxStackDepth) / baselineMetrics.maxStackDepth) * 100
+          : 0,
       stackFrom: baselineMetrics.maxStackDepth,
       stackTo: traceMetrics.maxStackDepth,
       timeFrom: baselineMetrics.timeComplexity,
@@ -746,6 +822,124 @@ export default function App() {
       latencyTo: execTimeMs,
     };
   }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs, sandboxError]);
+
+  // 横幅语义分段：熔断态 > 栈收益锚点 > 帧数百分比，三类互斥且都只使用实测值
+  const benchmarkSegments = useMemo(() => {
+    const d = benchmarkDelta;
+    if (!d) return [] as { key: string; label: string; value: string; emphatic: boolean }[];
+    const segs: { key: string; label: string; value: string; emphatic: boolean }[] = [];
+    const stackSeg = {
+      key: 'stack',
+      label: 'PEAK STACK',
+      value: `${d.stackFrom} → ${d.stackTo}`,
+      emphatic: false,
+    };
+
+    if (d.baseFused || d.nowFused) {
+      segs.push({
+        key: 'status',
+        label: 'STATUS',
+        value: `${d.baseFused ? 'FUSE_ABORTED' : 'COMPLETED'} (${d.from}f) → ${
+          d.nowFused ? 'FUSE_ABORTED' : 'COMPLETED'
+        } (${d.to}f)${d.baseFused && !d.nowFused ? ' | frame counts across a fuse boundary are not comparable' : ''}`,
+        emphatic: true,
+      });
+    } else if (d.stackReductionAnchor) {
+      segs.push({
+        key: 'anchor',
+        label: 'STACK REDUCTION',
+        value: `-${d.stackDropPct.toFixed(1)}% Call Frames`,
+        emphatic: true,
+      });
+      segs.push({ ...stackSeg, value: `${d.stackFrom} → ${d.stackTo}`, emphatic: true });
+      segs.push({
+        key: 'trace',
+        label: 'TRACE STEPS',
+        value: `${d.from} → ${d.to} (Unrolled Loop)`,
+        emphatic: false,
+      });
+    } else {
+      segs.push({
+        key: 'frames',
+        label: 'FRAMES',
+        value: `${d.from} → ${d.to} (${d.pct <= 0 ? '-' : '+'}${Math.abs(d.pct).toFixed(1)}%)`,
+        emphatic: false,
+      });
+      segs.push(stackSeg);
+    }
+
+    if (!segs.some((s) => s.key === 'stack')) segs.push(stackSeg);
+    segs.push({
+      key: 'space',
+      label: 'SPACE',
+      value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
+      emphatic: false,
+    });
+    segs.push({
+      key: 'time',
+      label: 'TIME',
+      value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
+      emphatic: false,
+    });
+    segs.push({
+      key: 'latency',
+      label: 'LATENCY',
+      value: `${d.latencyFrom}ms → ${d.latencyTo}ms`,
+      emphatic: false,
+    });
+    return segs;
+  }, [benchmarkDelta, aiReport]);
+
+  const watchVars = currentFrame?.variables ?? {};
+  const watchResults = useMemo(
+    () => watchExprs.map((expr) => ({ expr, result: evalWatchExpression(expr, watchVars) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [watchExprs, currentFrame]
+  );
+  const pinnedEntries = useMemo(
+    () =>
+      Array.from(pinnedVars).map((name) => ({
+        name,
+        present: Object.prototype.hasOwnProperty.call(watchVars, name),
+        value: watchVars[name],
+      })),
+    [pinnedVars, watchVars]
+  );
+
+  const togglePin = (name: string) => {
+    setPinnedVars((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const addWatchExpression = () => {
+    const expr = watchDraft.trim();
+    if (!expr) return;
+    setWatchExprs((prev) => (prev.includes(expr) || prev.length >= 4 ? prev : [...prev, expr]));
+    setWatchDraft('');
+  };
+
+  // SVG 调用树自动聚焦：把当前激活路径上最深的节点滚到视口中心
+  useEffect(() => {
+    if (treeView !== 'svg' || !treeVisible) return;
+    const el = svgScrollRef.current;
+    if (!el) return;
+    let focus: (typeof treeLayout.positions)[number] | undefined;
+    for (const p of treeLayout.positions) {
+      if (!activeNodeIds.has(p.node.id)) continue;
+      if (!focus || p.node.depth > focus.node.depth) focus = p;
+    }
+    if (!focus) focus = treeLayout.positions[0];
+    if (!focus) return;
+    el.scrollTo({
+      left: Math.max(0, focus.x - el.clientWidth / 2),
+      top: Math.max(0, focus.y - el.clientHeight / 2),
+      behavior: 'smooth',
+    });
+  }, [currentFrameIdx, treeView, treeVisible, treeLayout, activeNodeIds]);
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -1055,6 +1249,73 @@ export default function App() {
               </div>
             </div>
 
+            {/* Watch Expressions & Pinned Guards — 条件断言在当前帧快照上实时求值 */}
+            <div className="shrink-0 px-3 py-1.5 border-b border-zinc-800/70 bg-[#0A0C11] flex flex-wrap items-center gap-1.5">
+              <span className="flex items-center gap-1 text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                <Sigma className="w-3 h-3 text-emerald-400" />
+                WATCH
+              </span>
+              {pinnedEntries.map((p) => (
+                <span
+                  key={p.name}
+                  className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-mono ${
+                    p.present
+                      ? 'border-amber-500/50 bg-amber-500/10 text-amber-200'
+                      : 'border-zinc-800 bg-zinc-900 text-zinc-600'
+                  }`}
+                >
+                  <button
+                    onClick={() => togglePin(p.name)}
+                    title={`Unpin ${p.name}`}
+                    className="text-amber-400/80 hover:text-amber-200"
+                  >
+                    <Pin className="w-2.5 h-2.5 fill-current" />
+                  </button>
+                  <span className="font-semibold">{p.name}</span>
+                  <span className="text-zinc-400">{p.present ? String(p.value) : 'n/a'}</span>
+                </span>
+              ))}
+              {watchResults.map(({ expr, result }) => (
+                <span
+                  key={expr}
+                  className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-mono ${
+                    result.state === 'TRUE'
+                      ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                      : result.state === 'FALSE'
+                        ? 'border-zinc-700 bg-zinc-900 text-zinc-500'
+                        : 'border-rose-500/50 bg-rose-500/10 text-rose-200'
+                  }`}
+                  title={result.detail}
+                >
+                  <span className="font-semibold">{expr}</span>
+                  <span className="rounded bg-black/40 px-1">{result.state}</span>
+                  <button
+                    onClick={() => setWatchExprs((prev) => prev.filter((x) => x !== expr))}
+                    title={`Remove watch ${expr}`}
+                    className="text-zinc-500 hover:text-rose-300"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                </span>
+              ))}
+              <input
+                value={watchDraft}
+                onChange={(e) => setWatchDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addWatchExpression();
+                }}
+                placeholder="water > 4"
+                className="w-28 shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-emerald-400/60"
+              />
+              <button
+                onClick={addWatchExpression}
+                disabled={!watchDraft.trim()}
+                className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400 transition hover:text-emerald-300 disabled:opacity-40"
+              >
+                Add
+              </button>
+            </div>
+
             {/* Canvas Scroll Area */}
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
               {/* 0. Call-Tree Topology & Subproblem Inspector */}
@@ -1111,7 +1372,10 @@ export default function App() {
                   </div>
 
                   {treeView === 'svg' ? (
-                    <div className="max-h-[232px] overflow-auto rounded border border-zinc-800/70 bg-[#090B10]">
+                    <div
+                      ref={svgScrollRef}
+                      className="max-h-[232px] overflow-auto rounded border border-zinc-800/70 bg-[#090B10]"
+                    >
                       <svg
                         width={treeLayout.width}
                         height={treeLayout.height}
@@ -1263,16 +1527,33 @@ export default function App() {
                         key={mat.name}
                         className="p-2.5 rounded-md bg-[#0E1117] border border-zinc-800/90"
                       >
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-[11px] font-mono font-semibold text-zinc-300">
+                        <div className="flex items-center justify-between mb-2 gap-2">
+                          <span className="text-[11px] font-mono font-semibold text-zinc-300 truncate">
                             2D Matrix: <span className="text-sky-400">{mat.name}</span> [
                             {mat.data.length}×{mat.data[0]?.length || 0}]
                           </span>
-                          {activeR !== undefined && activeC !== undefined && (
-                            <span className="text-[10px] font-mono text-amber-300">
-                              Cursor [{activeR}][{activeC}]
-                            </span>
-                          )}
+                          <span className="flex items-center gap-2 shrink-0">
+                            {activeR !== undefined && activeC !== undefined && (
+                              <span className="text-[10px] font-mono text-amber-300 whitespace-nowrap">
+                                Cursor [{activeR}][{activeC}]
+                              </span>
+                            )}
+                            <button
+                              onClick={() => togglePin(mat.name)}
+                              title={
+                                pinnedVars.has(mat.name)
+                                  ? `Unpin ${mat.name}`
+                                  : `Pin ${mat.name} to watch bar`
+                              }
+                              className={
+                                pinnedVars.has(mat.name)
+                                  ? 'text-emerald-400'
+                                  : 'text-zinc-600 hover:text-emerald-300'
+                              }
+                            >
+                              <Pin className="w-2.5 h-2.5" />
+                            </button>
+                          </span>
                         </div>
                         <div className="inline-block border border-zinc-800 rounded overflow-hidden">
                           {mat.data.map((row, rIdx) => (
@@ -1332,16 +1613,29 @@ export default function App() {
                     key={arr.name}
                     className="p-3 rounded-md bg-[#0E1117] border border-zinc-800/90"
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[11px] font-mono font-semibold text-zinc-300">
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <span className="text-[11px] font-mono font-semibold text-zinc-300 truncate">
                         Array Buffer: <span className="text-sky-400">{arr.name}</span> (len=
                         {arr.data.length})
                       </span>
-                      {isRainHeight && (
-                        <span className="text-[10px] font-mono text-sky-400">
-                          Water Surface Overlay Active
-                        </span>
-                      )}
+                      <span className="flex items-center gap-2 shrink-0">
+                        {isRainHeight && (
+                          <span className="text-[10px] font-mono text-sky-400 whitespace-nowrap">
+                            Water Surface Overlay Active
+                          </span>
+                        )}
+                        <button
+                          onClick={() => togglePin(arr.name)}
+                          title={pinnedVars.has(arr.name) ? `Unpin ${arr.name}` : `Pin ${arr.name} to watch bar`}
+                          className={
+                            pinnedVars.has(arr.name)
+                              ? 'text-emerald-400'
+                              : 'text-zinc-600 hover:text-emerald-300'
+                          }
+                        >
+                          <Pin className="w-2.5 h-2.5" />
+                        </button>
+                      </span>
                     </div>
 
                     <div className="flex items-end gap-1.5 pt-2 pb-1 overflow-x-auto">
@@ -1436,22 +1730,34 @@ export default function App() {
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                 {categorizedVars.scalars.map((sc) => {
                   const diff = mutatedKeys[sc.name];
+                  const pinned = pinnedVars.has(sc.name);
                   return (
                     <div
                       key={sc.name}
                       className={`px-2.5 py-2 rounded border font-mono transition-all ${
-                        diff
-                          ? 'bg-amber-500/10 border-amber-500/50 shadow-sm'
-                          : 'bg-[#0E1117] border-zinc-800/80'
+                        pinned
+                          ? 'bg-emerald-500/10 border-emerald-500/60'
+                          : diff
+                            ? 'bg-amber-500/10 border-amber-500/50 shadow-sm'
+                            : 'bg-[#0E1117] border-zinc-800/80'
                       }`}
                     >
                       <div className="flex items-center justify-between text-[10px] text-zinc-500">
                         <span>{sc.name}</span>
-                        {sc.isPointer && (
-                          <span className="text-[9px] px-1 rounded bg-zinc-800 text-sky-400">
-                            PTR
-                          </span>
-                        )}
+                        <span className="flex items-center gap-1">
+                          {sc.isPointer && (
+                            <span className="text-[9px] px-1 rounded bg-zinc-800 text-sky-400">
+                              PTR
+                            </span>
+                          )}
+                          <button
+                            onClick={() => togglePin(sc.name)}
+                            title={pinned ? `Unpin ${sc.name}` : `Pin ${sc.name} to watch bar`}
+                            className={pinned ? 'text-emerald-400' : 'text-zinc-600 hover:text-emerald-300'}
+                          >
+                            <Pin className="w-2.5 h-2.5" />
+                          </button>
+                        </span>
                       </div>
                       <div className="mt-1 flex items-baseline gap-1.5 truncate">
                         {diff && diff.prev !== undefined ? (
@@ -1542,47 +1848,13 @@ export default function App() {
                 <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 font-semibold text-emerald-200">
                   VERIFIED REFACTOR BENCHMARK
                 </span>
-                <span className="whitespace-nowrap">
-                  {benchmarkDelta.abortedToCompleted ||
-                  (benchmarkDelta.baseFused && benchmarkDelta.nowFused) ||
-                  (!benchmarkDelta.baseFused && benchmarkDelta.nowFused) ? (
-                    <>
-                      STATUS:{' '}
-                      <strong className="text-emerald-100">
-                        {benchmarkDelta.baseFused ? 'FUSE_ABORTED' : 'COMPLETED'} ({benchmarkDelta.from}f)
-                      </strong>{' '}
-                      →{' '}
-                      <strong className="text-emerald-100">
-                        {benchmarkDelta.nowFused ? 'FUSE_ABORTED' : 'COMPLETED'} ({benchmarkDelta.to}f)
-                      </strong>{' '}
-                      | (frame counts across a fuse boundary are not comparable)
-                    </>
-                  ) : (
-                    <>
-                      FRAMES:{' '}
-                      <strong className="text-emerald-100">{benchmarkDelta.from}</strong> →{' '}
-                      <strong className="text-emerald-100">{benchmarkDelta.to}</strong>{' '}
-                      ({benchmarkDelta.pct <= 0 ? '-' : '+'}
-                      {Math.abs(benchmarkDelta.pct).toFixed(1)}%)
-                    </>
-                  )}{' '}
-                  | PEAK STACK:{' '}
-                  <strong className="text-emerald-100">
-                    {benchmarkDelta.stackFrom} → {benchmarkDelta.stackTo}
-                  </strong>{' '}
-                  | SPACE:{' '}
-                  <strong className="text-emerald-100">
-                    {benchmarkDelta.spaceFrom} → {aiReport?.spaceComplexity}
-                  </strong>{' '}
-                  | TIME:{' '}
-                  <strong className="text-emerald-100">
-                    {benchmarkDelta.timeFrom} → {aiReport?.timeComplexity}
-                  </strong>{' '}
-                  | LATENCY:{' '}
-                  <strong className="text-emerald-100">
-                    {benchmarkDelta.latencyFrom}ms → {benchmarkDelta.latencyTo}ms
-                  </strong>
-                </span>
+                {benchmarkSegments.map((s, i) => (
+                  <span key={s.key} className="whitespace-nowrap flex items-center gap-1.5">
+                    {i > 0 && <span className="text-emerald-500/50">|</span>}
+                    <span className={s.emphatic ? 'text-emerald-200 font-semibold' : ''}>{s.label}:</span>
+                    <strong className={s.emphatic ? 'text-emerald-50' : 'text-emerald-100'}>{s.value}</strong>
+                  </span>
+                ))}
               </div>
             )}
 
@@ -1892,6 +2164,9 @@ export default function App() {
                       <br />• M6: 2D SVG bezier call-tree topology, auto-synthesized iterative rewrites from
                       the sniffed combine operator, fuse-aware benchmark semantics, and the 771px
                       narrow-viewport layout cleanup (no per-line scrollbars, no clipped actions).
+                      <br />• M7: Generic top-down memoization synthesis for any overlapping recursion,
+                      two-pointer vs iterative-accumulator split, stack-reduction benchmark anchor, SVG
+                      auto-focus on the active node, and guarded watch expressions.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
@@ -1907,12 +2182,32 @@ export default function App() {
                     <div className="text-rose-400 font-semibold">5. Recursion Gating By Duplicate Evidence</div>
                     <p className="text-zinc-400 text-[11px]">
                       The recursion gate no longer assumes exponential cost from depth alone. It counts how
-                      many times each parametrized signature is entered: redundantCallCount &gt;= 2 means
-                      overlapping subproblems were actually recomputed, so the verdict is
-                      O(2^n) Exponential with the repeat list inline; redundantCallCount &lt; 2 means the
-                      stack is a single descending chain, so the verdict is O(n) Linear Recursion tagged
-                      [TAIL_RECURSION_CANDIDATE] with an iterative rewrite scaffold. Sibling calls keep the
-                      stack depth unchanged, which is why entry events are counted instead of depth deltas.
+                      many times each parametrized signature is entered, and - decisively - whether a repeat
+                      actually expanded a subtree again (expansiveRedundantCount, detected by the next frame
+                      being deeper). redundantCallCount &gt;= 2 AND expansive repeats &gt;= 1 gives
+                      O(2^n) Exponential with the repeat list inline; redundant repeats with 0 expansion
+                      means a memo cache is absorbing them, so the verdict becomes O(n) Memoized Linear;
+                      fewer than 2 repeats is a single descending chain, tagged [TAIL_RECURSION_CANDIDATE].
+                      Sibling calls keep the stack depth unchanged, which is why entry events are counted
+                      instead of depth deltas.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-amber-400 font-semibold">7. Synthesis &amp; Guard Contracts (M7)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Overlapping recursion is refactored generically: the dominant recursive name is taken
+                      from runtime signatures, its body is located by brace matching in the source, and a
+                      Top-Down memo wrapper (const __memo = {} plus JSON.stringify([params]) keys) is spliced
+                      in place while the original body keeps its return semantics inside an IIFE. fib still
+                      gets the classic bottom-up array DP. If params carry defaults/destructuring or the body
+                      cannot be located, the source is returned unchanged instead of emitting broken
+                      "optimized" code.
+                      <br />• Source sniffing is allowed for code synthesis only - complexity verdicts must
+                      still rest on frame evidence.
+                      <br />• Watch expressions evaluate against the current frame snapshot behind three
+                      gates: character whitelist, no call syntax, no host object names.
+                      <br />• A stack-to-iteration refactor anchors its benchmark on STACK REDUCTION, and the
+                      unavoidable rise in traced steps is labeled TRACE STEPS (Unrolled Loop).
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

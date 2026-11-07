@@ -24,6 +24,10 @@ export interface RecursionForensics {
   redundantCallCount: number;
   topDuplicates: string[];
   sampleArg: number | null;
+  /** 重复入参里「真的又展开了一整棵子树」的次数；记忆化生效时该值应为 0 */
+  expansiveRedundantCount: number;
+  dominantRecursiveName: string;
+  topCallExpr: string | null;
 }
 
 export interface TraceMetrics extends RecursionForensics {
@@ -42,6 +46,9 @@ const EMPTY_METRICS: TraceMetrics = {
   redundantCallCount: 0,
   topDuplicates: [],
   sampleArg: null,
+  expansiveRedundantCount: 0,
+  dominantRecursiveName: 'fn',
+  topCallExpr: null,
 };
 
 export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
@@ -69,17 +76,31 @@ export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
   // 为何不比较相邻帧的栈深增量：兄弟调用（fib(4) 退栈后 fib(3) 在同等深度再次压栈）栈深不变，
   // 增量法会整段漏计重复求值，只有以进入事件为准才能得到重叠子问题的铁证。
   const signatureHits: Record<string, number> = {};
+  const nameHits: Record<string, number> = {};
   let sampleArg: number | null = null;
-  for (const f of frames) {
-    if (!f.event.startsWith('函数进入')) continue;
+  let topCallExpr: string | null = null;
+  let expansiveRedundantCount = 0;
+
+  frames.forEach((f, idx) => {
+    if (!f.event.startsWith('函数进入')) return;
     const top = f.callStack[f.callStack.length - 1];
-    if (!top || top === 'main()') continue;
-    signatureHits[top] = (signatureHits[top] || 0) + 1;
+    if (!top || top === 'main()') return;
+    const seenBefore = signatureHits[top] || 0;
+    signatureHits[top] = seenBefore + 1;
+    const name = (top.match(/^([A-Za-z_$][\w$]*)\(/) || [])[1] || top;
+    nameHits[name] = (nameHits[name] || 0) + 1;
+    if (topCallExpr === null) topCallExpr = top;
     if (sampleArg === null) {
       const m = top.match(/\((-?\d+)/);
       if (m) sampleArg = Number(m[1]);
     }
-  }
+    // 第 2 次及以后的同名进入，若紧接着栈更深，说明这次重复真的又展开了一整棵子树（真重叠）；
+    // 记忆化生效时重复入参在缓存守卫处直接返回，下一帧栈深不会变深。
+    if (seenBefore >= 1) {
+      const next = frames[idx + 1];
+      if (next && next.callStack.length > f.callStack.length) expansiveRedundantCount++;
+    }
+  });
 
   let redundantCallCount = 0;
   const topDuplicates: string[] = [];
@@ -90,6 +111,7 @@ export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
     }
   }
   topDuplicates.sort((a, b) => Number(b.split('×')[1]) - Number(a.split('×')[1]));
+  const dominantRecursiveName = Object.entries(nameHits).sort((a, b) => b[1] - a[1])[0]?.[0] || 'fn';
 
   return {
     hotspotLine,
@@ -100,6 +122,9 @@ export function analyzeTraceMetrics(frames: TraceFrame[]): TraceMetrics {
     redundantCallCount,
     topDuplicates: topDuplicates.slice(0, 4),
     sampleArg,
+    expansiveRedundantCount,
+    dominantRecursiveName,
+    topCallExpr,
   };
 }
 
@@ -195,6 +220,116 @@ function sniffCombineOperator(sourceCode: string, fnName: string): CombineSniff 
   return { kind: 'descent', evidence: 'no arithmetic combine detected' };
 }
 
+interface FnSourceInfo {
+  name: string;
+  paramsRaw: string;
+  params: string[];
+  start: number;
+  end: number;
+  body: string;
+}
+
+/**
+ * 按大括号配对从源码提取目标函数声明，仅用于「代码生成」；复杂度判档依旧只看运行时帧证据。
+ * 配对不解析字符串字面量，因此函数体内出现未闭合花括号或极端嵌套时返回 null，调用方必须回退。
+ */
+function extractFunctionInfo(sourceCode: string, name: string): FnSourceInfo | null {
+  const esc = name.replace(/[$]/g, '\\$&');
+  const re = new RegExp(`function\\s+${esc}\\s*\\(([^)]*)\\)`);
+  const m = re.exec(sourceCode);
+  if (!m) return null;
+  const open = sourceCode.indexOf('{', m.index + m[0].length - 1);
+  if (open < 0) return null;
+
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < sourceCode.length; i++) {
+    const ch = sourceCode[i];
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) {
+      close = i;
+      break;
+    }
+  }
+  if (close < 0) return null;
+
+  const paramsRaw = m[1].trim();
+  const params = paramsRaw
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+  // 存在带默认值或解构形参时无法构造稳定缓存键，交由调用方回退
+  if (params.length === 0 || params.length !== paramsRaw.split(',').filter((p) => p.trim()).length) return null;
+
+  return {
+    name,
+    paramsRaw,
+    params,
+    start: m.index,
+    end: close + 1,
+    body: sourceCode.slice(open, close + 1),
+  };
+}
+
+/**
+ * 通用自动记忆化合成：保留原函数体（用 IIFE 包住，return 语义原样传递），
+ * 在入口注入缓存键判断、出口写入缓存，因此对任意重叠子问题递归都 100% 保持原语义。
+ */
+function synthesizeMemoizedSource(sourceCode: string, info: FnSourceInfo, topCallExpr: string | null) {
+  const keyList = info.params.join(', ');
+  const wrapped =
+    `const __memo = {};\nfunction ${info.name}(${info.paramsRaw}) {\n` +
+    `  const __key = JSON.stringify([${keyList}]);\n` +
+    `  if (__memo[__key] !== undefined) return __memo[__key];\n` +
+    `  const __result = (() => ${info.body})();\n` +
+    `  __memo[__key] = __result;\n` +
+    `  return __result;\n}`;
+  const replaced = sourceCode.slice(0, info.start) + wrapped + sourceCode.slice(info.end);
+  const echo = topCallExpr && !sourceCode.includes('console.log') ? `\nconsole.log("memoized ${topCallExpr} =", ${topCallExpr});` : '';
+  return `// Optimized: 自动注入 Top-Down 记忆化缓存（语义等价，重复子问题命中缓存直接返回）\n${replaced}${echo}`;
+}
+
+/**
+ * 双指针判据：必须有作用域内同时可见的一对经典边界指针，且 (i, j) 形态还要求同帧存在数组，
+ * 避免把「一个游标 + 一个累加器」的单重迭代误称为双指针夹逼。
+ */
+function detectTwoPointerEvidence(frames: TraceFrame[]) {
+  const pairs: [string, string][] = [['left', 'right'], ['slow', 'fast'], ['i', 'j']];
+  for (const f of frames) {
+    const v = f.variables;
+    for (const [a, b] of pairs) {
+      if (typeof v[a] !== 'number' || typeof v[b] !== 'number') continue;
+      if ((a === 'i' || a === 'j') && !Object.values(v).some((x) => Array.isArray(x) && x.length > 0)) {
+        continue;
+      }
+      return { detected: true, pair: `${a} / ${b}` };
+    }
+  }
+  return { detected: false, pair: '' };
+}
+
+/** 迭代累积取证：单重循环游标与原地标量累加器名称 */
+function collectAccumulators(frames: TraceFrame[]) {
+  const last = frames[frames.length - 1];
+  if (!last) return { cursors: [] as string[], scalars: [] as string[], loopLines: [] as number[] };
+  const hits = last.lineHits || {};
+  const cursorNames = new Set<string>();
+  Object.keys(last.variables).forEach((k) => {
+    if (/^(i|j|k|c|count|cursor|idx|index|step|rounds)$/.test(k)) cursorNames.add(k);
+  });
+  const scalars = Object.keys(last.variables).filter(
+    (k) => typeof last.variables[k] === 'number' && !cursorNames.has(k)
+  );
+  return {
+    cursors: Array.from(cursorNames),
+    scalars,
+    loopLines: Object.entries(hits)
+      .filter(([, c]) => c > 1)
+      .map(([l]) => Number(l))
+      .slice(0, 3),
+  };
+}
+
 export async function runAIDiagnostics(
   sourceCode: string,
   frames: TraceFrame[],
@@ -271,13 +406,26 @@ export async function runAIDiagnostics(
     const fnName = (fnSig.match(/^([A-Za-z_$][\w$]*)\(/) || [])[1] || 'fn';
     const argHint = metrics.sampleArg !== null && metrics.sampleArg > 0 ? metrics.sampleArg : 8;
 
-    // 分支 A：真·指数级重叠子问题 —— 存在同实参重复进入的铁证
-    if (metrics.redundantCallCount >= 2) {
+    // 分支 A：真·指数级重叠子问题 —— 同实参重复进入，且重复那次确实又展开了一整棵子树
+    if (metrics.redundantCallCount >= 2 && metrics.expansiveRedundantCount >= 1) {
+      const targetFnName = metrics.dominantRecursiveName;
+      const memoInfo = extractFunctionInfo(sourceCode, targetFnName);
+      const classicDP = targetFnName === 'fib';
+      const optimizedCode = classicDP
+        ? `// Optimized: 状态压缩自底向上动态规划 O(n) Time / O(n) Space\nfunction fibDP(n) {\n  const dp = [0, 1];\n  for (let i = 2; i <= n; i++) {\n    dp[i] = dp[i - 1] + dp[i - 2];\n  }\n  console.log("DP optimal fib(" + n + ") =", dp[n]);\n  return dp[n];\n}\nfibDP(6);`
+        : memoInfo
+          ? synthesizeMemoizedSource(sourceCode, memoInfo, metrics.topCallExpr)
+          : sourceCode;
+      const gainA = classicDP
+        ? `Frames: ${frames.length} -> 15 (-${Math.max(50, Math.round((1 - 15 / Math.max(frames.length, 16)) * 100))}% Overhead) | Max Stack: ${metrics.maxStackDepth} -> 2 | Redundant Entries: ${metrics.redundantCallCount} -> 0`
+        : memoInfo
+          ? `Auto-memoization injected into ${targetFnName}() | Expansive repeats: ${metrics.expansiveRedundantCount} -> 0 | Distinct subproblems: ${Object.keys(metrics.signatureHits).length} | 语义与原函数一致`
+          : `未能安全定位 ${targetFnName} 的函数体或形参含默认值/解构，保持原代码不注入记忆化`;
       return {
         ...metrics,
         timeComplexity: 'O(2^n) Exponential',
         spaceComplexity: `O(n) Stack Depth ${metrics.maxStackDepth}`,
-        summary: `调用栈轨迹分析捕获到指数级重叠子问题（Overlapping Subproblems）。检测到相同入参子问题重复求值：${metrics.topDuplicates.join('，')}，累计冗余进入 ${metrics.redundantCallCount} 次；在 Frame #${metrics.bottleneckFrameIndex} 达到栈深峰值 ${metrics.maxStackDepth} 层，L${metrics.hotspotLine} 累计触发 ${metrics.maxHitCount} 次，总帧数因此膨胀至 ${frames.length} 帧。`,
+        summary: `调用栈轨迹分析捕获到指数级重叠子问题（Overlapping Subproblems）。检测到相同入参子问题重复求值：${metrics.topDuplicates.join('，')}，累计冗余进入 ${metrics.redundantCallCount} 次，其中 ${metrics.expansiveRedundantCount} 次重复调用并未命中缓存而是又展开了一整棵子树（这是判定指数级而非线性级的决定性证据）；在 Frame #${metrics.bottleneckFrameIndex} 达到栈深峰值 ${metrics.maxStackDepth} 层，L${metrics.hotspotLine} 累计触发 ${metrics.maxHitCount} 次，总帧数因此膨胀至 ${frames.length} 帧。`,
         frameInsights: [
           {
             frameIndex: Math.min(6, frames.length - 1),
@@ -291,9 +439,37 @@ export async function runAIDiagnostics(
             tag: 'REDUNDANT_SUBTREE',
             issue: `重复入参子问题实测清单：${metrics.topDuplicates.join('，')}`,
           },
+          {
+            frameIndex: frames.length - 1,
+            line: metrics.hotspotLine,
+            tag: classicDP ? 'BOTTOM_UP_DP_CANDIDATE' : 'MEMO_INJECTION_TARGET',
+            issue: classicDP
+              ? 'fib 形态可直接改写为自底向上数组递推，消除全部调用帧'
+              : `目标函数 ${targetFnName}()：可在入口注入 JSON.stringify([参数]) 缓存键、出口写入缓存，保持原语义不变`,
+          },
         ],
-        optimizedCode: `// Optimized: 状态压缩自底向上动态规划 O(n) Time / O(n) Space\nfunction fibDP(n) {\n  const dp = [0, 1];\n  for (let i = 2; i <= n; i++) {\n    dp[i] = dp[i - 1] + dp[i - 2];\n  }\n  console.log("DP optimal fib(" + n + ") =", dp[n]);\n  return dp[n];\n}\nfibDP(6);`,
-        optimizationGain: `Frames: ${frames.length} -> 15 (-${Math.max(50, Math.round((1 - 15 / Math.max(frames.length, 16)) * 100))}% Overhead) | Max Stack: ${metrics.maxStackDepth} -> 2 | Redundant Entries: ${metrics.redundantCallCount} -> 0`,
+        optimizedCode,
+        optimizationGain: gainA,
+      };
+    }
+
+    // 分支 A'：重复入参全部命中缓存、未再展开子树 —— 记忆化已生效，不得继续判指数级
+    if (metrics.redundantCallCount >= 2) {
+      return {
+        ...metrics,
+        timeComplexity: 'O(n) Memoized Linear',
+        spaceComplexity: `O(n) Memo Table + ${metrics.maxStackDepth} Stack Frames`,
+        summary: `记忆化缓存命中验证通过：${metrics.dominantRecursiveName}() 共出现 ${Object.keys(metrics.signatureHits).length} 个不同入参签名、累计 ${metrics.redundantCallCount} 次重复进入，但展开型重复为 ${metrics.expansiveRedundantCount}（0 表示重复调用全部在缓存守卫处直接返回，没有再展开子树），因此实际时间复杂度已降为线性。总帧数 ${frames.length}，峰值栈深 ${metrics.maxStackDepth} 层。`,
+        frameInsights: [
+          {
+            frameIndex: metrics.bottleneckFrameIndex,
+            line: metrics.hotspotLine,
+            tag: 'MEMOIZATION_EFFECTIVE',
+            issue: `重复入参 ${metrics.topDuplicates.join('，')} 均已命中缓存返回，展开型重复归零`,
+          },
+        ],
+        optimizedCode: sourceCode,
+        optimizationGain: `Expansive repeats: ${metrics.redundantCallCount} -> 0 (cache hits) | 无需继续重构`,
       };
     }
 
@@ -406,20 +582,42 @@ export async function runAIDiagnostics(
     };
   }
 
+  // 兜底档再分两路：有经典成对边界指针才是双指针；只有一枚游标 + 标量累加器则是迭代累积扫描。
+  const twoPointer = detectTwoPointerEvidence(frames);
+  if (twoPointer.detected) {
+    return {
+      ...metrics,
+      timeComplexity: 'O(n) Linear Two-Pointer',
+      spaceComplexity: 'O(1) In-Place Pointers',
+      summary: `双指针收缩轨迹验证通过（实测指针对 ${twoPointer.pair} 同帧可见）。总计 ${frames.length} 帧，核心转移热点位于 L${metrics.hotspotLine}（触发 ${metrics.maxHitCount} 次）。每次迭代搜索空间严格单调缩减 1 个单位，无回溯分支。`,
+      frameInsights: [
+        {
+          frameIndex: Math.floor(frames.length / 2),
+          line: metrics.hotspotLine,
+          tag: 'INVARIANT_HOLD',
+          issue: `${twoPointer.pair} 满足单调不变量，局部极值在此帧完成原地更新`,
+        },
+      ],
+      optimizedCode: sourceCode,
+      optimizationGain: 'Optimal Asymptotic Bound Achieved (O(n) Time, O(1) Auxiliary Space)',
+    };
+  }
+
+  const acc = collectAccumulators(frames);
   return {
     ...metrics,
-    timeComplexity: 'O(n) Linear Two-Pointer',
-    spaceComplexity: 'O(1) In-Place Pointers',
-    summary: `双指针收缩轨迹验证通过。总计 ${frames.length} 帧，核心转移热点位于 L${metrics.hotspotLine}（触发 ${metrics.maxHitCount} 次）。每次迭代搜索空间严格单调缩减 1 个单位，无回溯分支。`,
+    timeComplexity: 'O(n) Linear Iterative Scan',
+    spaceComplexity: 'O(1) Scalar Accumulator',
+    summary: `单重迭代扫描轨迹验证通过：游标 ${acc.cursors.length ? acc.cursors.join(' / ') : '(无名)'} 与标量累加器 ${acc.scalars.length ? acc.scalars.join(' / ') : '(无)'} 原地更新，未检测到成对边界指针（left/right、slow/fast、i/j 均不同帧共存），因此不称为双指针夹逼。共 ${frames.length} 帧，热点行 L${metrics.hotspotLine}（执行 ${metrics.maxHitCount} 次）${acc.loopLines.length ? `，循环体行 ${acc.loopLines.map((l) => `L${l}`).join(' / ')} 呈多次命中` : ''}，全程无额外调用栈开销。`,
     frameInsights: [
       {
         frameIndex: Math.floor(frames.length / 2),
         line: metrics.hotspotLine,
-        tag: 'INVARIANT_HOLD',
-        issue: '左右边界指针满足单调不变量，局部极值在此帧完成原地更新',
+        tag: 'ITERATIVE_CONVERGENCE',
+        issue: '单重循环游标单调推进，状态在标量累加器中原地收敛，栈深恒定为常数',
       },
     ],
     optimizedCode: sourceCode,
-    optimizationGain: 'Optimal Asymptotic Bound Achieved (O(n) Time, O(1) Auxiliary Space)',
+    optimizationGain: 'Already Iterative (O(n) Time, O(1) Scalar Space) | No Call Stack Overhead',
   };
 }

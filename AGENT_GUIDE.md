@@ -64,17 +64,21 @@ Key 仅驻留内存，不写入 localStorage。
 
 ```
 1. [FUSE_STEP_LIMIT]        → O(∞) Non-Terminating
-2. maxStackDepth >= 4       → 递归档，再按重叠子问题证据二选一：
-     redundantCallCount >= 2 → O(2^n) Exponential（附重复签名清单）
-     redundantCallCount < 2  → O(n) Linear Recursion（单链下潜，建议尾递归/迭代化）
+2. maxStackDepth >= 4       → 递归档，再按重叠子问题证据三选一：
+     redundantCallCount >= 2 且 expansiveRedundantCount >= 1 → O(2^n) Exponential
+     redundantCallCount >= 2 且 expansiveRedundantCount == 0 → O(n) Memoized Linear（缓存已消化重复）
+     redundantCallCount < 2                                  → O(n) Linear Recursion（单链下潜）
 3. low/high/mid 三元组，或 帧数 <= ceil(log2 n) * 4  → O(log n) Logarithmic Halving
 4. dp 形态 = 二维表          → O(M*N) Matrix DP（并给出一维滚动数组重构）
 5. dp 降为一维且仍有二维输入  → O(M*N) Optimal Scan / O(N) 1D Rolling Buffer
-6. 兜底                      → O(n) Linear Two-Pointer
+6. 兜底再分两路：同帧可见成对边界指针 → O(n) Linear Two-Pointer；
+   只有单游标 + 标量累加器 → O(n) Linear Iterative Scan / O(1) Scalar Accumulator
 ```
 
 签名进入次数必须按「函数进入」事件帧统计：兄弟调用退栈再压栈时栈深不变，
 用相邻帧栈深增量会整段漏计重复求值（这是 M4 误判 `depth(400)` 的根因，M5 已闭环）。
+而「重复进入」也不等于「重复展开」：记忆化后重复入参照样触发进入事件，
+只有展开型重复（下一帧栈更深）才是指数级证据（M7 闭环）。
 
 ## 调试器与可视化能力
 
@@ -82,20 +86,31 @@ Key 仅驻留内存，不写入 localStorage。
   `Continue to Breakpoint` 与 `F8` / `b` 向后扫描第一个命中帧；切换预设即清空断点。
 - `Call-Tree Topology` 面板仅在 `maxStackDepth >= 2` 且存在多个激活节点时出现，提供
   `2D SVG Tree`（默认，后序槽位 + 父节点 x 取子节点均值 + 三次贝塞尔连线）与 `Compact List` 两种视图；
-  三态着色（active 电光蓝 / DUP 玫红 / retired 暗灰，未来节点 opacity-40），点击节点跳到其进入帧。
+  三态着色（active 电光蓝 / DUP 玫红 / retired 暗灰，未来节点 opacity-40），点击节点跳到其进入帧；
+  帧号变化时容器自动把「激活路径上最深的节点」平滑滚动到视口中心（越界由浏览器 clamp）。
 - 线性递归的迭代改写由合并算子嗅探自动生成（乘法累积 / 加法累积 / 纯深度推进三种形态），
   嗅探仅作用于代码生成，复杂度判档仍严格只看运行时签名与栈深。
 - 窄视口布局契约：44px 顶栏与各 `h-9` 子标题栏必须单行且 `scrollWidth == clientWidth`
   （不折行不等于可达，禁止用 `overflow-hidden` 裁掉操作按钮）；单行代码严禁自带 `overflow-x-auto`，
   横向滚动责任在外层容器，滚动条外观由 `src/index.css` 全局统一为 5px 暗色。
 - 基准对比语义：基线若被 `[FUSE_*]` 截断而重跑完整，横幅只显示
-  `STATUS: FUSE_ABORTED → COMPLETED` 与栈深收益，不得计算帧数百分比。
+  `STATUS: FUSE_ABORTED → COMPLETED` 与栈深收益，不得计算帧数百分比；
+  两侧均未熔断但属于「递归转迭代的栈空间降维」（`base 栈深 >= 4`、`curr <= 2` 且帧数上升）时，
+  主锚点切换为 `STACK REDUCTION: -x% Call Frames`，上升的帧数一律标注 `TRACE STEPS … (Unrolled Loop)`，
+  不得伪装成收益。
+- 代码合成能力：单链递归按嗅探到的合并算子生成乘法累积 / 加法累积 / 游标推进三套等价迭代代码；
+  任意重叠递归（不限 fib）由 `dominantRecursiveName` 定位函数并注入 Top-Down 记忆化包装
+  （`const __memo = {}` + `JSON.stringify([参数])` 守卫，原函数体塞进 IIFE 保留 return 语义）；
+  定位失败或形参含默认值/解构时放弃注入并说明原因。
+- Watch 条件守卫：标量 / 1D 数组 / 2D 矩阵卡片均可 Pin 置顶；断言在当前帧变量快照上求值，
+  显示 TRUE / FALSE / INVALID / ERROR 四态（作用域缺变量必须 ERROR 而非谎报 FALSE），
+  并受三道闸门约束（字符白名单不含下标括号、禁 `ident(` 调用、禁宿主对象名）。
 
 `optimizedCode === sourceCode` 时界面自动隐藏 Apply 按钮，避免出现「已最优仍提示再优化」。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M6 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M7 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

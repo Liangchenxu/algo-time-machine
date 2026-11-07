@@ -1,6 +1,6 @@
 # M6 · 2D SVG 贝塞尔调用树、线性递归算子自动合成与 771px 分屏布局精修
 
-Commit：本次提交（`git log -1`）— feat(visualizer): 完成 Milestone 6 2D SVG贝塞尔调用树、线性递归算子自动合成与771px分屏布局精修
+Commit `772ef79` — feat(visualizer): 完成 Milestone 6 2D SVG贝塞尔调用树、线性递归算子自动合成与771px分屏布局精修
 
 ## Why · 背景动机
 
