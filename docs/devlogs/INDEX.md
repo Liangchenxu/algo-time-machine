@@ -18,7 +18,8 @@
 | M8 | `6da81b1` | [M8-subtree-pruning-and-watchpoints.md](./M8-subtree-pruning-and-watchpoints.md) | 纯运行时 HIT/DUP 剪枝拓扑取证、Stage-2 自底向上递推降维、SUBTREE PRUNING 锚点、Watch 下标与 Seek TRUE 观察点 |
 | M9 | `9bb7835` | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
 | M10 | `ee2d94c` | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
-| M11 | 本次提交 | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
+| M11 | `564e022` | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
+| M12 | 本次提交 | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -131,14 +132,25 @@
     计数型（`1 + fn(...)` 且基线 `return 0`）→ `steps++` 游标循环；快速幂型（双参、折半槽位 > 0、
     函数体含 `*`、顶层实参 ≥2）→ 迭代二进制快速幂；其余一律 `optimizedCode = sourceCode`、
     Apply 隐藏、标签 `[SEMANTICS_PRESERVED]`。#13c 在此的具体化：宁可少给，不可给错。
-    （c）**A/B 切换不得触发诊断重算**：`⇄` 只通过 `runForComparison` 重跑沙箱，
-    `abState` 冻结两侧帧数/栈深/展开重复数，横幅在整个往返过程保持不变；
-    基线视图必须显示 `VIEWING BASELINE TRACE` 提示（判据芯片描述的是另一侧），
-    且仅切换预设才清空 `baselineMetrics` 与 `abState`。
+    （c）**A/B 切换不得触发诊断重算**：M11 用 `⇄` + `runForComparison` 冻结两侧指标；
+    M12 起升级为 `stageHistory` 全息快照（见 #18），旧 `abState` 已下线，改由快照胶囊零延迟切换。
+    横幅在任意阶段切换过程中都必须保持可见且数值不变；仅切换预设才清空历史。
     （d）Quick-Watch 兜底排序按**突变熵**（全轨迹 distinct 取值数降序）挑选动态变量，
     `distinct === 1` 的静态输入仅在无动态变量时兜底，避免推荐恒真且无信息量的断言。
+18. **多阶段全息快照栈与报告同步恢复契约**（M12 确立）：
+    （a）每次 Apply 必须把「当前阶段」冻结成 `StageSnapshot`（`sourceCode` / `frames` / `execTimeMs` /
+    `sandboxError` / `aiReport` / `metrics`），再追加新阶段；**报告是快照的一部分**，
+    切换阶段时 `aiReport` 必须随之恢复，否则会出现「轨迹是 Stage 0、判据却是 Stage 2」的矛盾。
+    （b）阶段切换必须是**零延迟**的：只从快照同步 state，不得重跑沙箱或重算诊断。
+    （c）横幅始终比较 `stageHistory[0]` 与当前选中阶段；停在 Stage 0 时比较最新阶段（横幅不消失、
+    不退化为 x → x），并显示 `INSPECTING STAGE 0 BASELINE (Full Report Restored)`。
+    （d）**非最新阶段隐藏 Apply**（`atLatestStage`）防止历史分支重复分叉；只有切回最新阶段或切换预设才恢复。
+    （e）参数字符串按顶层逗号切分（忽略 `[]` `{}` `()` 内的逗号）后逐槽判定数值，
+    非数值槽位只跳过自身，不得整次丢弃调用。
+    （f）快速幂合成要求指数为**非负整数**；`[FUSE_STACK_OVERFLOW]` 且签名链出现重复时判
+    `O(∞) Unbounded Recursion` 并拒绝任何改写——`depth(400)` 这类实参无环的深递归不受此判据影响。
 
-## 当前实测基线（M11 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M12 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -147,6 +159,7 @@
 | Binary Search Bounds | 10 | 1 | `O(log n) Logarithmic Halving` / `O(1) Constant Pointers` | 空间 11、探测 1 次、对数预算 16 |
 | Naive Fibonacci Tree | 31 | 6 | `O(2^n) Exponential` / `O(n) Stack Depth 6` | 调用树 15 节点 + 9 个 DUP；铁证 `fib(1) ×5, fib(2) ×3, fib(0) ×3, fib(3) ×2`，冗余 9 次；M9 起可点两次 Apply 走完整二级火箭（31 → 41 → 11 帧） |
 | Pascal Comb (Tree→2D) | 13 | 5 | `O(2^n) Exponential` / `O(n) Stack Depth 5` | 第 6 预设（M10）；`DUP 3`，两次 Apply 后 37 帧 `O(n) Memoized Linear`（`DUP 0 / HIT 1`）→ 17 帧 `O(M * N) Matrix DP`、`WRITES: 5` 徽章、Apply 退场 |
+| Fast Power O(log n) | 13 | 7 | `O(log n) Logarithmic Recursion` / `O(log n) Call Stack Depth 7` | 第 7 预设（M12）；槽位 1（exp）`16 → 8 → 4 → 2 → 1`，Apply 后 22 帧 `O(log n) Iterative Halving`、终端 `powerIter(2, 16) = 65536` |
 | Infinite Loop Guard | 1334 | 1 | `O(∞) Non-Terminating` / `O(1) Constant Heap` | `[FUSE_STEP_LIMIT]` 横幅 + 1334 帧现场，热点 L5（666x） |
 | 手写 `depth(400)` | 149 | 150 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 150` | **M4 误判项已闭环**：149 个唯一签名、0 个 DUP 节点、树仅渲染前 64 个；`[FUSE_STACK_OVERFLOW]` 保留现场 |
 | 手写 `fact(6)` | 7 | 7 | `O(n) Linear Recursion` / `O(n) Call Stack Depth 7` | 6 个唯一签名、冗余进入 0 次，判为单链线性而非指数 |
@@ -194,6 +207,10 @@
 | 非等价拦截（M11） | `weirdHalve(32)`（`n ^ fn(n/2)`）仍判对数级，但 Apply 隐藏、标签 `[SEMANTICS_PRESERVED]`、收益文案说明保留源码 |
 | A/B 往返（M11） | `⇄ Inspect Baseline (12f)` → 12 帧 + 调用树重现 + `VIEWING BASELINE TRACE` → `⇄ Return to Optimized (22f)` → 22 帧；横幅全程冻结在 `STACK REDUCTION -71.4% / PEAK STACK 7 → 2` |
 | 突变熵芯片（M11） | 自定义循环得 `+ acc === 6` / `+ i === 4`，恒定 `target` 被排除 |
+| 全息快照栈（M12） | fib 两次 Apply 后胶囊 `Stage 0 (31f)` / `Stage 1 (41f)` / `Stage 2 (11f)`；切回 Stage 0 → 31 帧 + `O(2^n)` + `DUP 9 / HIT 0` + `INSPECTING STAGE 0 BASELINE (Full Report Restored)` + Apply 隐藏；Stage 1 → 41 帧 + `Memoized Linear` + `DUP 1 / HIT 2`；Stage 2 → 11 帧 + `Linear Iterative Scan` |
+| 混合实参折半（M12） | `bsearchHalve("arr", 32)`：槽位 0 字符串跳过，槽位 1 链 `32 → 16 → 8 → 4 → 2 → 1` → `O(log n) Logarithmic Recursion` / Stack Depth 7 |
+| 指数门控（M12） | `power(2, 16.5)` 仍判对数级但 Apply 隐藏，文案 `negative/non-integer exponent (16.5) → source preserved` |
+| 不收敛判据（M12） | `power(2, -4)` → `[FUSE_STACK_OVERFLOW]` 后判 `O(∞) Unbounded Recursion` / `Stack Depth 150 (fused)`，标签 `GUARD_TRAP` + `ARG_CYCLE`，Apply 隐藏；`depth(400)` 仍判 `O(n) Linear Recursion` 且 Apply 可见 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -249,10 +266,14 @@
 - [x] 折半消栈只对「返回值等于步数」的形态等价（M10 报备 → **M11 闭合**：形态门控——计数型 / 快速幂型 / 其余拒绝生成，实测 `weirdHalve` 隐藏 Apply 并标 `[SEMANTICS_PRESERVED]`）
 - [x] 自适应规则 C 按变量出现顺序取前两个数值变量（M10 报备 → **M11 闭合**：按突变熵 `distinctCount` 降序，静态输入降级，实测 `target` 被排除、`acc` / `i` 入选）
 - [x] 缺少优化前后轨迹的 A/B 对比能力（M11：`abState` + `runForComparison` + `⇄` 按钮，横幅冻结、12 ↔ 22 帧往返无损）
-- [ ] 折半识别要求实参全部是数字，对象/字符串实参的递归会被跳过（见 M11「遗留」）
-- [ ] 快速幂合成未显式拒绝负数指数与非交换算子（见 M11「遗留」）
-- [ ] A/B 只保存最后一次 Apply 的两侧，连续二级火箭后无法回溯到 Stage-0（见 M11「遗留」）
-- [ ] 基线视图只加提示，未为两侧各存一份诊断报告（见 M11「遗留」）
+- [x] 折半识别要求实参全部是数字，对象/字符串实参会被跳过（M11 报备 → **M12 闭合**：`splitTopLevelArgs` 顶层逗号切分 + 逐槽判数值，实测 `bsearchHalve("arr", 32)` 靠槽位 1 命中）
+- [x] 快速幂合成未显式拒绝负数指数（M11 报备 → **M12 闭合**：要求 `Number.isInteger(exp) && exp >= 0`，实测 `power(2, 16.5)` 判对数级但 Apply 隐藏并注明原因）
+- [x] A/B 只保存最后一次 Apply 的两侧（M11 报备 → **M12 闭合**：`stageHistory` 全息栈，fib 实测 `Stage 0/1/2` 三段可零延迟互切）
+- [x] 基线视图只加提示、未为两侧各存报告（M11 报备 → **M12 闭合**：`aiReport` 纳入快照，切回 Stage 0 时判据恢复为 `O(2^n)` 而非沿用 Stage 2）
+- [x] 负指数递归熔断后被判 `O(2^n)` 并推荐记忆化（M12 实测暴露：`power(2,-4)` 签名环 → 已改判 `O(∞) Unbounded Recursion` 并隐藏 Apply，`depth(400)` 不受影响）
+- [ ] 快照把整条 frames 存在内存，长轨迹多级重构占用较多（见 M12「遗留」）
+- [ ] 快照与手改代码不同步：切走再切回会恢复快照源码、丢弃编辑（见 M12「遗留」）
+- [ ] 2 参计数型（带 tag 参数）被保守拒绝合成，缺少「未使用参数可忽略」判定（见 M12「遗留」）
 
 ## 全仓 emoji 扫描基线（可复现）
 

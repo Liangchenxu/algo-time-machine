@@ -123,14 +123,19 @@ Key 仅驻留内存，不写入 localStorage。
 - 二维矩阵读写分离（`analyzeMatrixWrites`）：比较相邻帧每个单元格，`writeCount === 0` 为只读输入、
   `> 0` 为可变状态表；只有两类同时存在时才提供一维滚动压缩（`includes('grid')` 类源码门控已禁止），
   显微镜 2D 卡片据此显示 `READ-ONLY` / `WRITES: n` 徽章。
-- 折半递归：进入事件的实参**按参数槽位**收集序列，任意槽位满足 `a[k+1] = floor(a[k]/2)`
-  （≥2 步、首值 ≥8）即判 `O(log n) Logarithmic Recursion`（`power(2,16)` 由槽位 1 命中）；
-  消栈必须过形态门：计数型生成 `while (curr > 1)` 游标循环，双参含乘法生成迭代二进制快速幂
-  （实测 `powerIter(2, 16) = 65536`），其余形态保留源码并标 `[SEMANTICS_PRESERVED]`、隐藏 Apply。
-  迭代侧对应 `O(log n) Iterative Halving`。该判定必须先于线性递归档。
-- A/B 轨迹对比：Apply 后横幅右侧提供 `⇄ Inspect Baseline` / `⇄ Return to Optimized`，
-  两侧源码与帧数/栈深/展开重复数冻结在 `abState`，切换只走 `runForComparison`（不重算诊断），
-  因此横幅全程不变；基线视图显示 `VIEWING BASELINE TRACE`，仅切换预设才清空 A/B。
+- 折半递归：进入事件的实参**按顶层逗号切分（忽略 `[]` `{}` `()` 内逗号）后逐槽收集**，
+  任意槽位满足 `a[k+1] = floor(a[k]/2)`（≥2 步、首值 ≥8）即判 `O(log n) Logarithmic Recursion`
+  （`power(2,16)` 由槽位 1 命中；槽位 0 是字符串时不丢弃整次调用）；
+  消栈必须过形态门：计数型生成 `while (curr > 1)` 游标循环，双参含乘法且**指数为非负整数**时
+  生成迭代二进制快速幂（实测 `powerIter(2, 16) = 65536`），其余形态保留源码并标
+  `[SEMANTICS_PRESERVED]`、隐藏 Apply。迭代侧对应 `O(log n) Iterative Halving`；
+  该判定必须先于线性递归档。**`[FUSE_STACK_OVERFLOW]` + 签名链重复 = 不收敛**，判
+  `O(∞) Unbounded Recursion` 且拒绝任何改写（`depth(400)` 实参无环，仍判线性递归）。
+- 多阶段全息快照：每次 Apply 把当前阶段冻结成 `StageSnapshot`（源码 + 帧 + 沙箱错误 +
+  **该阶段的 aiReport** + 指标）并追加新阶段；横幅右侧的 `Stage N (mf)` 胶囊直接同步恢复全部状态
+  （零延迟、不重跑沙箱），横幅始终比较 Stage 0 与当前阶段（停在 Stage 0 时对比最新阶段并显示
+  `INSPECTING STAGE 0 BASELINE (Full Report Restored)`），非最新阶段隐藏 Apply 防止分叉，
+  仅切换预设才清空历史。
 
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
   `HIT`（翠绿 `#10b981`，首次展开过而本次零子节点直接退栈 = 被记忆化缓存拦截），
@@ -141,7 +146,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M11 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M12 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

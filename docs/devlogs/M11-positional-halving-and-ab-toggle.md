@@ -1,6 +1,6 @@
 # M11 · 多参槽位折半、快速幂等价合成、突变熵 Watch 排序与 A/B 轨迹切换
 
-Commit：本次提交（`git log -1`）— feat(ab-trace): 完成 Milestone 11 多参槽位折半与快速幂合成、突变熵Watch排序及Benchmark一键A/B轨迹切换
+Commit `564e022` — feat(ab-trace): 完成 Milestone 11 多参槽位折半与快速幂合成、突变熵Watch排序及Benchmark一键A/B轨迹切换
 
 ## Why · 背景动机
 

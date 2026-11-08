@@ -514,22 +514,47 @@ function collectAccumulators(frames: TraceFrame[]) {
  * a[k+1] = floor(a[k]/2)（≥2 步、首值 ≥8）即命中。
  * power(2, 16) 的槽位 0 恒为底数、槽位 1 才收敛，因此必须逐槽扫描而不是只看首参。
  */
+/** 按顶层逗号切分实参，忽略 [] {} () 内部的逗号（数组/对象实参不会把后续槽位挤错位）。 */
+function splitTopLevelArgs(argStr: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of argStr) {
+    if (ch === '[' || ch === '{' || ch === '(') depth++;
+    else if (ch === ']' || ch === '}' || ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+/**
+ * 折半实参链取证（按参数槽位、容忍混合实参）：实参按顶层逗号切分后，逐槽独立判断是否为数值；
+ * 某个槽位是数组/字符串时**只跳过该槽位**，绝不因此丢弃整次调用，
+ * 因此 bsearch([2,5,8], 32) 这类「数组 + 数值」的递归仍能靠槽位 1 命中折半。
+ */
 function detectHalvingArgs(frames: TraceFrame[]) {
   const slots: number[][] = [];
   for (const f of frames) {
     if (!f.event.startsWith('函数进入')) continue;
     const top = f.callStack[f.callStack.length - 1] || '';
-    const m = top.match(/\(([^)]*)\)/);
-    if (!m) continue;
-    const nums = m[1].split(',').map((s) => Number(s.trim()));
-    if (!nums.length || nums.some((n) => !Number.isFinite(n))) continue;
-    nums.forEach((n, i) => {
+    const open = top.indexOf('(');
+    const close = top.lastIndexOf(')');
+    if (open < 0 || close <= open) continue;
+    splitTopLevelArgs(top.slice(open + 1, close)).forEach((tok, i) => {
+      if (!/^-?\d+(?:\.\d+)?$/.test(tok)) return;
       slots[i] = slots[i] || [];
-      slots[i].push(n);
+      slots[i].push(Number(tok));
     });
   }
   for (let slot = 0; slot < slots.length; slot++) {
     const seq = slots[slot];
+    if (!seq) continue;
     let steps = 0;
     while (steps + 1 < seq.length && seq[steps] > 1 && seq[steps + 1] === Math.floor(seq[steps] / 2)) {
       steps++;
@@ -575,6 +600,8 @@ function synthesizeHalvingLowering(
   }
 
   if (info.params.length === 2 && rec.slot > 0 && body.includes('*') && args.length >= 2) {
+    // 负指数/非整数指数不在二进制快速幂的等价域内（floor 负数会停滞），必须拒绝合成（#13c）
+    if (!Number.isInteger(args[1]) || args[1] < 0) return null;
     const [p0, p1] = info.params;
     return {
       shape: 'fastpow',
@@ -690,12 +717,50 @@ export async function runAIDiagnostics(
     };
   }
 
+  // 栈熔断 + 签名环 = 递归在给定实参下不收敛（如 power(2, -4) 的 floor(-1/2) 停滞）。
+  // 与 depth(400) 区分：后者每次实参都不同（无环），只是深度超过熔断阈值，仍属可终止的线性递归。
+  if (errorMsg && errorMsg.includes('[FUSE_STACK_OVERFLOW]') && metrics.redundantCallCount > 0) {
+    return {
+      ...metrics,
+      timeComplexity: 'O(∞) Unbounded Recursion',
+      spaceComplexity: `O(n) Stack Depth ${metrics.maxStackDepth} (fused)`,
+      summary: `调用栈在 ${metrics.maxStackDepth} 层触发 [FUSE_STACK_OVERFLOW]，且签名链出现重复（${metrics.topDuplicates.join('，')}），说明该递归在给定实参下没有收敛路径（常见于负指数、缺失基线或不减小的步进）。已保留熔断前 ${frames.length} 帧现场，但不提供记忆化/降维合成——递归本身不终止，任何等价改写都不会终止。`,
+      frameInsights: [
+        {
+          frameIndex: frames.length - 1,
+          line: metrics.hotspotLine,
+          tag: 'GUARD_TRAP',
+          issue: '递归深度突破 150 层，且相同实参反复出现：缺少收敛的基线或不变量',
+        },
+        {
+          frameIndex: metrics.bottleneckFrameIndex,
+          line: metrics.hotspotLine,
+          tag: 'ARG_CYCLE',
+          issue: `签名环：${metrics.topDuplicates.join('，')}，实参不再向基线推进`,
+        },
+      ],
+      optimizedCode: sourceCode,
+      optimizationGain: 'Recursion does not terminate under the given arguments → no lowering offered (semantics preserved)',
+    };
+  }
+
   // 单链折半递归（O(log n) 栈深）：必须在通用递归分支之前判定，否则会被当成线性递归
   const halvingRec = detectHalvingArgs(frames);
   if (metrics.maxStackDepth >= 3 && metrics.redundantCallCount === 0 && halvingRec.detected) {
     const stageInfo = extractFunctionInfo(sourceCode, metrics.dominantRecursiveName);
-    const callArgs = metrics.topCallExpr ? (metrics.topCallExpr.match(/-?\d+/g) || []).map(Number) : [];
+    const callArgStr = metrics.topCallExpr
+      ? metrics.topCallExpr.slice(metrics.topCallExpr.indexOf('(') + 1, metrics.topCallExpr.lastIndexOf(')'))
+      : '';
+    // 顶层实参按槽位解析（保留小数，便于负指数/非整数指数的门控判断）
+    const callArgs = splitTopLevelArgs(callArgStr).map((t) => (/^-?\d+(?:\.\d+)?$/.test(t) ? Number(t) : NaN));
     const lowering = stageInfo ? synthesizeHalvingLowering(stageInfo, halvingRec, callArgs) : null;
+    const expArg = halvingRec.slot > 0 ? callArgs[halvingRec.slot] : undefined;
+    const exponentRejected =
+      !lowering &&
+      !!stageInfo &&
+      stageInfo.params.length === 2 &&
+      halvingRec.slot > 0 &&
+      (expArg === undefined || !Number.isInteger(expArg) || expArg < 0);
     const slotLabel = stageInfo?.params[halvingRec.slot]
       ? `槽位 ${halvingRec.slot}（${stageInfo.params[halvingRec.slot]}）`
       : `槽位 ${halvingRec.slot}`;
@@ -703,7 +768,7 @@ export async function runAIDiagnostics(
       ...metrics,
       timeComplexity: 'O(log n) Logarithmic Recursion',
       spaceComplexity: `O(log n) Call Stack Depth ${metrics.maxStackDepth}`,
-      summary: `调用栈实参链取证：${slotLabel} 的收敛链 ${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销。${lowering ? `已按「${lowering.label}」生成等价的 O(1) 栈迭代形态。` : '因返回值含自定义非线性组合，无法机械推导等价迭代形态，按不变量 #13c 保留原递归以保证语义等价。'}`,
+      summary: `调用栈实参链取证：${slotLabel} 的收敛链 ${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销。${lowering ? `已按「${lowering.label}」生成等价的 O(1) 栈迭代形态。` : exponentRejected ? `指数实参为 ${String(expArg)}（非负整数之外），不在二进制快速幂的等价域内，按不变量 #13c 保留原递归。` : '因返回值含自定义非线性组合，无法机械推导等价迭代形态，按不变量 #13c 保留原递归以保证语义等价。'}`,
       frameInsights: [
         {
           frameIndex: metrics.bottleneckFrameIndex,
@@ -722,13 +787,17 @@ export async function runAIDiagnostics(
               frameIndex: frames.length - 1,
               line: metrics.hotspotLine,
               tag: 'SEMANTICS_PRESERVED',
-              issue: '返回值组合形状未命中计数/快速幂模板，保留原递归、不生成猜测性代码',
+              issue: exponentRejected
+                ? `指数实参 ${String(expArg)} 不在非负整数域内，拒绝生成快速幂迭代版本`
+                : '返回值组合形状未命中计数/快速幂模板，保留原递归、不生成猜测性代码',
             },
       ],
       optimizedCode: lowering ? lowering.code : sourceCode,
       optimizationGain: lowering
         ? `Stack: ${metrics.maxStackDepth} -> O(1) iteration (${lowering.shape}) | Θ(log n) steps preserved`
-        : `Logarithmic recursion detected | custom return composition → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`,
+        : exponentRejected
+          ? `Logarithmic recursion detected | negative/non-integer exponent (${String(expArg)}) → source preserved`
+          : `Logarithmic recursion detected | custom return composition → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`,
     };
   }
 

@@ -53,6 +53,18 @@ interface BaselineMetrics {
   expansiveRedundantCount: number;
 }
 
+/** 多阶段全息快照：一份可在零延迟下完整还原的「源码 + 帧 + 报告 + 指标」胶囊 */
+interface StageSnapshot {
+  stageIndex: number;
+  label: string;
+  sourceCode: string;
+  frames: TraceFrame[];
+  execTimeMs: number;
+  sandboxError?: string;
+  aiReport: AIDiagnosticReport;
+  metrics: BaselineMetrics;
+}
+
 const PRESETS: PresetItem[] = [
   {
     id: 'rainwater',
@@ -137,6 +149,26 @@ while (low <= high) {
   }
 }
 console.log("Target index =", foundIndex);`,
+  },
+  {
+    id: 'fast-power',
+    title: 'Fast Power O(log n)',
+    category: 'Positional Halving · Slot 1 (exp)',
+    complexity: 'O(log n)',
+    code: `// 二分快速幂递归：观察槽位 1 (exp: 16→8→4→2→1) 折半链与一键二进制快速幂消栈
+function power(base, exp) {
+  if (exp === 0) {
+    return 1;
+  }
+  const half = power(base, Math.floor(exp / 2));
+  if (exp % 2 === 0) {
+    return half * half;
+  }
+  return base * half * half;
+}
+
+let ans = power(2, 16);
+console.log("power(2, 16) =", ans);`,
   },
   {
     id: 'fib-tree',
@@ -386,6 +418,7 @@ const QUICK_WATCH: Record<string, string[]> = {
   rainwater: ['water >= 4', 'left === right'],
   'dp-matrix': ['dp[1][2] === 6', 'r === 2 && c === 3'],
   'binary-search': ['guess === target', 'low === high'],
+  'fast-power': ['exp === 8', 'exp === 1'],
   'fib-tree': ['n === 2', 'leftBranch === 2'],
   'pascal-comb': ['k === n', 'k === 0'],
   'infinite-loop': ['anomalySum > 500', 'count === 0'],
@@ -787,7 +820,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M11',
-    commit: '本次提交',
+    commit: '564e022',
     doc: 'docs/devlogs/M11-positional-halving-and-ab-toggle.md',
     title: '多参槽位折半、快速幂等价合成、突变熵 Watch 排序与 A/B 轨迹切换',
     why: 'M10 的折半判定只看首参，power(2, 16) 这类"收敛在第二参"的递归识别不到；折半消栈又对任何折半递归都生成计数循环，遇到自定义返回值必然算错；Quick-Watch 的兜底排序按变量出现顺序，会挑中恒定的输入常量；评委想回看优化前的调用树时，只能重新点预设、横幅随之消失。',
@@ -810,6 +843,34 @@ const DEVLOGS: DevlogEntry[] = [
       'weirdHalve(32)（n ^ fn(n/2)）：仍判 O(log n) Logarithmic Recursion / Stack Depth 7，但 Apply 按钮隐藏、标签为 [SEMANTICS_PRESERVED]，收益文案写明 custom return composition → source preserved。',
       'A/B 往返：按钮 ⇄ Inspect Baseline (12f) → 基线 12 帧且出现调用树与 VIEWING BASELINE TRACE → ⇄ Return to Optimized (22f) → 回到 22 帧；横幅全程保持 STACK REDUCTION -71.4% / PEAK STACK 7 → 2 不变。',
       '突变熵芯片：自定义循环代码得到 acc === 6 / i === 4（两者 distinct ≥ 2），恒定的 target 被排除；回归三预设（Rain 40、fib 31、DP 29）判据与帧数不变，切预设后 ⇄ 按钮消失。',
+    ],
+  },
+  {
+    tag: 'M12',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M12-stage-history-stack-and-mixed-args.md',
+    title: '多阶段全息快照栈、混合实参折半、指数门控与 Fast Power 预设',
+    why: 'M11 的 A/B 只有两侧且只换轨迹不换报告：二级火箭之后回不到 Stage-0，切到基线时右侧判据仍描述优化版；折半识别要求实参全是数字，数组/字符串参数会整次丢弃；快速幂合成没有拒绝负指数与非整数指数；负指数递归熔断后还会被误判成指数级并推荐救不了的记忆化。',
+    what: [
+      'App.tsx：以 stageHistory: StageSnapshot[] 取代 abState，快照保存 sourceCode / frames / execTimeMs / sandboxError / aiReport / metrics；每次 Apply 自动把当前阶段冻结入栈并追加新阶段（Stage 0 · Base / Stage 1 · Memo / Stage 2 · Tabulated|Lowered）。',
+      'App.tsx：横幅右侧渲染 Stage 胶囊（Stage 0 (31f) / Stage 1 (41f) / Stage 2 (11f)），点击直接同步恢复该阶段全部状态（零延迟，不重跑沙箱）；横幅始终对比 Stage 0 与当前选中阶段，停在 Stage 0 时对比最新阶段并显示 INSPECTING STAGE 0 BASELINE (Full Report Restored)；非最新阶段隐藏 Apply 防止历史分支重复分叉。',
+      'aiDiagnostics.ts：detectHalvingArgs 改用 splitTopLevelArgs（忽略 [] {} () 内逗号）按槽位解析，非数值槽位只跳过自身、不再整次丢弃，bsearchHalve("arr", 32) 靠槽位 1 命中。',
+      'aiDiagnostics.ts：快速幂形态要求指数为非负整数（Number.isInteger && >= 0），否则返回 null 并在收益文案写明 negative/non-integer exponent → source preserved。',
+      'aiDiagnostics.ts：新增「栈熔断 + 签名环 = 不收敛」判据（[FUSE_STACK_OVERFLOW] 且 redundantCallCount > 0 → O(∞) Unbounded Recursion），与 depth(400) 这类「实参各不相同、只是深度超过熔断」的可终止递归区分开。',
+      'App.tsx：新增第 7 预设 fast-power（power(2, 16)，槽位 1 折半 → 一键二进制快速幂）。',
+    ],
+    conflicts: [
+      '「切回基线」必须连报告一起切：M11 只换轨迹，判据芯片仍在描述优化版。快照把 aiReport 一并冻结后，Stage 0 恢复即回到 O(2^n) Exponential + DUP 9，Stage 1 回到 Memoized Linear + HIT 2，不需要再跑一次诊断。',
+      '横幅的对比方向在 Stage 0 会退化：若仍用「Stage 0 → 当前」，停在基线时就成了 31 → 31。改为「停在 Stage 0 时对比最新阶段」，横幅因此全程有意义且不消失。',
+      'power(2, -4) 实测暴露新洞：它在 150 层触发 [FUSE_STACK_OVERFLOW]，但签名 power(2,-1) 重复出现 → 被判 O(2^n) 且提供记忆化 Apply（记忆化并不会让它终止）。补「签名环 + 栈熔断 = 不收敛」后判 O(∞) Unbounded Recursion 并隐藏 Apply；同时确认 depth(400)（实参 400→399→… 无环）仍判 O(n) Linear Recursion。',
+      '2 参计数型递归（bsearchHalve）保守拒绝合成：形态门要求单参，因此虽然返回值是步数也不会生成 steps 循环。这是有意的保守——TAG 参数是否参与语义无法只从帧判断。',
+    ],
+    impact: [
+      '三级火箭全息切换（fib）：胶囊 Stage 0 (31f) / Stage 1 (41f) / Stage 2 (11f)；切回 Stage 0 → 31 帧、O(2^n) Exponential / Stack Depth 6、DUP 9 / HIT 0、INSPECTING STAGE 0 BASELINE 提示、横幅仍在、Apply 隐藏；Stage 1 → 41 帧、O(n) Memoized Linear、DUP 1 / HIT 2；Stage 2 → 11 帧、O(n) Linear Iterative Scan。',
+      '混合实参：bsearchHalve("arr", 32) 槽位 0 为字符串被跳过，槽位 1 链 32 → 16 → 8 → 4 → 2 → 1 命中 O(log n) Logarithmic Recursion / Stack Depth 7。',
+      '第 7 预设：Stage-0 13 帧 O(log n) Logarithmic Recursion（槽位 1 exp 16→8→4→2→1）；Apply 后 powerIter(2, 16) = 65536、22 帧、O(log n) Iterative Halving。',
+      '指数门控：power(2, 16.5) 仍判对数级但 Apply 隐藏，收益文案 negative/non-integer exponent (16.5) → source preserved；power(2, -4) 熔断后判 O(∞) Unbounded Recursion / Stack Depth 150 (fused)，标签 GUARD_TRAP + ARG_CYCLE，Apply 隐藏。',
+      '回归：depth(400) 仍为 O(n) Linear Recursion / Stack Depth 150 且 Apply 可见；Rain 40、Binary 10、FastPower 13 帧判据不变；切换预设后 Stage 胶囊消失；顶栏 44px / scrollWidth == clientWidth == 770。',
     ],
   },
 ];
@@ -835,19 +896,9 @@ export default function App() {
   const [specTab, setSpecTab] = useState<'arch' | 'devlog'>('arch');
   const [devlogIdx, setDevlogIdx] = useState<number>(0);
 
-  // 点击 Apply Refactor 之前锁定一份基准，重跑完成后与当前实测值对齐成收益横幅
-  const [baselineMetrics, setBaselineMetrics] = useState<BaselineMetrics | null>(null);
-  // A/B 轨迹对比：保存两侧源码与冻结的指标，切换只换沙箱轨迹、不清横幅
-  const [abState, setAbState] = useState<{
-    baselineCode: string;
-    optimizedCode: string;
-    baseFrames: number;
-    optFrames: number;
-    baseStack: number;
-    optStack: number;
-    optExpansive: number;
-    viewing: 'optimized' | 'baseline';
-  } | null>(null);
+  // 多阶段全息快照栈：Stage-0 / Stage-1 / Stage-2 … 各自保存源码、帧、报告与指标
+  const [stageHistory, setStageHistory] = useState<StageSnapshot[]>([]);
+  const [activeStage, setActiveStage] = useState<number>(0);
 
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
@@ -889,22 +940,10 @@ export default function App() {
       framesCount: (res.frames || []).length,
       maxStackDepth: m.maxStackDepth,
       expansive: m.expansiveRedundantCount,
-    };
-  };
-
-  // A/B 对比专用：只重跑沙箱、不重算诊断，从而让 Benchmark 横幅的数据保持冻结不闪烁
-  const runForComparison = async (codeToRun: string) => {
-    setIsPlaying(false);
-    const res = await runInSandbox(codeToRun);
-    setExecTimeMs(res.executionTimeMs);
-    setSandboxError(res.error);
-    setFrames(res.frames || []);
-    setCurrentFrameIdx(0);
-    const m = analyzeTraceMetrics(res.frames || []);
-    return {
-      framesCount: (res.frames || []).length,
-      maxStackDepth: m.maxStackDepth,
-      expansive: m.expansiveRedundantCount,
+      frames: res.frames || [],
+      execTimeMs: res.executionTimeMs,
+      error: res.error,
+      report,
     };
   };
 
@@ -1073,97 +1112,135 @@ export default function App() {
     setSelectedPresetId(preset.id);
     setSourceCode(preset.code);
     setEditMode(false);
-    setBaselineMetrics(null);
-    setAbState(null);
+    setStageHistory([]);
+    setActiveStage(0);
     setBreakpoints(new Set<number>());
     executeCode(preset.code);
   };
 
+  const stageLabelFor = (index: number, prev?: StageSnapshot) =>
+    index === 0
+      ? 'Stage 0 · Base'
+      : index === 1
+        ? 'Stage 1 · Memo'
+        : `Stage ${index} · ${prev?.aiReport.nextStageLabel ? 'Tabulated' : 'Lowered'}`;
+
+  const snapshotOf = (
+    index: number,
+    label: string,
+    code: string,
+    trace: TraceFrame[],
+    latency: number,
+    err: string | undefined,
+    report: AIDiagnosticReport
+  ): StageSnapshot => {
+    const m = analyzeTraceMetrics(trace);
+    return {
+      stageIndex: index,
+      label,
+      sourceCode: code,
+      frames: trace,
+      execTimeMs: latency,
+      sandboxError: err,
+      aiReport: report,
+      metrics: {
+        framesCount: trace.length,
+        maxStackDepth: m.maxStackDepth,
+        timeComplexity: report.timeComplexity,
+        spaceComplexity: report.spaceComplexity,
+        execTimeMs: latency,
+        wasFused: Boolean(err && err.includes('[FUSE_')),
+        expansiveRedundantCount: m.expansiveRedundantCount,
+      },
+    };
+  };
+
   const handleApplyOptimized = async () => {
     if (!aiReport?.optimizedCode) return;
-    const baselineCode = sourceCode;
-    const baseFrames = frames.length;
-    const baseStack = traceMetrics.maxStackDepth;
-    const baseExpansive = traceMetrics.expansiveRedundantCount;
-    setBaselineMetrics({
-      framesCount: baseFrames,
-      maxStackDepth: baseStack,
-      timeComplexity: aiReport.timeComplexity,
-      spaceComplexity: aiReport.spaceComplexity,
-      execTimeMs,
-      wasFused: Boolean(sandboxError && sandboxError.includes('[FUSE_')),
-      expansiveRedundantCount: baseExpansive,
-    });
+    // 历史分支上不允许继续分叉：只有停在最新阶段才能再 Apply
+    if (stageHistory.length > 0 && activeStage !== stageHistory.length - 1) return;
+
+    // 首次 Apply 时把当前 Stage-0 的完整状态（含 aiReport 与 frames）冻结进历史
+    const history = stageHistory.length
+      ? stageHistory
+      : [snapshotOf(0, 'Stage 0 · Base', sourceCode, frames, execTimeMs, sandboxError, aiReport)];
+
     const optimizedCode = aiReport.optimizedCode;
     setSourceCode(optimizedCode);
     setEditMode(false);
     const after = await executeCode(optimizedCode);
-    setAbState({
-      baselineCode,
+
+    const nextIndex = history.length;
+    const snapshot = snapshotOf(
+      nextIndex,
+      stageLabelFor(nextIndex, history[nextIndex - 1]),
       optimizedCode,
-      baseFrames,
-      optFrames: after.framesCount,
-      baseStack,
-      optStack: after.maxStackDepth,
-      optExpansive: after.expansive,
-      viewing: 'optimized',
-    });
+      after.frames,
+      after.execTimeMs,
+      after.error,
+      after.report
+    );
+    setStageHistory([...history, snapshot]);
+    setActiveStage(nextIndex);
   };
 
-  // ⇄ A/B：只换沙箱轨迹（不重跑诊断），因此 Benchmark 横幅与判据 chip 保持冻结
-  const handleToggleAb = async () => {
-    if (!abState || isAnalyzing) return;
-    const nextView = abState.viewing === 'optimized' ? 'baseline' : 'optimized';
-    setAbState({ ...abState, viewing: nextView });
-    const code = nextView === 'baseline' ? abState.baselineCode : abState.optimizedCode;
-    setSourceCode(code);
-    await runForComparison(code);
+  // 零延迟全息切换：直接同步恢复该阶段的源码、帧、错误与该阶段的 aiReport，不重跑沙箱
+  const restoreStage = (index: number) => {
+    const snap = stageHistory[index];
+    if (!snap) return;
+    setActiveStage(index);
+    setSourceCode(snap.sourceCode);
+    setFrames(snap.frames);
+    setCurrentFrameIdx(0);
+    setIsPlaying(false);
+    setSandboxError(snap.sandboxError);
+    setExecTimeMs(snap.execTimeMs);
+    setAiReport(snap.aiReport);
   };
 
+  const atLatestStage = stageHistory.length === 0 || activeStage === stageHistory.length - 1;
+
+  // 横幅始终比较 Stage 0 与「当前选中阶段」；停在 Stage 0 时改为对比最新阶段（保持横幅可见）
   const benchmarkDelta = useMemo(() => {
-    if (!baselineMetrics || !aiReport) return null;
-    // 有 A/B 快照时一律使用冻结值：切换视图不会让横幅数字跟着跳
-    const from = abState ? abState.baseFrames : baselineMetrics.framesCount;
-    const to = abState ? abState.optFrames : frames.length;
-    const stackTo = abState ? abState.optStack : traceMetrics.maxStackDepth;
-    const expansiveTo = abState ? abState.optExpansive : traceMetrics.expansiveRedundantCount;
-    const pct = from > 0 ? ((to - from) / from) * 100 : 0;
-    const nowFused = Boolean(sandboxError && sandboxError.includes('[FUSE_'));
+    if (stageHistory.length < 2) return null;
+    const base = stageHistory[0];
+    const latest = stageHistory[stageHistory.length - 1];
+    const active = stageHistory[activeStage] ?? latest;
+    const target = activeStage === 0 ? latest : active;
+    const from = base.metrics.framesCount;
+    const to = target.metrics.framesCount;
+    const stackFrom = base.metrics.maxStackDepth;
+    const stackTo = target.metrics.maxStackDepth;
+    const expansiveFrom = base.metrics.expansiveRedundantCount;
+    const expansiveTo = target.metrics.expansiveRedundantCount;
+    const baseFused = base.metrics.wasFused;
+    const nowFused = target.metrics.wasFused;
     return {
       from,
       to,
-      pct,
-      baseFused: baselineMetrics.wasFused,
+      pct: from > 0 ? ((to - from) / from) * 100 : 0,
+      baseFused,
       nowFused,
+      inspectingBaseline: activeStage === 0,
       /** 记忆化剪枝锚点：展开型重复从 >0 归零，即「指数冗余 → 缓存剪枝」的成功叙事 */
-      subtreePruningAnchor:
-        !baselineMetrics.wasFused &&
-        !nowFused &&
-        baselineMetrics.expansiveRedundantCount > 0 &&
-        expansiveTo === 0,
-      expansiveFrom: baselineMetrics.expansiveRedundantCount,
+      subtreePruningAnchor: !baseFused && !nowFused && expansiveFrom > 0 && expansiveTo === 0,
+      expansiveFrom,
       expansiveTo,
       /** 基线被截断而重构后完整跑完：帧数不是同一量纲，只报状态与栈深收益 */
-      abortedToCompleted: baselineMetrics.wasFused && !nowFused,
+      abortedToCompleted: baseFused && !nowFused,
       /** 递归转迭代的栈空间降维型重构：迭代体语句展开会让帧数上升，主锚点必须换成栈收益 */
-      stackReductionAnchor:
-        !baselineMetrics.wasFused &&
-        !nowFused &&
-        baselineMetrics.maxStackDepth >= 4 &&
-        stackTo <= 2 &&
-        to > from,
-      stackDropPct:
-        baselineMetrics.maxStackDepth > 0
-          ? ((baselineMetrics.maxStackDepth - stackTo) / baselineMetrics.maxStackDepth) * 100
-          : 0,
-      stackFrom: baselineMetrics.maxStackDepth,
+      stackReductionAnchor: !baseFused && !nowFused && stackFrom >= 4 && stackTo <= 2 && to > from,
+      stackDropPct: stackFrom > 0 ? ((stackFrom - stackTo) / stackFrom) * 100 : 0,
+      stackFrom,
       stackTo,
-      timeFrom: baselineMetrics.timeComplexity,
-      spaceFrom: baselineMetrics.spaceComplexity,
-      latencyFrom: baselineMetrics.execTimeMs,
-      latencyTo: execTimeMs,
+      timeFrom: base.metrics.timeComplexity,
+      timeTo: target.metrics.timeComplexity,
+      spaceFrom: base.metrics.spaceComplexity,
+      spaceTo: target.metrics.spaceComplexity,
+      latencyFrom: base.metrics.execTimeMs,
+      latencyTo: target.metrics.execTimeMs,
     };
-  }, [baselineMetrics, aiReport, frames.length, traceMetrics.maxStackDepth, execTimeMs, sandboxError, abState]);
+  }, [stageHistory, activeStage]);
 
   // 横幅语义分段：熔断态 > 栈收益锚点 > 帧数百分比，三类互斥且都只使用实测值
   const benchmarkSegments = useMemo(() => {
@@ -1198,13 +1275,13 @@ export default function App() {
       segs.push({
         key: 'time',
         label: 'TIME',
-        value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
+        value: `${d.timeFrom} → ${d.timeTo}`,
         emphatic: false,
       });
       segs.push({
         key: 'space',
         label: 'SPACE',
-        value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
+        value: `${d.spaceFrom} → ${d.spaceTo}`,
         emphatic: false,
       });
       segs.push({
@@ -1244,13 +1321,13 @@ export default function App() {
       segs.push({
         key: 'space',
         label: 'SPACE',
-        value: `${d.spaceFrom} → ${aiReport?.spaceComplexity ?? '—'}`,
+        value: `${d.spaceFrom} → ${d.spaceTo}`,
         emphatic: false,
       });
       segs.push({
         key: 'time',
         label: 'TIME',
-        value: `${d.timeFrom} → ${aiReport?.timeComplexity ?? '—'}`,
+        value: `${d.timeFrom} → ${d.timeTo}`,
         emphatic: false,
       });
     }
@@ -1261,7 +1338,7 @@ export default function App() {
       emphatic: false,
     });
     return segs;
-  }, [benchmarkDelta, aiReport]);
+  }, [benchmarkDelta]);
 
   const watchVars = currentFrame?.variables ?? {};
   const watchResults = useMemo(
@@ -2324,7 +2401,7 @@ export default function App() {
                   </button>
                 )}
 
-                {aiReport && aiReport.optimizedCode !== sourceCode && (
+                {aiReport && aiReport.optimizedCode !== sourceCode && atLatestStage && (
                   <button
                     onClick={handleApplyOptimized}
                     className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm shrink-0 whitespace-nowrap"
@@ -2351,21 +2428,23 @@ export default function App() {
                     <strong className={s.emphatic ? 'text-emerald-50' : 'text-emerald-100'}>{s.value}</strong>
                   </span>
                 ))}
-                {abState && (
-                  <button
-                    onClick={handleToggleAb}
-                    disabled={isAnalyzing}
-                    title={
-                      abState.viewing === 'optimized'
-                        ? 'Re-run the pre-refactor trace without losing the benchmark'
-                        : 'Return to the optimized trace'
-                    }
-                    className="ml-auto shrink-0 whitespace-nowrap rounded border border-emerald-400/60 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-100 transition hover:bg-emerald-500/30 disabled:opacity-50"
-                  >
-                    {abState.viewing === 'optimized'
-                      ? `⇄ Inspect Baseline (${abState.baseFrames}f)`
-                      : `⇄ Return to Optimized (${abState.optFrames}f)`}
-                  </button>
+                {stageHistory.length > 1 && (
+                  <div className="ml-auto flex items-center gap-1 shrink-0">
+                    {stageHistory.map((s) => (
+                      <button
+                        key={s.stageIndex}
+                        onClick={() => restoreStage(s.stageIndex)}
+                        title={`${s.label} · ${s.metrics.timeComplexity} · ${s.frames.length} frames — full snapshot (source + frames + AI report + sandbox error)`}
+                        className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] font-mono transition ${
+                          s.stageIndex === activeStage
+                            ? 'border-emerald-300/80 bg-emerald-400/25 text-emerald-50 shadow-glow'
+                            : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200/80 hover:bg-emerald-500/20'
+                        }`}
+                      >
+                        Stage {s.stageIndex} ({s.frames.length}f)
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
             )}
@@ -2394,12 +2473,12 @@ export default function App() {
                         Operator: {aiReport.combinePattern}
                       </span>
                     )}
-                    {abState?.viewing === 'baseline' && (
+                    {benchmarkDelta?.inspectingBaseline && (
                       <span
                         className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                        title="Sandbox is replaying the pre-refactor source; the verdict chips still describe the optimized run"
+                        title="Stage 0 snapshot restored in full: source, frames, sandbox error and its own AI report"
                       >
-                        VIEWING BASELINE TRACE
+                        INSPECTING STAGE 0 BASELINE (Full Report Restored)
                       </span>
                     )}
                   </div>
@@ -2699,6 +2778,25 @@ export default function App() {
                       <br />• M11: positional halving across argument slots, fast-power lowering behind a
                       strict equivalence gate, mutation-entropy watch ranking, and one-click A/B trace
                       toggling that keeps the benchmark banner frozen.
+                      <br />• M12: multi-stage holographic snapshot stack (Stage 0/1/2 with reports
+                      restored in one click), mixed-argument slot halving, exponent legality gate, and the
+                      Fast Power preset.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-sky-400 font-semibold">12. Time Capsule &amp; Convergence Gate (M12)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Each Apply freezes the current stage into stageHistory (source, frames, sandbox error,
+                      its own AI report and metrics), so the Stage capsules restore a full snapshot without
+                      re-running the sandbox - verdict chips travel with the trace. The banner always
+                      compares Stage 0 against the selected stage (or the latest when you sit on Stage 0),
+                      and Apply is hidden on historical stages so branches cannot fork.
+                      <br />• Halving arguments are split at top-level commas (brackets respected) and judged
+                      per slot, so a string first argument does not hide a halving second one.
+                      <br />• Fast power requires a non-negative integer exponent; otherwise the source is
+                      preserved. A stack fuse together with a repeated signature chain now reports
+                      O(∞) Unbounded Recursion and offers no lowering, while depth(400) (distinct arguments)
+                      still reads as linear recursion.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
