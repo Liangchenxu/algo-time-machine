@@ -555,17 +555,17 @@ function detectHalvingArgs(frames: TraceFrame[]) {
   for (let slot = 0; slot < slots.length; slot++) {
     const seq = slots[slot];
     if (!seq) continue;
-    // 容忍「奇数减一、偶数折半」的交替下潜：a[k+1] = floor(a[k]/2) 或（a[k] 为奇数且 a[k+1] = a[k]-1）。
-    // 纯折半链与 15→14→7→6→3→2→1 这类快速幂变体都能命中；折半步占比不足 50% 则不算对数级。
+    // 容忍有界常数步进的交替下潜：a[k+1] = floor(a[k]/2) 或严格递减且 a[k]-a[k+1] <= 2。
+    // 覆盖 powerAlt 的 -1 交替与 -2 微调；折半步占比不足 50% 则不算对数级。
     let steps = 0;
     let halvingSteps = 0;
     while (steps + 1 < seq.length && seq[steps] > 1) {
       const cur = seq[steps];
       const next = seq[steps + 1];
-      if (next === Math.floor(cur / 2)) {
+      if (next < cur && next === Math.floor(cur / 2)) {
         halvingSteps++;
         steps++;
-      } else if (cur % 2 === 1 && next === cur - 1) {
+      } else if (next < cur && cur - next <= 2) {
         steps++;
       } else {
         break;
@@ -772,7 +772,8 @@ export async function runAIDiagnostics(
   sourceCode: string,
   frames: TraceFrame[],
   errorMsg: string | undefined,
-  apiKey?: string
+  apiKey?: string,
+  skipDelay = false
 ): Promise<AIDiagnosticReport> {
   const metrics = analyzeTraceMetrics(frames);
   const dpShape = detectDpShape(frames);
@@ -812,7 +813,7 @@ export async function runAIDiagnostics(
     }
   }
 
-  await new Promise((r) => setTimeout(r, 380));
+  if (!skipDelay) await new Promise((r) => setTimeout(r, 380));
 
   if (errorMsg && errorMsg.includes('[FUSE_STEP_LIMIT]')) {
     return {
@@ -888,7 +889,7 @@ export async function runAIDiagnostics(
     const exponentRejected = reject === 'exponent';
     const coupledRejected = reject === 'coupled';
     const chainNote = halvingRec.interleaved
-      ? `（${halvingRec.steps} 步中 ${halvingRec.halvingSteps} 步折半，奇数步为减一交替）`
+      ? `（${halvingRec.steps} 步中 ${halvingRec.halvingSteps} 步折半，其余为差值不超过 2 的小步微调）`
       : `（连续 ${halvingRec.steps} 步满足 floor(a/2)）`;
     const slotLabel = stageInfo?.params[halvingRec.slot]
       ? `槽位 ${halvingRec.slot}（${stageInfo.params[halvingRec.slot]}）`

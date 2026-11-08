@@ -20,7 +20,8 @@
 | M10 | `ee2d94c` | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
 | M11 | `564e022` | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
 | M12 | `cc324f1` | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
-| M13 | 本次提交 | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
+| M13 | `b129f95` | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
+| M14 | 本次提交 | [M14-byte-budget-and-kernel-selftest.md](./M14-byte-budget-and-kernel-selftest.md) | 双维度惰性预算、非确定性重水化漂移守卫、广义小步交错折半与 6 项内核实时自检台 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -173,11 +174,37 @@
     点击 `Compile & Trace` = 以手改代码为全新基准，历史栈归零；点击任意阶段胶囊不得静默覆盖，
     必须先用同一沙箱真实跑一遍手改代码并将其冻结为 `kind: 'draft'` 的临时 `Draft` 阶段
     （源码/帧/报告三者同源，满足 #18a），再切到目标阶段。Draft 阶段与普通阶段一样可零延迟切回。
+20. **双维度惰性预算、非确定性重放守卫与内核自检契约**（M14 确立）：
+    （a）**惰性驱逐必须双维度**：`StageSnapshot` 携带 O(1) 抽样的 `approxBytes`
+    （中段帧与末帧 `JSON.stringify(variables)` 均值的 1.15 倍 × 帧数），非激活快照满足
+    `frames.length > LAZY_FRAME_THRESHOLD (250)` **或** `approxBytes > LAZY_BYTE_BUDGET (180_000)`
+    都必须释放 `frames`。胶囊文本保持 `Stage N (mf · LAZY)`，tooltip 必须给出 KB 级估算与双阈值。
+    只按帧数的旧判据（M13）不足以覆盖「帧少但单帧矩阵巨大」的轨迹。
+    （b）**非确定性重放守卫**：`hasNonDeterministicCalls(code)` 识别 `Math.random(` / `Date.now(` /
+    `performance.now(` / `new Date`。命中且 `frameCount <= 600` 时**豁免一切惰性驱逐**，
+    宁可多占内存也要保证历史重放 100% 一致（Strategy A）。
+    超过 600 帧而不得不重水化时，若源码含非确定性标记或 `restored.length !== snapshot.frameCount`，
+    必须在遥测条显示琥珀色 `NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)`，
+    同步更新 `frameCount` / `approxBytes`，但**冻结的 `aiReport` 与 `metrics` 不得重算**
+    （Strategy B：诚实提示漂移，不破坏 #18a 的报告同步契约）。
+    （c）**广义小步交错折半**：实参链严格单调递减且首值 ≥8、总步数 ≥2；每一步要么是
+    `a[k+1] === floor(a[k]/2)`，要么 `a[k] - a[k+1] <= 2`（覆盖 -1 / -2 微调），
+    且折半步占比 ≥50%。含交错步进（`interleaved === true`）的递归**只允许快速幂形态降维**；
+    计数型/未知形态一律返回 `custom return composition → source preserved`（#19c 的扩展）。
+    递增或大步跳跃不属于收敛链，不得放宽。
+    （d）**Draft 冻结必须跳过人工延迟**：`runAIDiagnostics` 增加 `skipDelay?: boolean`，
+    脏编辑切阶段时以 `skipDelay=true` 调用，实测从点击到 Draft 胶囊 DOM 提交 22.6ms（<30ms）；
+    沙箱仍需真实执行以保证源码/帧/报告同源（#18a），不得用旧阶段的帧伪造 Draft。
+    （e）**Live Kernel Self-Check 契约**：Spec 弹窗第 3 页签必须可在浏览器内运行 6 项确定性微基准
+    （TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读写分离 / 窄视口可达性），
+    每项显示 PASS 或 FAIL 与实测耗时；夹具不得依赖 Worker、网络或 API Key。
+    自检是「当前内核活体证据」，任何一项 FAIL 都必须显式展示，不得吞掉或降级成提示。
 
-## 当前实测基线（M13 复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M14 复测，视口 770×553，`npm run build` 零 TS 报错）
 
-> M13 轮复测了 Rain / Fast Power / fib / 自定义折半与奇偶变体 / `fib(10)` 惰性快照 / 编辑守卫；
-> 其余预设（DP、Binary、Comb、死循环、`depth(400)`、`fact(6)`）沿用 M12 实测值，未在本轮重跑。
+> M14 轮在 770×553 同源 iframe 测试台复测了 Rain / Fast Power / fib / bsearchHalve / 广义交错 /
+> `fib(8)+大数组` 字节驱逐 / `fib(5)+Math.random` 豁免 / `fib(12)+Math.random` 漂移 / Draft 时延 / 6 项自检；
+> 其余预设（DP、Binary、Comb、死循环、`depth(400)`、`fact(6)`）沿用 M12/M13 实测值，未在本轮重跑。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -251,6 +278,14 @@
 | 重跑归零（M13） | 脏编辑状态下点 `Compile & Trace` → Stage 胶囊全部消失（历史栈归零），以手改代码作为新的 Stage-0 轨迹，无静默覆盖 |
 | 指数/不收敛回归（M13） | `power(2, 16.5)` → Apply 隐藏 + `negative/non-integer exponent (16.5)`；`power(2, -4)` → 149 帧 `O(∞) Unbounded Recursion` / `Stack Depth 150 (fused)`，Apply 隐藏 |
 | 预设回归（M13） | Fast Power 13 帧 → Apply 22 帧、终端 `65536`；Rain 40 帧 `O(n) Linear Two-Pointer`；fib 三级火箭 31 → 41 → 11 帧；顶栏 44px 且 `scrollWidth == clientWidth == 770`；控制台无 error/warn |
+| 字节预算驱逐（M14） | `fib(8)+6000 元素数组`：Stage-0 135 帧（<250）但 `~4382 KB` → Apply 后 `Stage 0 (135f · LAZY)`，tooltip 显示 `thresholds 250f / 180KB` |
+| 字节驱逐重水化（M14） | 点击 `Stage 0 (135f · LAZY)` → 恢复 135 帧（含大数组深拷，实测 ~940ms）、无漂移芯片、判据保持 `O(2^n) Exponential`；Stage-1 65f 因 ~KB 同样转 LAZY |
+| 非确定性豁免（M14） | `fib(5)+6000 元素数组+Math.random`：Stage-0 32 帧 / `~1040 KB`（>180KB）但 32 ≤600 → **不驱逐**，胶囊保持 `Stage 0 (32f)`；点回 0ms 级同步恢复、无漂移芯片 |
+| 漂移提示（M14） | `fib(12)+Math.random`：Stage-0 931 帧 → Stage-1 97 帧；Stage-0 `LAZY`；点回恢复 931 帧并出现琥珀 `NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)`，`INSPECTING STAGE 0 BASELINE` 与冻结 `O(2^n)` 报告同时在 |
+| 广义交错折半（M14） | `mix(2,18)` 链 `18 → 9 → 7 → 3 → 2 → 1`（5 步中 3 步折半，其余差值 ≤2）→ `O(log n) Logarithmic Recursion`、栈深 7、标签 `INTERLEAVED_DESCENT`，Apply 隐藏并报 `custom return composition` |
+| Draft 瞬时冻结（M14） | fib Stage 0/1/2 后编辑 Stage 2，点 Stage 0 → Draft 3 冻结；MutationObserver 实测点击到胶囊 DOM 提交 **22.6ms**（<30ms），Stage 0 恢复 31 帧、脏标记消失 |
+| 内核自检（M14） | Spec 第 3 页签 `Live Kernel Self-Check (20 Invariants)` 在 770×553 实测 **6/6 PASS**：TDZ 13.5ms / Fuse 0.9ms / Recursion 0.6ms / Halving 0.6ms / Matrix 0.0ms / Viewport 0.9ms（`header 770px / 770px · viewport 770x553`） |
+| 回归（M14） | Fast Power 13 → 22 帧、终端 `65536`；Rain 40 帧 Two-Pointer；bsearchHalve 7 → 20 帧、`steps = 5`；顶栏 44px 且 `scrollWidth == clientWidth == 770`；控制台无 error/warn |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -315,8 +350,14 @@
 - [x] 快照与手改代码不同步：切走再切回会恢复快照源码、丢弃编辑（M12 报备 → **M13 闭合**：脏编辑显示 `UNSAVED EDIT DRAFT`，`Compile & Trace` 归零历史，切阶段先把手改代码真实跑成 `Draft` 阶段，实测 `Draft 2 (22f)` 可无损切回）
 - [x] 2 参计数型（带 tag 参数）被保守拒绝合成，缺少「未使用参数可忽略」判定（M12 报备 → **M13 闭合**：非折半槽位原样透传即允许合成，实测 `bsearchHalve("arr", 32)` Apply 后 `steps = 5`；非透传 `tag + 1` 则明确报 `coupled multi-parameter state`）
 - [x] 奇偶交替快速幂（`exp - 1` 分支）只按纯折半识别，奇数指数步数未验证（M12 报备 → **M13 闭合**：检测允许 `floor(a/2)` 与奇数 `a-1` 交替、折半步 ≥50%，实测 `powerAlt(2, 15)` 链 `15→14→7→6→3→2→1`，Apply 后 `32768`）
-- [ ] 惰性阈值只看帧数（>250），不按变量快照的实际字节数计；少量超大数组快照仍可能占用较多内存（M13 新遗留）
-- [ ] 重水化会真实重跑源码：含 `Math.random` / `Date.now()` 等非确定性代码时，帧内容可能与冻结时的 `metrics` 略有漂移（确定性演示不受影响，M13 新遗留）
+- [x] 惰性阈值只看帧数（>250），不按变量快照的实际字节数计（M13 报备 → **M14 闭合**：`approxBytes` O(1) 抽样 + `LAZY_BYTE_BUDGET = 180_000`，实测 135 帧 / ~4382KB 的 `fib(8)+大数组` 被驱逐）
+- [x] 重水化会真实重跑源码：含 `Math.random` / `Date.now()` 时帧内容可能与冻结指标漂移（M13 报备 → **M14 闭合**：≤600 帧非确定性全量保留；超限重水化显示 `NON-DETERMINISTIC RE-HYDRATION` 并只更新 frameCount，冻结报告不变）
+- [x] 交替折半只识别 `floor(a/2)` 与奇数 `-1`，其它小步变体断链（M13 报备 → **M14 闭合**：严格递减且每步 `a[k]-a[k+1] <= 2` 均计入，实测 `18→9→7→3→2→1` 命中并标 `INTERLEAVED_DESCENT`；递增/大步跳跃仍拒绝）
+- [x] Draft 冻结需一次沙箱 + 380ms 人工诊断延迟（M13 报备 → **M14 闭合**：`runAIDiagnostics` 新增 `skipDelay`，脏编辑切阶段实测 DOM 提交 22.6ms）
+- [ ] 字节预算是抽样估算（中段/末帧变量的 1.15 倍外推），不是真实堆占用；极端异构帧可能高估或低估（M14 新遗留）
+- [ ] 非确定性检测是源码正则，无法识别 `crypto.getRandomValues` 或经 helper 间接调用的时间源（M14 新遗留）
+- [ ] 重水化成本随帧数增长：931 帧非确定性快照实测约 1.7s（含渲染与轮询），期间仅显示 `RE-HYDRATING` 提示（M14 新遗留）
+- [ ] Live Kernel Self-Check 使用合成帧夹具，覆盖内核判据但不替代全预设浏览器回归（M14 新遗留）
 
 ## 全仓 emoji 扫描基线（可复现）
 

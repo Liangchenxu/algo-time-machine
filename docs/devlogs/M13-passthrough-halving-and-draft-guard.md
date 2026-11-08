@@ -1,6 +1,6 @@
 # M13 · 透传多参折半合成、奇偶交替快速幂、大轨迹惰性快照与编辑防丢守卫
 
-Commit：本次提交（`git log -1`）— feat(resilience): 完成 Milestone 13 透传多参折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢守卫
+Commit：`b129f95` — feat(resilience): 完成 Milestone 13 透传多参折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢守卫
 
 ## Why · 背景动机
 
