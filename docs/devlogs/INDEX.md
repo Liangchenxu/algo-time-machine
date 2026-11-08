@@ -23,7 +23,8 @@
 | M13 | `b129f95` | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
 | M14 | `a34b16c` | [M14-byte-budget-and-kernel-selftest.md](./M14-byte-budget-and-kernel-selftest.md) | 双维度惰性预算、非确定性重水化漂移守卫、广义小步交错折半与 6 项内核实时自检台 |
 | M15 | `588709b` | [M15-automated-judge-tour-and-whitepaper.md](./M15-automated-judge-tour-and-whitepaper.md) | 评委五幕自动路演导览（可中断真实内核驱动）、WebCrypto 非确定性守卫与工程白皮书 |
-| M16 | 本次提交 | [M16-telemetry-curve-and-resumable-tour.md](./M16-telemetry-curve-and-resumable-tour.md) | 跨阶段 SVG 栈深包络遥测图（depthCurve 随快照持久化）、导览零延迟同步与六幕断点续播 |
+| M16 | `db5004a` | [M16-telemetry-curve-and-resumable-tour.md](./M16-telemetry-curve-and-resumable-tour.md) | 跨阶段 SVG 栈深包络遥测图（depthCurve 随快照持久化）、导览零延迟同步与六幕断点续播 |
+| M17 | 本次提交 | [M17-dual-axis-envelope-and-act-skip.md](./M17-dual-axis-envelope-and-act-skip.md) | 包络图双轴（绝对帧刻度 ⇄ 归一化 / 线性 ⇄ sqrt）、128 点保峰抽样、一键整幕跳过、七幕全预设与 URL 现场分享 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -214,39 +215,74 @@
     （c）**顶栏预算不得松动**：新增 `Tour` 按钮后 770 宽度仍要求 `header 44px` 且
     `scrollWidth == clientWidth == 770`；运行态文案 `Stop Tour (Act X/5)` 允许**只**隐藏装饰性
     `AST-IR v2.4 · WORKER SANDBOX` 徽章来腾出宽度，可压缩区仍只允许预设切换器（#12a / #12b 不变）。
-    （d）**不变量条数必须单一来源**：自检页签与导览第五幕标题的条数取自 `KERNEL_INVARIANT_COUNT`，
-    必须等于本文件不变量登记条数（当前 21）；写死数字随里程碑过期视为文档缺陷。
+    （d）**不变量条数必须单一来源**：自检页签与导览末幕标题的条数取自 `KERNEL_INVARIANT_COUNT`，
+    必须等于本文件不变量登记条数（M15 记 21、M16 记 22、M17 记 23）；写死数字随里程碑过期视为文档缺陷。
     （e）**非确定性源清单只增不减**：`hasNonDeterministicCalls` 现覆盖 `Math.random(` / `Date.now(` /
     `performance.now(` / `new Date` / `crypto.getRandomValues(` / `crypto.randomUUID(`；
     新增宿主随机/时间源必须同步扩充正则、#20b 契约与本表。豁免驱逐（≤600 帧）与漂移芯片语义对全部来源一致生效。
 22. **轻量 depthCurve 随快照持久化与导览可续播契约**（M16 确立）：
-    （a）**曲线必须独立于 frames 存活**：`StageSnapshot.depthCurve = frames.map(f => f.callStack.length)`
-    在 `snapshotOf` 时构建、重水化后刷新；`evictBackgroundFrames` 只清 `frames`，不得连带清空曲线。
-    跨阶段包络图因此能在 `LAZY` 态依旧画出完整轨迹（实测 354 帧阶段仍为 354 个点）。
+    （a）**曲线必须独立于 frames 存活**：`StageSnapshot.depthCurve` 由帧的 `callStack.length` 序列构建
+    （M17 起为 128 点保峰分桶，见 #23b），在 `snapshotOf` 时构建、重水化后刷新；
+    `evictBackgroundFrames` 只清 `frames`，不得连带清空曲线。
+    跨阶段包络图因此能在 `LAZY` 态依旧画出完整轨迹（M16 实测 354 帧阶段绘 354 个点；
+    M17 抽样后同一量级的 467 帧阶段绘 128 个点且峰值仍等于冻结的 Stack Depth）。
     曲线的数据源只能是帧本身，禁止用 `metrics.maxStackDepth` 之类标量「补画」成假曲线。
     （b）**包络图渲染与交互契约**：一个 SVG 坐标系内叠加各阶段折线 + 半透明面积包络，
     Stage 0 玫红 `#f43f5e` 虚线、Stage 1 天蓝 `#38bdf8`、Stage 2 翠绿 `#10b981`（激活阶段加粗 2px），
-    高度 56–68px 紧凑嵌入；横轴按各阶段进度归一化，激活阶段当前帧必须是圆点 + 竖向游标，
-    点击横轴需按 `clientX` 比例 `setCurrentFrameIdx` 并先停播；容器宽度必须先同步读 `clientWidth`，
-    `ResizeObserver` / `resize` 只作兜底——被遮挡的测试环境里 RO 回调可能根本不投递。
+    高度 56–68px 紧凑嵌入；横轴模式与纵轴模式自 M17 起可切换（见 #23a，M16 只有归一化一种），
+    激活阶段当前帧必须是圆点 + 竖向游标，点击横轴需按 `clientX` 比例 `setCurrentFrameIdx` 并先停播；
+    容器宽度必须先同步读 `clientWidth`，`ResizeObserver` / `resize` 只作兜底——被遮挡的测试环境里 RO 回调可能根本不投递。
     （c）**导览零延迟**：`tourRunningRef` 为真时 `executeCode` 必须以 `skipDelay=true` 调用诊断，
     幕间不得再叠加 380ms 人工延迟；由于 `setFrames` 与 `setAiReport` 分属两次提交，
     可承诺的是「判据只等诊断本身」（实测 12~56ms 齐备），不得把该机制写成字面意义的同一渲染周期。
     （d）**导览可续播**：中断（`Stop Tour` 或字幕条外任意 `pointerdown`）必须记录 `pausedTourAct`，
-    字幕条收敛为 `ACT k/6 · PAUSED` 并提供 `Resume Act k/6` / `Restart` / `Dismiss ×`；
+    字幕条收敛为 `ACT k/N · PAUSED` 并提供 `Resume Act k/N` / `Restart` / `Dismiss ×`；
     Resume 从第 k 幕**整幕**重跑（不伪造半幕中间态），Dismiss 彻底清除；
     中断监听对非 Element 目标（如直接派发到 `window` 的事件）也必须生效，
     因此豁免判定用 `target?.closest?.('[data-tour-bar]')`，不得让一次异常吃掉「幕外一律暂停」承诺；
-    幕内多段驻留意味着 `Skip Next →` 只结束当前驻留而非跳到下一幕，文案与文档都不得夸大为一键跳幕。
-    （e）**六幕全覆盖与文案单一来源**：`TOUR_ACTS` 为六幕且必须与 `TOUR_ACTS.length` 驱动的文案同源，
-    顶栏 `Stop Tour (Act k/N)` / `Resume Tour (Act k/N)` 不得写死 `/5`；
+    Skip 按钮自 M17 起是**幕级**取消（`Skip Act →`，见 #23c）；M16 的 `Skip Next →` 只结束当前驻留，
+    该限制当时属实，不得在历史文档里追溯夸大成一键跳幕。
+    （e）**幕数与文案单一来源**：`TOUR_ACTS` 的条数必须由 `TOUR_ACTS.length` 驱动全部文案
+    （M16 为六幕，M17 起为七幕且覆盖全部预设，见 #23d），
+    顶栏 `Stop Tour (Act k/N)` / `Resume Tour (Act k/N)` 不得写死数字；
     导览期间允许隐藏装饰性 `AST-IR v2.4` 徽章腾出宽度，但任何状态下顶栏仍需 `44px` 且
     `scrollWidth == clientWidth == 770`（#12/#21c 的延续）。
 
-## 当前实测基线（M16 复测，视口 770×553，`npm run build` 零 TS 报错）
+23. **包络图双轴几何、128 点保峰抽样与单次点击跳幕契约**（M17 确立）：
+    （a）**双轴模式只能是显示口径，不得改写数据**：`telemetryXMode` 取 `'normalized' | 'absolute'`（默认 absolute），
+    `telemetryYMode` 取 `'linear' | 'sqrt'`（默认 linear）。absolute 模式下阶段宽度比例恒为
+    `frameCount / maxStageFrames`（25 帧阶段在 467 帧基准下只占 5% 宽）；normalized 模式每阶段铺满 0–100%，
+    用于比较波形而不是比较长度。纵轴 sqrt 口径为 `sqrt((d-1)/(max-1))`，只压缩绘制高度，
+    **不得改动 `depthCurve` / `peak` / `maxStackDepth` 任何数值**。
+    点击横轴必须按当前模式逆映射（absolute 先除掉本阶段占比）再换算真实帧号，
+    并 clamp 到「激活阶段的合法帧区间 ∩ 当前轨迹」——越界点击不得跳到别的阶段或越界帧号。
+    轴标签随模式切换（右端 `100%` ⇄ `${maxStageFrames}f`），图例必须显示该阶段的 `x% span`。
+    （b）**抽样保峰是硬约束**：`MAX_CURVE_SAMPLES = 128`；`trace.length <= 128` 时逐帧 1:1；
+    超过时取「首帧 + 126 个中间桶的桶内最大栈深 + 末帧」，分桶必须无缝覆盖 `1..n-2`。
+    由此 `Math.max(...depthCurve)` 必须恒等于同阶段 `metrics.maxStackDepth`（实测 467 帧阶段
+    绘 128 个点、峰值 13 与冻结报告的 `Stack Depth 13` 一致），且快照仍只存整数数组、不存帧对象。
+    曲线索引与帧号是两套坐标系，必须经 `curveIndexOf(curve, frameIdx)` 显式换算；
+    任何把曲线索引直接当帧号用的写法（游标、点击、多边形收口）都算回归。
+    （c）**Skip 是幕级取消，不是驻留级**：`tourActSkipRef` 记下被跳过的幕号，`skipTourAct` 同时释放当前驻留；
+    `tourHold` / `tourWaitFor` / 幕内每一步都必须把「本幕已被跳过」当作与令牌失效同级的让位条件，
+    因此**无论本幕含几段 Apply 或几段驻留，一次点击必须进入下一幕**（实测 ACT 2 内 1 次点击 → ACT 3）。
+    每一幕开始前必须复位该标识，`pauseJudgeTour` / `dismissJudgeTour` 也必须复位，
+    否则残留的幕号会让下一幕一进场就自我让位。跳过最后一幕即进入完成态；Skip 永不退出导览。
+    （d）**七幕必须覆盖全部内置预设**：七个预设（`infinite-loop` / `fib-tree` / `pascal-comb` /
+    `dp-matrix` / `fast-power` / `rainwater` / `binary-search`）都要在导览里被真实驱动至少一次，
+    自检固定在末幕；`note` 需点名本幕负责的预设，验收以「导览过程中出现过的激活预设集合」为证据，
+    不接受「文案里提到」；新增预设必须同步加幕，否则 #21a 的真实编排承诺退化为部分覆盖。
+    （e）**URL Permalink 是只读现场快照**：哈希字段固定为 `preset=<id>&frame=<frameIndex(0 基)>&watch=<a|b>`
+    （`|` 分隔、最多 4 条，与 Watch 上限一致），写入用 `history.replaceState`（直接赋 `location.hash` 会触发锚点滚动，
+    把当前视图顶走）；首屏解析到合法 `preset` 才改初始状态，非法即整体忽略回默认预设，
+    帧号必须等轨迹真的就绪后再定位（`pendingShareFrameRef`），不得先写游标再被空帧覆盖。
+    剪贴板被拒必须显示 `Link in URL` 而不是谎报 `Copied!`；分享回来的 Watch 表达式仍然只经
+    `evalWatchExpression` 的三道闸门求值（#13d / #14d 不因 URL 输入而放宽），越界照旧 ERROR。
 
-> M16 轮在 770×553 同源 iframe 测试台复测了跨阶段栈深包络图（含 LAZY 态）、导览零延迟与六幕断点续播，
-> 并重跑 fib / comb / dp-matrix / fast-power 的多阶段链路；
+## 当前实测基线（M17 复测，视口 770×553，`npm run build` 零 TS 报错）
+
+> M17 轮在 770×553 同源 iframe 测试台复测了包络图双轴口径、128 点保峰抽样、一键整幕跳过、
+> 七幕全预设与 URL 现场分享，并把 7 个内置预设的主路径全部重跑一遍（帧数与判据见下表）；
 > 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`、`crypto.*` 变体）沿用 M12–M15 实测值。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
@@ -351,6 +387,19 @@
 | 提交前复跑·包络图（M16） | 同一 iframe 复跑 fib 三级火箭：`svg 388×64`、三条 polyline 31 / 41 / 11 点、`#f43f5e` 虚线 dash `4 3`、激活阶段 `stroke-width 2`、包络透明度 `0.07 / 0.07 / 0.18`、游标 `cx 34`；点击轴 0/25/50/100% → `FRAME 1 / 3 / 6 / 11`（共 11 帧） |
 | 提交前复跑·LAZY 曲线（M16） | 手写 `fib(11)`：`Stage 0 (289f · LAZY)` / `Stage 1 (69f)` / `Stage 2 (23f)`，包络图 polyline 仍为 289 / 69 / 23 点，图例 `Stage 0 peak 12 dashed · 289f · LAZY` |
 | 提交前复跑·续播（M16） | `Tour` → `Stop Tour (Act 1/6)`；对 `window` 派发 `pointerdown` 同样暂停为 `Resume Tour (Act 1/6)` + `ACT 1/6 · PAUSED` + `Resume Act 1/6` / `Restart` / `Dismiss ×`；续播至 `TOUR COMPLETE · total 32.5s`、自检页签 `Live Kernel Self-Check (22 Invariants)` 实测 `6/6 PASS`（FAIL 0）；三种导览状态下 `header 44px` 且 `scrollWidth == clientWidth == 770` |
+| 横轴绝对刻度（M17） | fib 三级火箭默认 `X: Abs Frames`：Stage 0 `x 34 → 292.6`（31f / 76% span）、Stage 1 `x 34 → 376`（41f / 100%）、Stage 2 `x 34 → 125.8`（11f / 27%），轴右端标 `41f`，`svg 388×64` 不变 |
+| 横轴归一化（M17） | 点 `X: Norm % ⇄` 后三条 polyline 末端全部 `x1 376`、轴右端标 `100%`；此时点击 0 / 25 / 50 / 100% → `FRAME 1 / 3 / 6 / 11`，与 M16 基线逐项一致（口径切换不改数据） |
+| 绝对刻度点击逆映射（M17） | 切回 Abs 后点击 0 → `FRAME 1 / 11`（cx 34.0）、13.4% → `FRAME 6 / 11`（79.9）、26.8% → `FRAME 11 / 11`（125.8）、50% 与 100% → 仍 `FRAME 11 / 11`（超出本阶段 27% 占比即 clamp，不越阶段跳帧） |
+| 纵轴 sqrt 压缩（M17） | `Y: Linear ⇄` 切换后 Stage 2（峰值 2）折线顶点从 `y 38.8` 抬到 `y 29.9`，峰值 6 / 6 的 Stage 0/1 仍钉在 `y 10`；`depthCurve`、图例 peak 与报告 `Stack Depth` 数值一字不改 |
+| 128 点保峰抽样（M17） | 手写 `fib(12)` 三级：Stage 0 `467f · LAZY` 绘 **128 点**、峰值 13 与冻结报告 `Stack Depth 13` 相等；Stage 1 75f / Stage 2 25f 未过阈值仍 1:1 绘 75 / 25 点，占宽 `16% / 5%`，轴右端 `467f` |
+| 一键整幕跳过（M17） | ACT 2（含 3 段驻留）内**只点 1 次** `Skip Act →`：驻留期点击 52ms 后即 `ACT 3/7`；条件等待期点击（此时已冻结 2 个 Stage）也在下一个轮询周期进 `ACT 3/7`，导览不退出、继续跑到 `TOUR COMPLETE` |
+| 抽样不变式模糊核对（M17） | 对 `n = 129..2000` 共 1872 个长度随机栈深并在随机位置插入 `999` 尖峰：曲线长度恒 128、`max(curve) - realPeak` 恒为 0、首末帧数值原样保留，`failures = 0`（#23b 的保峰约束按算法核一遍，不只靠两个样本） |
+| 帧号 ⇄ 曲线索引换算（M17） | absolute 口径点击 64.37% → `FRAME 300 / 467`，游标 `cx 252.1` 与换算值 `curveIndexOf(299) = 81`、`34 + 81/127 × 342 = 252.1` 完全一致，圆点仍坐在抽样折线上；`cy 13.0` 反解为该桶最大栈深 12（不等于该帧真实栈深，已列遗留） |
+| 七幕全预设（M17） | MutationObserver 记录整轮激活预设集合 = 7/7：`infinite-loop` → `fib-tree` → `pascal-comb`×2 → `dp-matrix` → `fast-power` → `rainwater` → `binary-search` → 自检；幕次时间线 `20 / 5048 / 12644 / 17634 / 20663 / 28677 / 32648ms`，整轮 `total 36.6s`（限频环境） |
+| URL 现场分享（M17） | comb 预设 + 第 6 帧 + 芯片 `dp[4][2] === 6` 点 `Share` → `#preset=pascal-comb&frame=5&watch=dp%5B4%5D%5B2%5D%20%3D%3D%3D%206`；无手势环境下剪贴板被拒，按钮诚实降级为 `Link in URL`；带该哈希重载 → 预设自动选中、`FRAME 6 / 13`、断言回显（Stage 0 无 dp 故 `ERROR`，符合 #16e） |
+| 非法哈希兜底（M17） | `#preset=not-a-preset&frame=-7&watch=` 重载后回落默认 `Trapping Rain Water`（`FRAME 1 / 40`）、断言列表为空、控制台无 error/warn |
+| 窄视口零溢出（M17） | 新增两枚轴模式芯片与 `Share` 按钮后实测：`header 44px / 770 == 770`、`footer 52px / 770 == 770`、左右 `h-9` 子标题栏 `321 == 321` 与 `448 == 448`、包络面板 `412 == 412`、滚动容器 `438 == 438`、`body 770 == 770` |
+| 定时器限频证据（M17） | 顶层页 `document.hidden === true`、`setTimeout(40ms)` 连续间隔实测 `790 / 1000 / 1000 / 1001 / 1000 / 1001ms`，因此本轮导览时长仍是限频口径，可见浏览器整轮时长继续标注为未测 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -426,10 +475,15 @@
 - [x] 五幕导览只深度演示 infinite-loop / fib-tree / pascal-comb 三个预设（M15 报备 → **M16 部分闭合**：新增 ACT 5 覆盖 `dp-matrix` 2D→1D 滚动压缩与 `fast-power` 槽位折半消栈（终端 `65536`），导览升为六幕；Rain 双指针与 Binary 区间折半仍未纳入自动导览）
 - [x] 幕间切换后判据芯片最多滞后约 380ms（M15 报备 → **M16 闭合**：导览期间 `executeCode` 以 `skipDelay=true` 调用诊断，实测幕标签到轨迹+判据齐备仅 12~56ms；导览外手动切预设仍保留 380ms「思考感」，属有意的产品差异）
 - [x] 导览被中断后不自动续演，需要重新点击 Tour 从 ACT 1 开始（M15 报备 → **M16 闭合**：`tourPhase` + `pausedTourAct` 记录中断幕，字幕条收敛为 `ACT k/6 · PAUSED` 并提供 `Resume Act k/6` / `Restart` / `Dismiss ×`，实测 ACT 3 暂停后续播到 `TOUR COMPLETE`）
-- [ ] `Skip Next →` 只结束当前驻留而非跳到下一幕，ACT 2 这类多驻留幕需要连点多次；若要「一键跳幕」还需引入幕级取消（M16 新遗留）
-- [ ] 包络图横轴按各阶段进度归一化，因此不同帧数的阶段在同一 x 位置代表不同的绝对步数；绝对刻度模式仍待补（M16 新遗留）
-- [ ] `depthCurve` 每帧一个整数：1334 帧阶段曲线约 1334 个数字，远小于帧对象图，但尚未做分段抽样（M16 新遗留）
-- [ ] 导览时长在定时器被限频的隐藏式视口里会被拉长（实测 28.3s / 20.1s），可见浏览器下的整轮时长未实测（M16 新遗留）
+- [x] `Skip Next →` 只结束当前驻留而非跳到下一幕，ACT 2 这类多驻留幕需要连点多次（M16 报备 → **M17 闭合**：幕级取消 `tourActSkipRef` + 按钮改名 `Skip Act →`，`tourHold` / `tourWaitFor` / 幕内每一步都把「本幕已跳过」当让位条件；实测 ACT 2 内 1 次点击 → ACT 3，无需连点 3 次）
+- [x] 包络图横轴只有归一化口径，不同帧数的阶段在同一 x 位置代表不同绝对步数（M16 报备 → **M17 闭合**：`telemetryXMode` 双模式，默认 `absolute` 按 `frameCount / maxStageFrames` 占宽；实测 467f / 75f / 25f 三阶段占宽 `100% / 16% / 5%`，切回 `Norm %` 后三条曲线仍铺满 376px）
+- [x] `depthCurve` 每帧一个整数，长轨迹未做分段抽样（M16 报备 → **M17 闭合**：`MAX_CURVE_SAMPLES = 128` 保峰分桶，实测 467 帧阶段绘 128 点且峰值 13 与冻结报告 `Stack Depth 13` 相等）
+- [x] 纵轴取全局峰值，深递归与迭代同图时低峰值阶段被压扁（M16 报备 → **M17 闭合**：`telemetryYMode` 增加 `sqrt` 口径，实测 Stage 2 峰值 2 的折线顶点从 `y 38.8` 抬到 `y 29.9`，峰值 13 的两条曲线仍钉在 `y 10`）
+- [x] 导览只覆盖 5 个预设，Rain 双指针与 Binary 区间折半未纳入（M15/M16 报备 → **M17 闭合**：七幕 `TOUR_ACTS.length = 7`，激活预设集合实测 7/7 全覆盖，自检固定在末幕）
+- [ ] 导览时长仍测不到「可见浏览器」口径：本轮所有测试页面 `document.hidden === true`，`setTimeout(40ms)` 实测间隔 `790 / 1000 / 1000 / 1001 / 1000 / 1001ms`，整轮只能给限频环境值（M16 遗留延续，M17 补充了限频证据）
+- [ ] URL 分享只承载 `preset / frame / watch`，不含 `stageHistory`、断点集合与 API Key：打开链接后多阶段链路需重新逐次 Apply（M17 新遗留）
+- [ ] 剪贴板成功分支未实测：自动化环境无用户手势，`navigator.clipboard.writeText` 被拒，界面按 `Link in URL` 诚实降级；`Copied!` 分支需在真实点击下复测（M17 新遗留）
+- [ ] 抽样后游标圆点画在「所在桶的最大栈深」上，可能高于该帧真实栈深（128 点之外的下降沿被抹平）；如需逐帧精确需另存帧级曲线（M17 新遗留）
 
 ## 全仓 emoji 扫描基线（可复现）
 

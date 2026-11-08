@@ -24,6 +24,8 @@ import {
   Sigma,
   Square,
   Activity,
+  Share2,
+  Check,
   X,
 } from 'lucide-react';
 import { runInSandbox } from './core/sandboxRunner';
@@ -104,8 +106,29 @@ const estimateSnapshotBytes = (trace: TraceFrame[]): number => {
   return Math.round(sample * trace.length * 1.15);
 };
 
-/** 快照栈深曲线：每帧一个整数（callStack.length），体积远小于帧对象图，惰性驱逐后仍可用 */
-const buildDepthCurve = (trace: TraceFrame[]): number[] => trace.map((f) => f.callStack.length);
+/** 栈深曲线的抽样上限：再长的轨迹也只占用这么多整数 */
+const MAX_CURVE_SAMPLES = 128;
+
+/**
+ * 快照栈深曲线：<=128 帧逐帧 1:1；更长轨迹取「首帧 + 126 个中间桶 + 末帧」，每桶取桶内最大栈深。
+ * 桶内取 max 且分桶无缝覆盖 1..n-2，因此 Math.max(...curve) 恒等于 metrics.maxStackDepth——抽样不吞峰。
+ */
+const buildDepthCurve = (trace: TraceFrame[]): number[] => {
+  const n = trace.length;
+  if (n <= MAX_CURVE_SAMPLES) return trace.map((f) => f.callStack.length);
+  const buckets = MAX_CURVE_SAMPLES - 2;
+  const span = (n - 2) / buckets;
+  const depths: number[] = [trace[0].callStack.length];
+  for (let b = 0; b < buckets; b++) {
+    const from = 1 + Math.floor(b * span);
+    const to = 1 + Math.ceil((b + 1) * span);
+    let peak = 0;
+    for (let i = from; i < to; i++) peak = Math.max(peak, trace[i].callStack.length);
+    depths.push(peak);
+  }
+  depths.push(trace[n - 1].callStack.length);
+  return depths;
+};
 
 /** 跨阶段曲线的稳定配色：Stage 0 玫红虚线、Stage 1 天蓝、Stage 2 翠绿，后续阶段循环取色 */
 const STAGE_CURVE_COLORS = ['#f43f5e', '#38bdf8', '#10b981', '#a78bfa', '#f59e0b', '#e879f9'];
@@ -136,29 +159,33 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 22;
+const KERNEL_INVARIANT_COUNT = 23;
 
-/** 评委导览的六幕脚本：每一幕都驱动真实内核，不做假动画 */
+/** 评委导览的七幕脚本：每一幕都驱动真实内核，不做假动画，note 里点名本幕负责的预设 */
 const TOUR_ACTS: { title: string; note: string }[] = [
   {
     title: 'Three-Tier Safety Fuse & Crash Recovery',
-    note: '2000-step guard + globalThis.__mtmFrames preserves the pre-crash trace',
+    note: 'infinite-loop: 2000-step guard + globalThis.__mtmFrames preserves the pre-crash trace',
   },
   {
     title: 'Three-Stage Recursion Lowering',
-    note: 'DUP subtree -> HIT memo pruning -> 1D dp tabulation, Stage 0/1/2 capsules',
+    note: 'fib-tree: DUP subtree -> HIT memo pruning -> 1D dp tabulation, Stage 0/1/2 capsules',
   },
   {
     title: 'Cross-Dimensional Lowering',
-    note: 'recursion tree -> 2D Matrix dp crosshair with runtime WRITES badge',
+    note: 'pascal-comb: recursion tree -> 2D Matrix dp crosshair with runtime WRITES badge',
   },
   {
     title: 'Runtime Watchpoint and ->T Four-State Seek',
-    note: 'adopt adaptive dp[][] chip, then jump to the real write frame',
+    note: 'pascal-comb: adopt adaptive dp[][] chip, then jump to the real write frame',
   },
   {
     title: '2D Rolling Buffer & Positional Halving',
-    note: 'min-path 2D -> 1D rolling compression, then slot-1 fast power lowering to 65536',
+    note: 'dp-matrix 2D -> 1D rolling compression, then fast-power slot-1 halving down to 65536',
+  },
+  {
+    title: 'Two-Pointer Water & Interval Halving',
+    note: 'rainwater O(n) Two-Pointer water columns, binary-search low / mid / high convergence',
   },
   {
     title: `Live Kernel Self-Check (${KERNEL_INVARIANT_COUNT} Invariants)`,
@@ -321,6 +348,29 @@ while (count < 10) {
 console.log("Unreachable:", anomalySum);`,
   },
 ];
+
+/** `#preset=<id>&frame=<frameIndex>&watch=<expr|expr>` 还原出的可复现现场 */
+interface ShareState {
+  preset: PresetItem;
+  frame: number | null;
+  watch: string[];
+}
+
+/**
+ * 解析分享哈希。预设名不合法就整体忽略（回到默认预设），
+ * watch 表达式只写进断言列表，求值仍然只走 evalWatchExpression 的三道闸门。
+ */
+const parseShareHash = (raw: string): ShareState | null => {
+  const params = new URLSearchParams(raw.replace(/^#/, ''));
+  const preset = PRESETS.find((p) => p.id === params.get('preset'));
+  if (!preset) return null;
+  const frame = Number.parseInt(params.get('frame') ?? '', 10);
+  return {
+    preset,
+    frame: Number.isFinite(frame) && frame >= 0 ? frame : null,
+    watch: (params.get('watch') ?? '').split('|').filter(Boolean).slice(0, 4),
+  };
+};
 
 const POINTER_NAMES = new Set([
   'i',
@@ -1069,7 +1119,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M16',
-    commit: '本次提交',
+    commit: 'db5004a',
     doc: 'docs/devlogs/M16-telemetry-curve-and-resumable-tour.md',
     title: '跨阶段 SVG 栈深包络遥测图、导览零延迟同步与六幕断点续播',
     why: 'M15 之后还剩三处不体面：幕间切换时判据芯片比轨迹慢约 380ms，肉眼能看到「新轨迹 + 旧结论」的空档；导览被中断只能从 ACT 1 重跑，评委想接手再回去就得重来；多阶段对比只有帧数与横幅数字，看不到三条轨迹在栈深维度上的形状差异，而后台 LAZY 驱逐后帧数组已不在内存，绘图似乎也没了数据源。',
@@ -1100,11 +1150,51 @@ const DEVLOGS: DevlogEntry[] = [
       '回归：DP 29 → 15 帧 O(M*N) Optimal Scan、Fast Power 13 → 22 帧 65536、Rain 40 帧 Two-Pointer、Binary 10 帧 O(log n)；npm run build 零报错、src emoji 0 命中、17 篇文档表格列数一致、22 条不变量、控制台无 error/warn。',
     ],
   },
+  {
+    tag: 'M17',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M17-dual-axis-envelope-and-act-skip.md',
+    title: '包络图双轴切换、128 点保峰抽样、一键整幕跳过与全预设导览',
+    why: 'M16 的六条遗留里有四条卡在同一个根因上：包络图只有一种显示口径——横轴归一化让 11 帧与 41 帧看起来一样长，纵轴线性让 150 层深递归把 1 层迭代压成直线；depthCurve 逐帧存整数，1334 帧就是 1334 个数字；Skip Next 只结束当前驻留，ACT 2 里要点 3 次才走得掉；Rain 与 Binary 两个预设至今不在导览里。另外评委看完想要的「把这个现场发我」还没有入口。',
+    what: [
+      'App.tsx：buildDepthCurve 改为保峰分桶，常量 MAX_CURVE_SAMPLES = 128——≤128 帧逐帧 1:1，超过则取首帧 + 126 个中间桶的桶内最大栈深 + 末帧，分桶无缝覆盖 1..n-2，因此 max(depthCurve) 恒等于该阶段 metrics.maxStackDepth。',
+      'App.tsx：包络图新增 telemetryXMode（absolute 默认 / normalized）与 telemetryYMode（linear / sqrt）两枚切换芯片。absolute 按 frameCount / maxStageFrames 占宽，轴右端标真实帧数；normalized 铺满 0-100% 只比波形。sqrt 口径为 sqrt((d-1)/(max-1))，只改绘制高度不改任何数值。',
+      'App.tsx：曲线索引与帧号拆成两套坐标系，curveIndexOf(curve, frameIdx) 负责换算，游标 cy、多边形收口、点击跳帧全部走它；点击按当前横轴模式先除掉本阶段占比再换算帧号，并 clamp 到激活阶段合法帧区间。',
+      'App.tsx：Skip 升级为幕级取消——tourActSkipRef 记下被跳过的幕号，tourHold / tourWaitFor / 幕内每一步都把它当让位条件，每一幕开始前与 pause / dismiss 都复位标识；按钮改名 Skip Act →，title 明确「一次点击放弃本幕剩下的全部动作」。',
+      'App.tsx：TOUR_ACTS 扩为七幕，新 ACT 6 驱动 rainwater 双指针与 binary-search 区间折半，自检后移到 ACT 7，七个内置预设 100% 进导览；note 点名本幕负责的预设，幕数与 Stop / Resume / TOUR COMPLETE 文案继续由 TOUR_ACTS.length 驱动。',
+      'App.tsx：WATCH 行新增 Share——preset / frame(0 基) / watch 写进 location.hash（history.replaceState，避免锚点滚动顶走视图）并复制链接，剪贴板被拒时显示 Link in URL 而非谎报 Copied!；首屏 parseShareHash 命中合法预设才改初始状态，帧号等轨迹就绪后再定位。',
+      'KERNEL_INVARIANT_COUNT 升至 23；INDEX 追加 #23 并回填 M16 的 db5004a；README 白皮书改写第 4 节为七幕指南并补双轴 / 抽样 / 分享基线。',
+    ],
+    conflicts: [
+      '抽样一旦做了，曲线索引就不再是帧号。首版游标把 currentFrameIdx 直接拿去 depths[] 取值，467 帧阶段一跳到第 300 帧就画到曲线末尾之外；补上 curveIndexOf 换算并把点击映射改成先还原帧号再 clamp，两套坐标系才不再串门。',
+      '保峰的关键是分桶无缝：用 round 划分桶边界会漏掉个别帧，一旦漏掉的正好是峰值帧，max(depthCurve) 就低于报告的 Stack Depth。改成 floor(b*span) 起、ceil((b+1)*span) 止并首尾单列，实测 467 帧阶段绘 128 点、峰值 13 与报告一致。',
+      'M16 文档里「354 帧阶段绘 354 个点」的口径本轮不再成立（同一份代码抽样后绘 128 点）——不是回归，是显示口径变更，因此 #22a 与卡片 16 都改写成「M16 当时如此、M17 起按 #23b 抽样」，不静默覆盖历史证据。',
+      '一键跳幕若只释放当前驻留仍然不够：ACT 2 在两次 Apply 之间是条件等待，等待不会因为 Skip 提前结束。让 tourWaitFor 也把幕级取消当退出条件后，实测驻留期点击 52ms 进 ACT 3；条件等待期点击要等下一个轮询周期——本环境定时器被限频到 ~1s，该延迟属环境而非逻辑。',
+      '幕级取消标识必须在每幕开始前复位，也必须在 pause / dismiss 时复位：否则残留的幕号恰好等于下一幕时，下一幕一进场就自我让位，导览会表现为「几幕瞬跳」。',
+      '分享链接是外部输入，但不得成为新的执行面：URL 里的 watch 表达式只写进断言列表，求值仍只走 evalWatchExpression 的三道闸门，越界照旧 ERROR；非法 preset / 负帧号直接整体忽略，回落默认预设而不是猜一个。',
+      'history.replaceState 而不是给 location.hash 赋值：后者会触发锚点滚动，把评委正在看的视图顶走；剪贴板在无手势的自动化环境被拒，界面按 Link in URL 诚实降级，Copied! 分支本轮未实测。',
+      'absolute 成为默认横轴改变了 M16 的点击基线读数，因此两种口径都重测一遍：Norm % 口径下 0 / 25 / 50 / 100% 仍映射帧 1 / 3 / 6 / 11，与 M16 逐项一致，说明口径切换只改显示不改数据。',
+    ],
+    impact: [
+      '双轴：absolute 口径实测 467f / 75f / 25f 三阶段占宽 100% / 16% / 5%（11 帧阶段在 41 帧基准下 x 末端 125.8 / 占比 27%），切到 Norm % 后三条 polyline 末端全部 376px；sqrt 纵轴把峰值 2 的折线顶点从 y 38.8 抬到 y 29.9，峰值 6 的两条仍钉在 y 10。',
+      '点击逆映射：absolute 下 0 → FRAME 1/11（cx 34.0）、13.4% → FRAME 6/11（79.9）、26.8% → FRAME 11/11（125.8），继续点到 50% 与 100% 仍 clamp 在 FRAME 11/11，不越阶段跳帧。',
+      '保峰抽样：fib(12) 三级 → Stage 0 (467f · LAZY) 绘 128 点、峰值 13 == 报告 Stack Depth 13；Stage 1 75f 与 Stage 2 25f 未过阈值仍 1:1 绘 75 / 25 点；曲线内存由 467 个整数降到 128 个。',
+      '一键跳幕：ACT 2（含 3 段驻留与 2 次 Apply）内只点 1 次 Skip Act → 即进 ACT 3/7——驻留期点击 52ms 到位；条件等待期（已冻结 2 个 Stage）点击在下一个轮询周期到位，导览继续跑到 TOUR COMPLETE 不退出。',
+      '七幕全预设：整轮实测激活预设集合 7/7（infinite-loop → fib-tree → pascal-comb → dp-matrix → fast-power → rainwater → binary-search），幕次时间线 20 / 5048 / 12644 / 17634 / 20663 / 28677 / 32648ms，TOUR COMPLETE · total 36.6s（定时器限频环境，可见浏览器口径仍未测）。',
+      'URL 分享：comb 第 6 帧 + dp[4][2] === 6 → #preset=pascal-comb&frame=5&watch=…；带哈希重载自动选中预设、FRAME 6/13、断言回显（Stage 0 无 dp 故 ERROR，符合 #16e）；非法哈希回落默认 Trapping Rain Water（FRAME 1/40）且断言列表为空。',
+      '全预设回归（770×553）：Rain 40 帧 Two-Pointer、DP 29 帧 O(M*N) Matrix DP、Binary 10 帧 O(log n) Logarithmic Halving、Fast Power 13 帧 O(log n) Logarithmic Recursion、fib 31 帧 O(2^n)、comb 13 帧 O(2^n)、infinite-loop 1334 帧 [FUSE_STEP_LIMIT]；边界 dp[99][0] === 1 → ERROR。',
+      '布局与纪律：新增两枚轴模式芯片与 Share 后实测 header 44px / 770 == 770、footer 52px / 770 == 770、h-9 子标题栏 321 == 321 与 448 == 448、包络面板 412 == 412、body 770 == 770；npm run build 零报错、src emoji 0 命中、18 篇文档表格列数一致、23 条不变量、控制台无 error/warn。',
+    ],
+  },
 ];
 
 export default function App() {
-  const [selectedPresetId, setSelectedPresetId] = useState<string>('rainwater');
-  const [sourceCode, setSourceCode] = useState<string>(PRESETS[0].code);
+  // 首屏分享现场：#preset=…&frame=…&watch=… 命中时以该预设与该批断言启动，帧号等轨迹就绪后再补
+  const [shareBoot] = useState<ShareState | null>(() => parseShareHash(window.location.hash));
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(
+    () => shareBoot?.preset.id ?? 'rainwater'
+  );
+  const [sourceCode, setSourceCode] = useState<string>(() => shareBoot?.preset.code ?? PRESETS[0].code);
   const [codeTab, setCodeTab] = useState<'source' | 'ast'>('source');
   const [editMode, setEditMode] = useState<boolean>(false);
 
@@ -1125,13 +1215,15 @@ export default function App() {
   const [selfCheckResults, setSelfCheckResults] = useState<KernelSelfCheckResult[] | null>(null);
   const [selfCheckRunning, setSelfCheckRunning] = useState<boolean>(false);
 
-  // 评委六幕自动导览：phase 驱动 UI，pausedTourAct 支持中断后原地续播
+  // 评委七幕自动导览：phase 驱动 UI，pausedTourAct 支持中断后原地续播
   const [tourAct, setTourAct] = useState<number>(0);
   const [tourPhase, setTourPhase] = useState<'idle' | 'running' | 'paused' | 'complete'>('idle');
   const [pausedTourAct, setPausedTourAct] = useState<number | null>(null);
   const [tourElapsedMs, setTourElapsedMs] = useState<number>(0);
   const tourTokenRef = useRef(0);
   const tourSkipRef = useRef<(() => void) | null>(null);
+  // 幕级取消：记录「第 k 幕已被一键跳过」，该幕剩余子步骤与条件等待全部立即让位
+  const tourActSkipRef = useRef<number>(0);
   const tourRunningRef = useRef<boolean>(false);
   const tourActRef = useRef<number>(0);
   const tourRunning = tourPhase === 'running';
@@ -1151,7 +1243,11 @@ export default function App() {
   const [treeView, setTreeView] = useState<'svg' | 'list'>('svg');
   // Watch 守卫栏：置顶变量 + 条件断言（断言只在当前帧的快照数据上求值）
   const [pinnedVars, setPinnedVars] = useState<Set<string>>(new Set<string>());
-  const [watchExprs, setWatchExprs] = useState<string[]>([]);
+  const [watchExprs, setWatchExprs] = useState<string[]>(() => shareBoot?.watch ?? []);
+  // 分享链接里的帧号要等轨迹真的跑出来才能定位，先寄存在 ref 里
+  const pendingShareFrameRef = useRef<number | null>(shareBoot?.frame ?? null);
+  const [shareState, setShareState] = useState<'idle' | 'copied' | 'blocked'>('idle');
+  const shareResetRef = useRef<number>(0);
   const [watchDraft, setWatchDraft] = useState<string>('');
   const [seekState, setSeekState] = useState<{
     expr: string;
@@ -1360,6 +1456,34 @@ export default function App() {
     executeCode(sourceCode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 分享链接的帧号必须等真实轨迹就绪后才定位，否则会把不存在的帧号写进游标
+  useEffect(() => {
+    const pending = pendingShareFrameRef.current;
+    if (pending === null || frames.length === 0) return;
+    pendingShareFrameRef.current = null;
+    setIsPlaying(false);
+    setCurrentFrameIdx(Math.max(0, Math.min(frames.length - 1, pending)));
+  }, [frames.length]);
+
+  /** 一键分享现场：预设 + 帧号 + 断言列表编进 URL 哈希，再把完整链接送进剪贴板 */
+  const handleShareSnapshot = async () => {
+    const parts = [`preset=${selectedPresetId}`, `frame=${currentFrameIdx}`];
+    if (watchExprs.length > 0) parts.push(`watch=${encodeURIComponent(watchExprs.join('|'))}`);
+    const hash = `#${parts.join('&')}`;
+    // replaceState 而不是 location.hash 赋值：后者会触发锚点滚动，把当前视图顶走
+    window.history.replaceState(null, '', hash);
+    const link = `${window.location.origin}${window.location.pathname}${hash}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setShareState('copied');
+    } catch {
+      // 剪贴板被拒也必须可见：地址栏里哈希已经写好，评委仍能手抄
+      setShareState('blocked');
+    }
+    window.clearTimeout(shareResetRef.current);
+    shareResetRef.current = window.setTimeout(() => setShareState('idle'), 1800);
+  };
 
   useEffect(() => {
     if (!isPlaying || frames.length === 0) return;
@@ -1982,6 +2106,10 @@ export default function App() {
     selfCheck: runKernelSelfCheck,
   };
 
+  /** 幕级取消是否已对当前幕生效：Skip Act 之后本幕剩下的动作与等待都必须立即让位 */
+  const tourActHalted = () =>
+    tourActSkipRef.current !== 0 && tourActSkipRef.current === tourActRef.current;
+
   /** 一幕的驻留时间：Skip 或取消都能立即结束，不做假等待 */
   const tourHold = (token: number, ms: number) =>
     new Promise<void>((resolve) => {
@@ -1995,7 +2123,7 @@ export default function App() {
         resolve();
       };
       timer = window.setTimeout(finish, ms);
-      if (tourTokenRef.current !== token) {
+      if (tourTokenRef.current !== token || tourActHalted()) {
         finish();
         return;
       }
@@ -2004,17 +2132,18 @@ export default function App() {
 
   const tourWaitFor = async (token: number, cond: () => boolean, timeoutMs: number) => {
     const t0 = Date.now();
-    while (tourTokenRef.current === token && !cond()) {
+    while (tourTokenRef.current === token && !tourActHalted() && !cond()) {
       if (Date.now() - t0 > timeoutMs) return false;
       await sleepMs(60);
     }
-    return tourTokenRef.current === token && cond();
+    return tourTokenRef.current === token && !tourActHalted() && cond();
   };
 
   const pauseJudgeTour = () => {
     if (!tourRunningRef.current) return;
     const interruptedAct = tourActRef.current >= 1 ? tourActRef.current : 1;
     tourTokenRef.current++;
+    tourActSkipRef.current = 0;
     const releaseHold = tourSkipRef.current;
     tourSkipRef.current = null;
     releaseHold?.();
@@ -2026,6 +2155,7 @@ export default function App() {
 
   const dismissJudgeTour = () => {
     tourTokenRef.current++;
+    tourActSkipRef.current = 0;
     const releaseHold = tourSkipRef.current;
     tourSkipRef.current = null;
     releaseHold?.();
@@ -2037,11 +2167,14 @@ export default function App() {
     setTourElapsedMs(0);
   };
 
+  /** 一键跳过整幕：记下当前幕号，本幕剩下的动作与等待全部立即让位，下一次点击推进下一幕 */
   const skipTourAct = () => {
+    if (!tourRunningRef.current) return;
+    tourActSkipRef.current = tourActRef.current >= 1 ? tourActRef.current : 1;
     tourSkipRef.current?.();
   };
 
-  // 六幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画；fromAct 支持断点续播
+  // 七幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画；fromAct 支持断点续播
   const runJudgeTourFrom = async (fromAct: number) => {
     if (tourRunningRef.current) return;
     const token = ++tourTokenRef.current;
@@ -2055,6 +2188,8 @@ export default function App() {
     setShowArchModal(false);
 
     const alive = () => tourTokenRef.current === token;
+    /** 本幕是否已被取消：令牌失效（暂停/停止）或评委按过 Skip Act */
+    const halted = () => !alive() || tourActHalted();
     const traced = () => !liveActionsRef.current.isAnalyzing && liveActionsRef.current.frames.length > 0;
     const staged = (count: number) => liveActionsRef.current.stageHistory.length >= count && traced();
     const presetOf = (id: string) => PRESETS.find((p) => p.id === id);
@@ -2065,7 +2200,7 @@ export default function App() {
     };
 
     const acts: Array<() => Promise<void>> = [
-      // ACT 1 · 三层熔断与崩溃前现场
+      // ACT 1 · 三层熔断与崩溃前现场（infinite-loop）
       async () => {
         const fusePreset = presetOf('infinite-loop');
         if (fusePreset) liveActionsRef.current.selectPreset(fusePreset);
@@ -2074,19 +2209,19 @@ export default function App() {
           () => liveActionsRef.current.frames.length >= 1000 && !liveActionsRef.current.isAnalyzing,
           8000
         );
-        if (!alive()) return;
+        if (halted()) return;
         setCurrentFrameIdx(Math.max(0, liveActionsRef.current.frames.length - 2));
         await tourHold(token, 3500);
       },
-      // ACT 2 · fib 三级火箭（DUP -> HIT -> 1D dp）
+      // ACT 2 · fib 三级火箭（DUP -> HIT -> 1D dp，三段驻留，Skip 一次即整幕让位）
       async () => {
         await selectAndTrace('fib-tree');
         await tourHold(token, 1400);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1600);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(3), 8000);
         await tourHold(token, 1400);
@@ -2095,13 +2230,13 @@ export default function App() {
       async () => {
         await selectAndTrace('pascal-comb');
         await tourHold(token, 800);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(2), 8000);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(3), 8000);
-        if (!alive()) return;
+        if (halted()) return;
         setCurrentFrameIdx(6);
         await tourHold(token, 1900);
       },
@@ -2113,28 +2248,36 @@ export default function App() {
         if (chip) {
           liveActionsRef.current.adoptWatch(chip);
           await sleepMs(140);
-          if (!alive()) return;
+          if (halted()) return;
           liveActionsRef.current.seek(chip);
         }
         await tourHold(token, 1800);
       },
-      // ACT 5 · 二维滚动压缩 + 槽位折半快速幂（补齐 M15 未覆盖的两个壁垒）
+      // ACT 5 · 二维滚动压缩 + 槽位折半快速幂（dp-matrix / fast-power）
       async () => {
         await selectAndTrace('dp-matrix');
         await tourHold(token, 700);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1500);
-        if (!alive()) return;
+        if (halted()) return;
         await selectAndTrace('fast-power');
         await tourHold(token, 700);
-        if (!alive()) return;
+        if (halted()) return;
         await liveActionsRef.current.apply();
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1700);
       },
-      // ACT 6 · 打开 Spec 弹窗并跑完 6 项内核自检
+      // ACT 6 · 双指针接雨水 + 区间折半（补齐最后两个内置预设）
+      async () => {
+        await selectAndTrace('rainwater');
+        await tourHold(token, 1500);
+        if (halted()) return;
+        await selectAndTrace('binary-search');
+        await tourHold(token, 1500);
+      },
+      // ACT 7 · 打开 Spec 弹窗并跑完 6 项内核自检
       async () => {
         const previousChecks = liveActionsRef.current.selfCheckResults;
         setShowArchModal(true);
@@ -2146,6 +2289,7 @@ export default function App() {
     ];
 
     for (let i = fromAct - 1; i < acts.length; i++) {
+      tourActSkipRef.current = 0;
       setTourAct(i + 1);
       tourActRef.current = i + 1;
       await acts[i]();
@@ -2178,10 +2322,14 @@ export default function App() {
     return () => window.removeEventListener('pointerdown', abortOnPress, true);
   }, [tourPhase]);
 
-  // ==================== 跨阶段栈深包络遥测图（M16） ====================
-  // 曲线数据来自快照自带的 depthCurve，因此后台大轨迹即使被 LAZY 驱逐也能 100% 绘出
+  // ==================== 跨阶段栈深包络遥测图（M16 / M17 双轴） ====================
+  // 曲线数据来自快照自带的 depthCurve，因此后台大轨迹即使被 LAZY 驱逐也能完整绘出
   const telemetryRef = useRef<HTMLDivElement | null>(null);
   const [telemetryWidth, setTelemetryWidth] = useState<number>(300);
+  // 横轴：absolute 按真实帧数比例（短轨迹横向更短），normalized 各阶段铺满同宽（只比波形）
+  const [telemetryXMode, setTelemetryXMode] = useState<'normalized' | 'absolute'>('absolute');
+  // 纵轴：linear 保比例，sqrt 幂次压缩，让 150 层深递归与 1 层迭代同图时低峰值曲线不被压成直线
+  const [telemetryYMode, setTelemetryYMode] = useState<'linear' | 'sqrt'>('linear');
   useEffect(() => {
     const el = telemetryRef.current;
     if (!el) return;
@@ -2223,18 +2371,39 @@ export default function App() {
   );
   const telemetryVisible = stageCurves.length >= 2;
   const telemetryMaxDepth = stageCurves.reduce((acc, c) => Math.max(acc, c.peak), 2);
+  const telemetryMaxFrames = stageCurves.reduce((acc, c) => Math.max(acc, c.frames), 1);
   const telemetryPlotW = Math.max(40, telemetryWidth - TELEMETRY_LEFT - TELEMETRY_RIGHT);
-  const telemetryX = (length: number, i: number) =>
-    TELEMETRY_LEFT + (length <= 1 ? 0 : (i / (length - 1)) * telemetryPlotW);
-  const telemetryY = (depth: number) =>
-    TELEMETRY_BASE - ((depth - 1) / Math.max(1, telemetryMaxDepth - 1)) * (TELEMETRY_BASE - TELEMETRY_TOP);
+  /** 阶段在横轴上占的宽度比例：归一化模式铺满，绝对模式按真实帧数比例 */
+  const telemetrySpan = (curve: { frames: number }) =>
+    telemetryXMode === 'absolute' ? curve.frames / telemetryMaxFrames : 1;
+  const telemetryX = (curve: { depths: number[]; frames: number }, i: number) =>
+    TELEMETRY_LEFT +
+    (curve.depths.length <= 1 ? 0 : i / (curve.depths.length - 1)) *
+      telemetrySpan(curve) *
+      telemetryPlotW;
+  const telemetryY = (depth: number) => {
+    const norm = (depth - 1) / Math.max(1, telemetryMaxDepth - 1);
+    return (
+      TELEMETRY_BASE -
+      (telemetryYMode === 'sqrt' ? Math.sqrt(Math.max(0, norm)) : norm) * (TELEMETRY_BASE - TELEMETRY_TOP)
+    );
+  };
+  /** 帧号 → 曲线索引：抽样后曲线长度可能远小于帧数，两个坐标系必须显式换算 */
+  const curveIndexOf = (curve: { depths: number[]; frames: number }, frameIdx: number) => {
+    if (curve.depths.length <= 1) return 0;
+    const ratio = curve.frames <= 1 ? 0 : frameIdx / (curve.frames - 1);
+    return Math.round(Math.min(1, Math.max(0, ratio)) * (curve.depths.length - 1));
+  };
   const activeCurve = stageCurves.find((c) => c.active) ?? stageCurves[stageCurves.length - 1];
-  const markerFrame = Math.max(
-    0,
-    Math.min(currentFrameIdx, Math.max(0, (activeCurve?.depths.length ?? 1) - 1), Math.max(0, frames.length - 1))
-  );
-  const markerX = activeCurve ? telemetryX(activeCurve.depths.length, markerFrame) : 0;
-  const markerY = activeCurve ? telemetryY(activeCurve.depths[markerFrame] ?? 1) : 0;
+  const markerFrame = activeCurve
+    ? Math.max(
+        0,
+        Math.min(currentFrameIdx, Math.max(0, activeCurve.frames - 1), Math.max(0, frames.length - 1))
+      )
+    : 0;
+  const markerCurveIdx = activeCurve ? curveIndexOf(activeCurve, markerFrame) : 0;
+  const markerX = activeCurve ? telemetryX(activeCurve, markerCurveIdx) : 0;
+  const markerY = activeCurve ? telemetryY(activeCurve.depths[markerCurveIdx] ?? 1) : 0;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -2364,7 +2533,7 @@ export default function App() {
           </span>
           <span className="shrink-0 text-amber-100 whitespace-nowrap">
             {tourPhase === 'complete'
-              ? `Six-act showcase finished · total ${(tourElapsedMs / 1000).toFixed(1)}s`
+              ? `${TOUR_ACTS.length}-act showcase finished · total ${(tourElapsedMs / 1000).toFixed(1)}s`
               : TOUR_ACTS[
                   (tourPhase === 'paused' ? pausedTourAct ?? tourAct : tourAct) - 1
                 ]?.title ?? 'Judge tour'}
@@ -2380,9 +2549,10 @@ export default function App() {
             {tourRunning && (
               <button
                 onClick={skipTourAct}
+                title="Skip the whole current act: one click abandons every remaining step of this act and starts the next one"
                 className="px-2 py-0.5 rounded border border-amber-500/40 bg-zinc-900 text-amber-200 text-[10px] hover:bg-amber-500/15 whitespace-nowrap"
               >
-                Skip Next →
+                Skip Act →
               </button>
             )}
             {tourPhase === 'paused' && (
@@ -2714,6 +2884,20 @@ export default function App() {
               >
                 Add
               </button>
+              <button
+                onClick={() => void handleShareSnapshot()}
+                title="Write preset + frame index + watch expressions into the URL hash and copy a reproducible link"
+                className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-mono transition whitespace-nowrap ${
+                  shareState === 'copied'
+                    ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                    : shareState === 'blocked'
+                      ? 'border-amber-500/60 bg-amber-500/10 text-amber-200'
+                      : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-sky-300'
+                }`}
+              >
+                {shareState === 'copied' ? <Check className="w-2.5 h-2.5" /> : <Share2 className="w-2.5 h-2.5" />}
+                {shareState === 'copied' ? 'Copied!' : shareState === 'blocked' ? 'Link in URL' : 'Share'}
+              </button>
               {quickWatches
                 .filter((q) => !watchExprs.includes(q) && watchExprs.length < 4)
                 .map((q) => (
@@ -2739,7 +2923,8 @@ export default function App() {
                       <span className="truncate">Cross-Stage Stack Envelope</span>
                     </span>
                     <span className="shrink-0 text-[10px] font-mono text-zinc-500 whitespace-nowrap">
-                      peak {telemetryMaxDepth} · click axis to seek
+                      peak {telemetryMaxDepth} ·{' '}
+                      {telemetryXMode === 'absolute' ? `${telemetryMaxFrames}f axis` : '100% axis'}
                     </span>
                   </div>
                   <div ref={telemetryRef}>
@@ -2754,7 +2939,10 @@ export default function App() {
                           1,
                           Math.max(0, (e.clientX - rect.left - TELEMETRY_LEFT) / telemetryPlotW)
                         );
-                        const idx = Math.round(ratio * (activeCurve.depths.length - 1));
+                        // 按当前横轴模式逆映射：absolute 模式先除掉阶段占比，再换算成真实帧号并 clamp
+                        const span = Math.max(0.0001, telemetrySpan(activeCurve));
+                        const progress = Math.min(1, ratio / span);
+                        const idx = Math.round(progress * Math.max(0, activeCurve.frames - 1));
                         setIsPlaying(false);
                         setCurrentFrameIdx(Math.max(0, Math.min(frames.length - 1, idx)));
                       }}
@@ -2784,14 +2972,14 @@ export default function App() {
                       </text>
                       {stageCurves.map((c) => {
                         const pts = c.depths
-                          .map((d, i) => `${telemetryX(c.depths.length, i).toFixed(1)},${telemetryY(d).toFixed(1)}`)
+                          .map((d, i) => `${telemetryX(c, i).toFixed(1)},${telemetryY(d).toFixed(1)}`)
                           .join(' ');
                         if (!pts) return null;
                         return (
                           <g key={c.stageIndex}>
                             <polygon
                               points={`${TELEMETRY_LEFT},${TELEMETRY_BASE} ${pts} ${telemetryX(
-                                c.depths.length,
+                                c,
                                 c.depths.length - 1
                               ).toFixed(1)},${TELEMETRY_BASE}`}
                               fill={c.color}
@@ -2836,7 +3024,7 @@ export default function App() {
                         fontSize={8}
                         fontFamily="monospace"
                       >
-                        0%
+                        0
                       </text>
                       <text
                         x={TELEMETRY_LEFT + telemetryPlotW - 22}
@@ -2845,9 +3033,38 @@ export default function App() {
                         fontSize={8}
                         fontFamily="monospace"
                       >
-                        100%
+                        {telemetryXMode === 'absolute' ? `${telemetryMaxFrames}f` : '100%'}
                       </text>
+                      {telemetryXMode === 'absolute' && activeCurve && activeCurve.depths.length > 1 && (
+                        <line
+                          x1={telemetryX(activeCurve, activeCurve.depths.length - 1)}
+                          y1={TELEMETRY_TOP}
+                          x2={telemetryX(activeCurve, activeCurve.depths.length - 1)}
+                          y2={TELEMETRY_BASE}
+                          stroke="#3f3f46"
+                          strokeWidth={1}
+                          strokeDasharray="2 2"
+                        />
+                      )}
                     </svg>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                    <button
+                      onClick={() =>
+                        setTelemetryXMode((m) => (m === 'normalized' ? 'absolute' : 'normalized'))
+                      }
+                      title="Horizontal axis: normalized lets every stage fill 0-100% so waveforms compare; absolute maps every x to real frame index against the longest stage"
+                      className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-mono text-sky-300 transition hover:text-sky-200 whitespace-nowrap"
+                    >
+                      X: {telemetryXMode === 'absolute' ? 'Abs Frames' : 'Norm %'} ⇄
+                    </button>
+                    <button
+                      onClick={() => setTelemetryYMode((m) => (m === 'linear' ? 'sqrt' : 'linear'))}
+                      title="Vertical axis: sqrt compresses depth so a 150-frame peak and a 1-frame stage stay readable in one chart"
+                      className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-mono text-violet-300 transition hover:text-violet-200 whitespace-nowrap"
+                    >
+                      Y: {telemetryYMode === 'sqrt' ? 'Sqrt' : 'Linear'} ⇄
+                    </button>
                   </div>
                   <div className="mt-1.5 flex items-center gap-1 flex-wrap">
                     {stageCurves.map((c) => (
@@ -2866,6 +3083,9 @@ export default function App() {
                         <span className="w-2 h-2 rounded-full shrink-0" style={{ background: c.color }} />
                         Stage {c.stageIndex} peak {c.peak}
                         {c.stageIndex === 0 ? ' dashed' : ''} · {c.frames}f
+                        {telemetryXMode === 'absolute'
+                          ? ` (${Math.round((c.frames / telemetryMaxFrames) * 100)}% span)`
+                          : ''}
                         {c.evicted ? ' · LAZY' : ''}
                         {c.kind === 'draft' ? ' · draft' : ''}
                       </button>
@@ -3877,24 +4097,54 @@ export default function App() {
                       <br />• M16: a cross-stage SVG stack-depth envelope fed by a lightweight depthCurve
                       that survives lazy eviction, zero-delay verdict updates while the tour runs, and a
                       six-act tour that can be interrupted and resumed on the same act.
+                      <br />• M17: dual-axis envelope (absolute frame scale or normalized progress, linear
+                      or sqrt depth), peak-preserving 128-sample curve bucketing, one-click act skipping,
+                      a seven-act tour covering all seven built-in presets, and a URL hash permalink that
+                      reproduces preset + frame + watch expressions.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">
+                      17. Dual-Axis Envelope, Peak Sampling, Act Skip &amp; Permalink (M17)
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The envelope chart has two axis modes. X: Abs Frames maps every pixel to a real frame
+                      index against the longest stage, so a 25-frame stage occupies 5% of the width while a
+                      467-frame stage fills it; X: Norm % stretches every stage to the full width so only the
+                      waveform shape is compared. Y: Linear keeps the depth ratio honest, Y: Sqrt compresses
+                      it with sqrt((d-1)/(max-1)) so a 150-deep fuse trace and a 1-deep iteration remain
+                      readable together. Clicking the axis inverts whichever mode is active and clamps to the
+                      active stage legal frame range.
+                      <br />• depthCurve is now peak-preserving bucketed: at most MAX_CURVE_SAMPLES = 128
+                      integers (first frame, 126 interior buckets of max depth, last frame), so a 467-frame
+                      stage costs 128 numbers and its curve peak still equals the frozen Stack Depth metric.
+                      <br />• Skip Act abandons the whole current act: the act number is recorded in
+                      tourActSkipRef, and every remaining step, hold and condition wait in that act yields
+                      immediately. One click moves forward no matter how many Applys the act contains.
+                      <br />• The tour is seven acts and drives all seven built-in presets; the self-check
+                      moved to the last act. Interruption still records pausedTourAct for Resume Act k/7.
+                      <br />• Share writes preset + frame + watch expressions into the URL hash, copies the
+                      link, and reports Copied! or Link in URL when the clipboard is denied. On load a valid
+                      hash boots the same preset and seeks the same frame; shared expressions still pass the
+                      existing Watch gates, so a hostile link cannot bypass them.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
                     <div className="text-sky-400 font-semibold">16. Cross-Stage Envelope &amp; Resumable Tour (M16)</div>
                     <p className="text-zinc-400 text-[11px]">
-                      Every snapshot now carries depthCurve - one integer per frame - so the envelope chart
-                      keeps drawing all stages even after lazy eviction removed the frame arrays
-                      (measured: a 354-frame LAZY stage still renders 354 points). Stage 0 is the rose dashed
-                      line, Stage 1 sky, Stage 2 emerald and twice as thick when active; the x-axis is
-                      normalized progress, the current frame is a dot plus cursor line, and clicking the
-                      axis seeks proportionally (0 / 25 / 50 / 100 percent mapped to frames 1 / 3 / 6 / 11).
+                      Every snapshot carries depthCurve, so the envelope chart keeps drawing all stages even
+                      after lazy eviction removed the frame arrays. Stage 0 is the rose dashed line, Stage 1
+                      sky, Stage 2 emerald and twice as thick when active; the current frame is a dot plus
+                      cursor line and clicking the axis seeks. (M16 shipped one integer per frame and a
+                      normalized x-axis - 354 frames drew 354 points and 0 / 25 / 50 / 100 percent mapped to
+                      frames 1 / 3 / 6 / 11; M17 replaced the granularity with 128-point peak-preserving
+                      bucketing and made the axis a mode choice, see card 17.)
                       <br />• While the tour runs, executeCode passes skipDelay=true to the diagnostics
                       engine, so the verdict chips land with the new trace instead of 380ms later -
                       measured 12-56ms from act label to a fully consistent trace plus verdict.
-                      <br />• The tour is six acts now (fuse, fib rocket, comb to 2D, watchpoint seek,
-                      2D rolling buffer plus positional halving, kernel self-check) and every interruption
-                      records pausedTourAct, so the caption bar offers Resume Act k/6, Restart and Dismiss
-                      instead of forcing a replay from act one.
+                      <br />• Interruption records pausedTourAct, so the caption bar offers Resume Act k/N,
+                      Restart and Dismiss instead of forcing a replay from act one (six acts in M16, seven
+                      in M17; every label is driven by TOUR_ACTS.length).
                       <br />• Chart width comes from a synchronous clientWidth read with ResizeObserver and
                       window resize as fallbacks, because a throttled or occluded browsing context may never
                       deliver the observer callback.

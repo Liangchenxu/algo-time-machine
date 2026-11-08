@@ -1,6 +1,6 @@
 # M16 · 跨阶段 SVG 栈深包络遥测图、导览零延迟同步与六幕断点续播
 
-Commit：本次提交（`git log -1`）— feat(telemetry): 完成 Milestone 16 跨阶段SVG栈深包络遥测图、导览零延迟同步与六幕断点续播
+Commit：`db5004a` — feat(telemetry): 完成 Milestone 16 跨阶段SVG栈深包络遥测图、导览零延迟同步与六幕断点续播
 
 ## Why · 背景动机
 
