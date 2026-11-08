@@ -1,6 +1,6 @@
 # M12 · 多阶段全息快照栈、混合实参折半、指数门控与 Fast Power 预设
 
-Commit：本次提交（`git log -1`）— feat(time-capsule): 完成 Milestone 12 多阶段全息快照栈、混合实参槽位折半识别、负指数门控与Fast Power预设
+Commit：`cc324f1` — feat(time-capsule): 完成 Milestone 12 多阶段全息快照栈、混合实参槽位折半识别、负指数门控与Fast Power预设
 
 ## Why · 背景动机
 

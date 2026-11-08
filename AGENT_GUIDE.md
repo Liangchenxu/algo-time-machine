@@ -124,18 +124,30 @@ Key 仅驻留内存，不写入 localStorage。
   `> 0` 为可变状态表；只有两类同时存在时才提供一维滚动压缩（`includes('grid')` 类源码门控已禁止），
   显微镜 2D 卡片据此显示 `READ-ONLY` / `WRITES: n` 徽章。
 - 折半递归：进入事件的实参**按顶层逗号切分（忽略 `[]` `{}` `()` 内逗号）后逐槽收集**，
-  任意槽位满足 `a[k+1] = floor(a[k]/2)`（≥2 步、首值 ≥8）即判 `O(log n) Logarithmic Recursion`
-  （`power(2,16)` 由槽位 1 命中；槽位 0 是字符串时不丢弃整次调用）；
-  消栈必须过形态门：计数型生成 `while (curr > 1)` 游标循环，双参含乘法且**指数为非负整数**时
-  生成迭代二进制快速幂（实测 `powerIter(2, 16) = 65536`），其余形态保留源码并标
-  `[SEMANTICS_PRESERVED]`、隐藏 Apply。迭代侧对应 `O(log n) Iterative Halving`；
-  该判定必须先于线性递归档。**`[FUSE_STACK_OVERFLOW]` + 签名链重复 = 不收敛**，判
-  `O(∞) Unbounded Recursion` 且拒绝任何改写（`depth(400)` 实参无环，仍判线性递归）。
+  任意槽位满足 `a[k+1] = floor(a[k]/2)` 或（`a[k]` 为奇数且 `a[k+1] = a[k]-1`）交替下潜，
+  且首值 ≥8、总步数 ≥2、折半步占比 ≥50% 即判 `O(log n) Logarithmic Recursion`
+  （`power(2,16)` 由槽位 1 命中；`powerAlt(2,15)` 链 `15→14→7→6→3→2→1` 由槽位 1 命中；
+  槽位 0 是字符串时不丢弃整次调用）；
+  消栈必须过形态门：计数型生成 `while (curr > 1)` 游标循环，**多参计数型仅当非折半槽位在自调用中
+  原样透传**时才合成并保留原签名与调用字面量（`bsearchHalve("arr", 32)` → `steps = 5`）；
+  双参含乘法且**指数为非负整数**时生成迭代二进制快速幂（实测 `powerIter(2, 16) = 65536`、
+  奇偶交替 `powerAlt(2, 15)` → `powerAltIter(2, 15) = 32768`），其余形态保留源码并标
+  `[SEMANTICS_PRESERVED]`、隐藏 Apply，拒绝原因分型为
+  `coupled multi-parameter state` / `custom return composition` / `negative/non-integer exponent`。
+  迭代侧对应 `O(log n) Iterative Halving`；该判定必须先于线性递归档。
+  **`[FUSE_STACK_OVERFLOW]` + 签名链重复 = 不收敛**，判 `O(∞) Unbounded Recursion` 且拒绝任何改写
+  （`depth(400)` 实参无环，仍判线性递归）。
 - 多阶段全息快照：每次 Apply 把当前阶段冻结成 `StageSnapshot`（源码 + 帧 + 沙箱错误 +
   **该阶段的 aiReport** + 指标）并追加新阶段；横幅右侧的 `Stage N (mf)` 胶囊直接同步恢复全部状态
   （零延迟、不重跑沙箱），横幅始终比较 Stage 0 与当前阶段（停在 Stage 0 时对比最新阶段并显示
   `INSPECTING STAGE 0 BASELINE (Full Report Restored)`），非最新阶段隐藏 Apply 防止分叉，
   仅切换预设才清空历史。
+  **大轨迹惰性快照**：`LAZY_FRAME_THRESHOLD = 250`，超过阈值的非激活阶段释放 `frames` 但保留
+  `frameCount` / 源码 / 报告 / 指标（胶囊标 `LAZY`），点击胶囊用 `runInSandbox` 重水化，
+  不重算诊断；≤250 帧仍 0ms 同步切换。
+  **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
+  `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
+  `Draft` 临时阶段再切换，绝不静默丢弃。
 
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
   `HIT`（翠绿 `#10b981`，首次展开过而本次零子节点直接退栈 = 被记忆化缓存拦截），
@@ -146,7 +158,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M12 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M13 各一篇）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

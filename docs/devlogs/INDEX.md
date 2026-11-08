@@ -19,7 +19,8 @@
 | M9 | `9bb7835` | [M9-two-stage-fib-and-2d-synthesis.md](./M9-two-stage-fib-and-2d-synthesis.md) | fib 并入二级火箭、双参帕斯卡二维表降维、二维档样例门控、Seek 四态导航与场景化一键 Watch |
 | M10 | `ee2d94c` | [M10-runtime-introspection-and-pascal-preset.md](./M10-runtime-introspection-and-pascal-preset.md) | 帕斯卡预设、运行时自适应 Watch 芯片、二维矩阵读写分离取证与 `O(log n)` 折半递归消栈 |
 | M11 | `564e022` | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
-| M12 | 本次提交 | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
+| M12 | `cc324f1` | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
+| M13 | 本次提交 | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -149,8 +150,34 @@
     非数值槽位只跳过自身，不得整次丢弃调用。
     （f）快速幂合成要求指数为**非负整数**；`[FUSE_STACK_OVERFLOW]` 且签名链出现重复时判
     `O(∞) Unbounded Recursion` 并拒绝任何改写——`depth(400)` 这类实参无环的深递归不受此判据影响。
+19. **透传参数等价合成、大轨迹惰性重水化与编辑态防覆盖契约**（M13 确立）：
+    （a）**多参计数型合成的透传门**：形态 A（`return 1 + fn(...)` 且基线 `return 0`）允许函数拥有多个形参，
+    但每个自调用的**非折半槽位必须是原样透传的标识符**（`fn(tag, Math.floor(n / 2))`）。
+    折半槽位之外的参数一旦在自调用中被改写（`tag + 1`）或参与返回值算术，一律不生成循环。
+    合成代码必须保留原函数签名，顶层调用优先使用**源码里函数体之后的真实实参字面量**
+    （运行时签名会丢掉字符串引号，直接把签名拼回源码会产出 `fn(arr, 32)` 这类 ReferenceError）。
+    （b）**拒绝原因必须分型**：`coupled multi-parameter state → source preserved`（透传失败）与
+    `custom return composition → source preserved`（返回值不是纯 `1 + fn`）不得混用；
+    指数门控仍使用 `negative/non-integer exponent (x) → source preserved`。
+    （c）**奇偶交替折半**：实参链同时允许 `floor(a/2)` 与「`a` 为奇数时 `a-1`」，
+    要求首值 ≥8、总步数 ≥2、折半步占比 ≥50%；纯折半仍走计数/快速幂，交替链**只允许快速幂合成**——
+    用 `floor(x/2)` 计数循环会把 `15→14→7→6→3→2→1` 的步数算少，计数形态遇到交替链必须拒绝。
+    交替链的 frame insight 使用 `INTERLEAVED_DESCENT`，与纯折半的 `LOGARITHMIC_DESCENT` 区分。
+    （d）**大轨迹惰性快照**：`LAZY_FRAME_THRESHOLD = 250`；阶段退居非激活后台且帧数超过阈值时，
+    释放 `frames` 但保留 `frameCount` / `sourceCode` / `aiReport` / `metrics` / `sandboxError` / `execTimeMs`。
+    胶囊与横幅一律用 `frameCount` 而非 `frames.length`，被驱逐阶段标注 `LAZY`；
+    点击胶囊用 `runInSandbox(snapshot.sourceCode)` 重水化，**不得重算诊断**（报告仍是快照的一部分），
+    并用令牌丢弃过期异步结果。≤250 帧的快照仍保持 0ms 同步切换，不得无差别改为重跑。
+    （e）**编辑态防覆盖**：`stageHistory` 存在时，只要 `sourceCode !== stageHistory[activeStage].sourceCode`
+    即视为脏编辑，横幅显示 `UNSAVED EDIT DRAFT`，并隐藏 Apply（报告描述的是旧源码）。
+    点击 `Compile & Trace` = 以手改代码为全新基准，历史栈归零；点击任意阶段胶囊不得静默覆盖，
+    必须先用同一沙箱真实跑一遍手改代码并将其冻结为 `kind: 'draft'` 的临时 `Draft` 阶段
+    （源码/帧/报告三者同源，满足 #18a），再切到目标阶段。Draft 阶段与普通阶段一样可零延迟切回。
 
-## 当前实测基线（M12 全预设复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M13 复测，视口 770×553，`npm run build` 零 TS 报错）
+
+> M13 轮复测了 Rain / Fast Power / fib / 自定义折半与奇偶变体 / `fib(10)` 惰性快照 / 编辑守卫；
+> 其余预设（DP、Binary、Comb、死循环、`depth(400)`、`fact(6)`）沿用 M12 实测值，未在本轮重跑。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -211,6 +238,19 @@
 | 混合实参折半（M12） | `bsearchHalve("arr", 32)`：槽位 0 字符串跳过，槽位 1 链 `32 → 16 → 8 → 4 → 2 → 1` → `O(log n) Logarithmic Recursion` / Stack Depth 7 |
 | 指数门控（M12） | `power(2, 16.5)` 仍判对数级但 Apply 隐藏，文案 `negative/non-integer exponent (16.5) → source preserved` |
 | 不收敛判据（M12） | `power(2, -4)` → `[FUSE_STACK_OVERFLOW]` 后判 `O(∞) Unbounded Recursion` / `Stack Depth 150 (fused)`，标签 `GUARD_TRAP` + `ARG_CYCLE`，Apply 隐藏；`depth(400)` 仍判 `O(n) Linear Recursion` 且 Apply 可见 |
+| 透传多参折半（M13） | `bsearchHalve("arr", 32)`：判 `O(log n) Logarithmic Recursion` / Stack Depth 7、7 帧，**Apply 可见**；生成代码保留 `bsearchHalveIter("arr", 32);`，跑完终端 `steps = 5`（与原递归一致） |
+| 透传折半消栈（M13） | Apply → 20 帧 `O(log n) Iterative Halving` / `O(1) Scalar Accumulator`，横幅 `STACK REDUCTION -71.4%` / `PEAK STACK 7 → 2` |
+| 奇偶交替折半（M13） | `powerAlt(2, 15)` 实参链 `15 → 14 → 7 → 6 → 3 → 2 → 1`（6 步中 3 步折半）→ `O(log n) Logarithmic Recursion` / Stack Depth 9、9 帧，标签 `INTERLEAVED_DESCENT`，Apply 可见 |
+| 交替快速幂合成（M13） | Apply → 22 帧，终端 `powerAltIter(2, 15) = 32768`（与 `2^15` 一致），横幅 `STACK REDUCTION -77.8%` / `PEAK STACK 9 → 2`，判 `O(log n) Iterative Halving` |
+| 耦合拒绝文案（M13） | `bsearchCoupled(tag, n)`（自调用 `tag + 1`）→ 判对数级但 Apply 隐藏，文案 `coupled multi-parameter state → source preserved` |
+| 组合拒绝文案（M13） | `weirdHalve2(n)`（`return 1 + fn(n/2) + n`）→ Apply 隐藏，文案 `custom return composition → source preserved` |
+| 惰性快照驱逐（M13） | 自定义 `fib(10)`：Stage-0 354 帧 → Apply 后 Stage-1 80 帧；切到 Stage 1 时胶囊显示 `Stage 0 (354f · LAZY)`（帧数组已释放） |
+| 重水化（M13） | 点击 `Stage 0 (354f · LAZY)` → 通过 `runInSandbox` 恢复 354 帧（实测 <120ms），胶囊变回 `Stage 0 (354f)`、`INSPECTING STAGE 0 BASELINE` 出现、诊断仍为 `O(2^n) Exponential`（未重算） |
+| 轻量零延迟（M13） | fib 31 / 41 / 11 帧的 Stage 0/1/2 切换无 `RE-HYDRATING`、无 `LAZY`，Stage 0 恢复 31 帧且判据回到 `O(2^n)` |
+| 编辑守卫（M13） | 编辑 Stage 1 源码 → 横幅出现 `UNSAVED EDIT DRAFT`；点 Stage 0 → 自动生成 `Draft 2 (22f)` 并恢复 Stage 0（手改注释不在源码中），脏标记消失；再点 Draft 2 → 手改源码与 22 帧完整回来 |
+| 重跑归零（M13） | 脏编辑状态下点 `Compile & Trace` → Stage 胶囊全部消失（历史栈归零），以手改代码作为新的 Stage-0 轨迹，无静默覆盖 |
+| 指数/不收敛回归（M13） | `power(2, 16.5)` → Apply 隐藏 + `negative/non-integer exponent (16.5)`；`power(2, -4)` → 149 帧 `O(∞) Unbounded Recursion` / `Stack Depth 150 (fused)`，Apply 隐藏 |
+| 预设回归（M13） | Fast Power 13 帧 → Apply 22 帧、终端 `65536`；Rain 40 帧 `O(n) Linear Two-Pointer`；fib 三级火箭 31 → 41 → 11 帧；顶栏 44px 且 `scrollWidth == clientWidth == 770`；控制台无 error/warn |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -271,9 +311,12 @@
 - [x] A/B 只保存最后一次 Apply 的两侧（M11 报备 → **M12 闭合**：`stageHistory` 全息栈，fib 实测 `Stage 0/1/2` 三段可零延迟互切）
 - [x] 基线视图只加提示、未为两侧各存报告（M11 报备 → **M12 闭合**：`aiReport` 纳入快照，切回 Stage 0 时判据恢复为 `O(2^n)` 而非沿用 Stage 2）
 - [x] 负指数递归熔断后被判 `O(2^n)` 并推荐记忆化（M12 实测暴露：`power(2,-4)` 签名环 → 已改判 `O(∞) Unbounded Recursion` 并隐藏 Apply，`depth(400)` 不受影响）
-- [ ] 快照把整条 frames 存在内存，长轨迹多级重构占用较多（见 M12「遗留」）
-- [ ] 快照与手改代码不同步：切走再切回会恢复快照源码、丢弃编辑（见 M12「遗留」）
-- [ ] 2 参计数型（带 tag 参数）被保守拒绝合成，缺少「未使用参数可忽略」判定（见 M12「遗留」）
+- [x] 快照把整条 frames 存在内存，长轨迹多级重构占用较多（M12 报备 → **M13 闭合**：`LAZY_FRAME_THRESHOLD = 250`，背景大轨迹释放 `frames` 只留 `frameCount`，实测 `fib(10)` 切走后 `Stage 0 (354f · LAZY)`，点回 <120ms 重水化 354 帧）
+- [x] 快照与手改代码不同步：切走再切回会恢复快照源码、丢弃编辑（M12 报备 → **M13 闭合**：脏编辑显示 `UNSAVED EDIT DRAFT`，`Compile & Trace` 归零历史，切阶段先把手改代码真实跑成 `Draft` 阶段，实测 `Draft 2 (22f)` 可无损切回）
+- [x] 2 参计数型（带 tag 参数）被保守拒绝合成，缺少「未使用参数可忽略」判定（M12 报备 → **M13 闭合**：非折半槽位原样透传即允许合成，实测 `bsearchHalve("arr", 32)` Apply 后 `steps = 5`；非透传 `tag + 1` 则明确报 `coupled multi-parameter state`）
+- [x] 奇偶交替快速幂（`exp - 1` 分支）只按纯折半识别，奇数指数步数未验证（M12 报备 → **M13 闭合**：检测允许 `floor(a/2)` 与奇数 `a-1` 交替、折半步 ≥50%，实测 `powerAlt(2, 15)` 链 `15→14→7→6→3→2→1`，Apply 后 `32768`）
+- [ ] 惰性阈值只看帧数（>250），不按变量快照的实际字节数计；少量超大数组快照仍可能占用较多内存（M13 新遗留）
+- [ ] 重水化会真实重跑源码：含 `Math.random` / `Date.now()` 等非确定性代码时，帧内容可能与冻结时的 `metrics` 略有漂移（确定性演示不受影响，M13 新遗留）
 
 ## 全仓 emoji 扫描基线（可复现）
 

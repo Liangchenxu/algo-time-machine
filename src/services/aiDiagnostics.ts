@@ -555,57 +555,177 @@ function detectHalvingArgs(frames: TraceFrame[]) {
   for (let slot = 0; slot < slots.length; slot++) {
     const seq = slots[slot];
     if (!seq) continue;
+    // 容忍「奇数减一、偶数折半」的交替下潜：a[k+1] = floor(a[k]/2) 或（a[k] 为奇数且 a[k+1] = a[k]-1）。
+    // 纯折半链与 15→14→7→6→3→2→1 这类快速幂变体都能命中；折半步占比不足 50% 则不算对数级。
     let steps = 0;
-    while (steps + 1 < seq.length && seq[steps] > 1 && seq[steps + 1] === Math.floor(seq[steps] / 2)) {
-      steps++;
+    let halvingSteps = 0;
+    while (steps + 1 < seq.length && seq[steps] > 1) {
+      const cur = seq[steps];
+      const next = seq[steps + 1];
+      if (next === Math.floor(cur / 2)) {
+        halvingSteps++;
+        steps++;
+      } else if (cur % 2 === 1 && next === cur - 1) {
+        steps++;
+      } else {
+        break;
+      }
     }
-    if (seq.length >= 3 && seq[0] >= 8 && steps >= 2) {
-      return { detected: true, slot, base: seq[0], steps, chain: seq.slice(0, steps + 1) };
+    if (seq.length >= 3 && seq[0] >= 8 && steps >= 2 && halvingSteps / steps >= 0.5) {
+      return {
+        detected: true,
+        slot,
+        base: seq[0],
+        steps,
+        halvingSteps,
+        interleaved: halvingSteps < steps,
+        chain: seq.slice(0, steps + 1),
+      };
     }
   }
-  return { detected: false, slot: -1, base: 0, steps: 0, chain: [] as number[] };
+  return {
+    detected: false,
+    slot: -1,
+    base: 0,
+    steps: 0,
+    halvingSteps: 0,
+    interleaved: false,
+    chain: [] as number[],
+  };
 }
 
-interface HalvingLowering {
-  code: string;
-  shape: 'count' | 'fastpow';
-  label: string;
+/** 从源码中函数体之后的顶层调用提取实参原文，用于合成代码保留原始调用字面量。 */
+function extractTopLevelCallArgs(sourceCode: string, fnName: string, bodyEnd: number): string[] | null {
+  const esc = fnName.replace(/[$]/g, '\\$&');
+  const re = new RegExp(`${esc}\\s*\\(`, 'g');
+  const tail = sourceCode.slice(bodyEnd);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(tail)) !== null) {
+    const before = tail[m.index - 1];
+    if (before && /[\w$.]/.test(before)) continue;
+    const open = bodyEnd + m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < sourceCode.length; i++) {
+      const ch = sourceCode[i];
+      if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) {
+        close = i;
+        break;
+      }
+    }
+    if (close < 0) return null;
+    return splitTopLevelArgs(sourceCode.slice(open + 1, close));
+  }
+  return null;
+}
+
+/** 计数型多参递归的透传校验：每个自调用的非折半槽位必须是对应形参的原样标识符。 */
+function hasPassthroughArgs(info: FnSourceInfo, slot: number): boolean {
+  const esc = info.name.replace(/[$]/g, '\\$&');
+  const callRe = new RegExp(`${esc}\\s*\\(`, 'g');
+  let calls = 0;
+  let m: RegExpExecArray | null;
+  while ((m = callRe.exec(info.body)) !== null) {
+    const open = m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < info.body.length; i++) {
+      const ch = info.body[i];
+      if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) {
+        close = i;
+        break;
+      }
+    }
+    if (close < 0) return false;
+    const tokens = splitTopLevelArgs(info.body.slice(open + 1, close));
+    if (tokens.length !== info.params.length) return false;
+    for (let i = 0; i < tokens.length; i++) {
+      if (i === slot) continue;
+      if (tokens[i] !== info.params[i]) return false;
+    }
+    calls++;
+  }
+  return calls > 0;
+}
+
+interface HalvingSynthesis {
+  code: string | null;
+  shape?: 'count' | 'fastpow';
+  label?: string;
+  reject?: 'exponent' | 'coupled' | 'composition';
 }
 
 /**
  * 折半消栈的严格语义等价门控（不变量 #13c）：
  *   形态 A 计数型（1 + fn(...) 且基线返回 0）→ 游标 steps++ 循环；
+ *     多参版本仅当非折半参数在自调用中原样透传时才合成，并保留原函数签名；
  *   形态 B 快速幂（双参、槽位 1 折半、函数体含乘法）→ 迭代二进制快速幂；
- *   其余形态一律返回 null，由调用方保留原递归源码。
+ *   其余形态返回带具体原因的拒绝（coupled / composition / exponent），由调用方保留原递归源码。
  */
 function synthesizeHalvingLowering(
   info: FnSourceInfo,
-  rec: { slot: number; base: number },
-  args: number[]
-): HalvingLowering | null {
+  rec: { slot: number; base: number; interleaved: boolean },
+  args: number[],
+  rawArgs: string[],
+  sourceArgs: string[] | null
+): HalvingSynthesis {
   const body = info.body;
-  const countPattern = /(^|[^A-Za-z0-9_$])1\s*\+\s*[A-Za-z_$][\w$]*\s*\(/;
+  const esc = info.name.replace(/[$]/g, '\\$&');
+  // 返回式必须整体就是 `1 + fn(...)`：后面再拼 + tag / * 2 都不算计数型，避免把自定义组合误判成步数。
+  const countReturn = new RegExp(`return\\s+1\\s*\\+\\s*${esc}\\s*\\([^;]*\\)\\s*;`);
   const baseReturnsZero = /if\s*\([^)]*\)\s*\{?\s*return\s+0\s*;/.test(body);
 
-  if (info.params.length === 1 && countPattern.test(body) && baseReturnsZero) {
+  if (countReturn.test(body) && baseReturnsZero && info.params[rec.slot]) {
+    // 奇数减一的交替链不能用 floor(x/2) 计数循环等价，只有快速幂形态能安全吸收该变体。
+    if (rec.interleaved) return { code: null, reject: 'composition' };
+    if (info.params.length > 1 && !hasPassthroughArgs(info, rec.slot)) {
+      return { code: null, reject: 'coupled' };
+    }
+    const halvingParam = info.params[rec.slot];
+    if (info.params.length === 1) {
+      return {
+        code:
+          `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（${rec.base} 按 floor(n/2) 收敛）\n` +
+          `let curr = ${rec.base};\nlet steps = 0;\n` +
+          `while (curr > 1) {\n  curr = Math.floor(curr / 2);\n  steps += 1;\n}\n` +
+          `console.log("halving steps =", steps);`,
+        shape: 'count',
+        label: '计数型折半（1 + fn(n/2)，基线返回 0）',
+      };
+    }
+    // 保留原始顶层调用字面量（"arr", 32）；折半槽位用运行时数值，避免把表达式原样搬到顶层作用域。
+    const literalToken = (t: string | undefined) =>
+      t && (/^-?\d+(?:\.\d+)?$/.test(t) || /^(["']).*\1$/.test(t) || /^(true|false|null)$/.test(t))
+        ? t
+        : undefined;
+    const callTokens = info.params.map((p, i) => {
+      if (i === rec.slot) return String(Number.isFinite(args[i]) ? args[i] : rec.base);
+      const literal = literalToken(sourceArgs?.[i]) ?? literalToken(rawArgs[i]);
+      return literal ?? JSON.stringify(rawArgs[i] ?? p);
+    });
+    const callExpr = callTokens.join(', ');
+    const echoArgs = info.params.join(' + ", " + ');
     return {
-      shape: 'count',
-      label: '计数型折半（1 + fn(n/2)，基线返回 0）',
       code:
-        `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（${rec.base} 按 floor(n/2) 收敛）\n` +
-        `let curr = ${rec.base};\nlet steps = 0;\n` +
-        `while (curr > 1) {\n  curr = Math.floor(curr / 2);\n  steps += 1;\n}\n` +
-        `console.log("halving steps =", steps);`,
+        `// Stage-2: 折半递归展开为游标循环，O(1) 栈空间（槽位 ${rec.slot} (${halvingParam}) 按 floor(x/2) 收敛，其余参数原样透传）\n` +
+        `function ${info.name}Iter(${info.params.join(', ')}) {\n` +
+        `  let curr = ${halvingParam};\n  let steps = 0;\n` +
+        `  while (curr > 1) {\n    curr = Math.floor(curr / 2);\n    steps += 1;\n  }\n` +
+        `  console.log("${info.name}Iter(" + ${echoArgs} + ") steps =", steps);\n` +
+        `  return steps;\n}\n` +
+        `${info.name}Iter(${callExpr});`,
+      shape: 'count',
+      label: `计数型折半（1 + fn(...)，槽位 ${rec.slot} = ${halvingParam} 按 floor(x/2) 收敛，其余参数原样透传）`,
     };
   }
 
   if (info.params.length === 2 && rec.slot > 0 && body.includes('*') && args.length >= 2) {
     // 负指数/非整数指数不在二进制快速幂的等价域内（floor 负数会停滞），必须拒绝合成（#13c）
-    if (!Number.isInteger(args[1]) || args[1] < 0) return null;
+    if (!Number.isInteger(args[1]) || args[1] < 0) return { code: null, reject: 'exponent' };
     const [p0, p1] = info.params;
     return {
-      shape: 'fastpow',
-      label: `快速幂折半（槽位 ${rec.slot} = ${p1} 按 floor/2 收敛，函数体含乘法）`,
       code:
         `// Stage-2: 折半递归等价展开为迭代二进制快速幂，O(1) 栈空间\n` +
         `function ${info.name}Iter(${p0}, ${p1}) {\n` +
@@ -616,10 +736,12 @@ function synthesizeHalvingLowering(
         `  console.log("${info.name}Iter(" + ${p0} + ", " + ${p1} + ") =", result);\n` +
         `  return result;\n}\n` +
         `${info.name}Iter(${args[0]}, ${args[1]});`,
+      shape: 'fastpow',
+      label: `快速幂折半（槽位 ${rec.slot} = ${p1} 按 floor/2 收敛，函数体含乘法）`,
     };
   }
 
-  return null;
+  return { code: null, reject: 'composition' };
 }
 
 /** 迭代侧折半取证：任意数值变量在其帧序列上按 floor(v/2) 收敛。 */
@@ -752,15 +874,22 @@ export async function runAIDiagnostics(
       ? metrics.topCallExpr.slice(metrics.topCallExpr.indexOf('(') + 1, metrics.topCallExpr.lastIndexOf(')'))
       : '';
     // 顶层实参按槽位解析（保留小数，便于负指数/非整数指数的门控判断）
-    const callArgs = splitTopLevelArgs(callArgStr).map((t) => (/^-?\d+(?:\.\d+)?$/.test(t) ? Number(t) : NaN));
-    const lowering = stageInfo ? synthesizeHalvingLowering(stageInfo, halvingRec, callArgs) : null;
+    const callTokens = splitTopLevelArgs(callArgStr);
+    const callArgs = callTokens.map((t) => (/^-?\d+(?:\.\d+)?$/.test(t) ? Number(t) : NaN));
+    const sourceArgs = stageInfo ? extractTopLevelCallArgs(sourceCode, stageInfo.name, stageInfo.end) : null;
+    const synthesis = stageInfo
+      ? synthesizeHalvingLowering(stageInfo, halvingRec, callArgs, callTokens, sourceArgs)
+      : null;
+    const lowering = synthesis?.code
+      ? { code: synthesis.code, shape: synthesis.shape || 'count', label: synthesis.label || '' }
+      : null;
+    const reject = synthesis?.reject;
     const expArg = halvingRec.slot > 0 ? callArgs[halvingRec.slot] : undefined;
-    const exponentRejected =
-      !lowering &&
-      !!stageInfo &&
-      stageInfo.params.length === 2 &&
-      halvingRec.slot > 0 &&
-      (expArg === undefined || !Number.isInteger(expArg) || expArg < 0);
+    const exponentRejected = reject === 'exponent';
+    const coupledRejected = reject === 'coupled';
+    const chainNote = halvingRec.interleaved
+      ? `（${halvingRec.steps} 步中 ${halvingRec.halvingSteps} 步折半，奇数步为减一交替）`
+      : `（连续 ${halvingRec.steps} 步满足 floor(a/2)）`;
     const slotLabel = stageInfo?.params[halvingRec.slot]
       ? `槽位 ${halvingRec.slot}（${stageInfo.params[halvingRec.slot]}）`
       : `槽位 ${halvingRec.slot}`;
@@ -768,13 +897,13 @@ export async function runAIDiagnostics(
       ...metrics,
       timeComplexity: 'O(log n) Logarithmic Recursion',
       spaceComplexity: `O(log n) Call Stack Depth ${metrics.maxStackDepth}`,
-      summary: `调用栈实参链取证：${slotLabel} 的收敛链 ${halvingRec.chain.join(' → ')}（连续 ${halvingRec.steps} 步满足 floor(a/2)），每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销。${lowering ? `已按「${lowering.label}」生成等价的 O(1) 栈迭代形态。` : exponentRejected ? `指数实参为 ${String(expArg)}（非负整数之外），不在二进制快速幂的等价域内，按不变量 #13c 保留原递归。` : '因返回值含自定义非线性组合，无法机械推导等价迭代形态，按不变量 #13c 保留原递归以保证语义等价。'}`,
+      summary: `调用栈实参链取证：${slotLabel} 的收敛链 ${halvingRec.chain.join(' → ')}${chainNote}，每层只派生 1 个子问题并把规模折半，属对数级下潜而非线性递归。峰值栈深 ${metrics.maxStackDepth} 层，虽未触发熔断但仍有 O(log n) 栈帧开销。${lowering ? `已按「${lowering.label}」生成等价的 O(1) 栈迭代形态。` : exponentRejected ? `指数实参为 ${String(expArg)}（非负整数之外），不在二进制快速幂的等价域内，按不变量 #13c 保留原递归。` : coupledRejected ? '递归自调用对非折半参数做了改写（未原样透传），无法机械推导等价循环，按不变量 #13c 保留原递归。' : '因返回值含自定义非线性组合，无法机械推导等价迭代形态，按不变量 #13c 保留原递归以保证语义等价。'}`,
       frameInsights: [
         {
           frameIndex: metrics.bottleneckFrameIndex,
           line: metrics.hotspotLine,
-          tag: 'LOGARITHMIC_DESCENT',
-          issue: `${slotLabel} 的实参链 ${halvingRec.chain.join(' → ')} 按 floor(a/2) 收敛，每层无分支展开`,
+          tag: halvingRec.interleaved ? 'INTERLEAVED_DESCENT' : 'LOGARITHMIC_DESCENT',
+          issue: `${slotLabel} 的实参链 ${halvingRec.chain.join(' → ')}${chainNote}，每层无分支展开`,
         },
         lowering
           ? {
@@ -789,7 +918,9 @@ export async function runAIDiagnostics(
               tag: 'SEMANTICS_PRESERVED',
               issue: exponentRejected
                 ? `指数实参 ${String(expArg)} 不在非负整数域内，拒绝生成快速幂迭代版本`
-                : '返回值组合形状未命中计数/快速幂模板，保留原递归、不生成猜测性代码',
+                : coupledRejected
+                  ? '递归自调用未原样透传非折半参数（coupled multi-parameter state），拒绝生成猜测性代码'
+                  : '返回值组合形状未命中计数/快速幂模板，保留原递归、不生成猜测性代码',
             },
       ],
       optimizedCode: lowering ? lowering.code : sourceCode,
@@ -797,7 +928,9 @@ export async function runAIDiagnostics(
         ? `Stack: ${metrics.maxStackDepth} -> O(1) iteration (${lowering.shape}) | Θ(log n) steps preserved`
         : exponentRejected
           ? `Logarithmic recursion detected | negative/non-integer exponent (${String(expArg)}) → source preserved`
-          : `Logarithmic recursion detected | custom return composition → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`,
+          : coupledRejected
+            ? `Logarithmic recursion detected | coupled multi-parameter state → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`
+            : `Logarithmic recursion detected | custom return composition → source preserved (${slotLabel} chain ${halvingRec.chain.join('→')})`,
     };
   }
 

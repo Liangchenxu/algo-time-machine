@@ -58,12 +58,19 @@ interface StageSnapshot {
   stageIndex: number;
   label: string;
   sourceCode: string;
+  /** 活跃或轻量阶段的完整帧；背景重轨迹（> LAZY_FRAME_THRESHOLD）退场时置空以释放堆内存 */
   frames: TraceFrame[];
+  /** 帧总数与 frames 解耦：惰性驱逐后横幅/胶囊仍能报告真实轨迹规模 */
+  frameCount: number;
+  kind: 'normal' | 'draft';
   execTimeMs: number;
   sandboxError?: string;
   aiReport: AIDiagnosticReport;
   metrics: BaselineMetrics;
 }
+
+/** 超过该帧数的阶段退居后台时只保留元数据，点击胶囊再按源码重水化（Re-hydrate） */
+const LAZY_FRAME_THRESHOLD = 250;
 
 const PRESETS: PresetItem[] = [
   {
@@ -847,7 +854,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M12',
-    commit: '本次提交',
+    commit: 'cc324f1',
     doc: 'docs/devlogs/M12-stage-history-stack-and-mixed-args.md',
     title: '多阶段全息快照栈、混合实参折半、指数门控与 Fast Power 预设',
     why: 'M11 的 A/B 只有两侧且只换轨迹不换报告：二级火箭之后回不到 Stage-0，切到基线时右侧判据仍描述优化版；折半识别要求实参全是数字，数组/字符串参数会整次丢弃；快速幂合成没有拒绝负指数与非整数指数；负指数递归熔断后还会被误判成指数级并推荐救不了的记忆化。',
@@ -871,6 +878,36 @@ const DEVLOGS: DevlogEntry[] = [
       '第 7 预设：Stage-0 13 帧 O(log n) Logarithmic Recursion（槽位 1 exp 16→8→4→2→1）；Apply 后 powerIter(2, 16) = 65536、22 帧、O(log n) Iterative Halving。',
       '指数门控：power(2, 16.5) 仍判对数级但 Apply 隐藏，收益文案 negative/non-integer exponent (16.5) → source preserved；power(2, -4) 熔断后判 O(∞) Unbounded Recursion / Stack Depth 150 (fused)，标签 GUARD_TRAP + ARG_CYCLE，Apply 隐藏。',
       '回归：depth(400) 仍为 O(n) Linear Recursion / Stack Depth 150 且 Apply 可见；Rain 40、Binary 10、FastPower 13 帧判据不变；切换预设后 Stage 胶囊消失；顶栏 44px / scrollWidth == clientWidth == 770。',
+    ],
+  },
+  {
+    tag: 'M13',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M13-passthrough-halving-and-draft-guard.md',
+    title: '透传多参折半合成、奇偶交替快速幂、大轨迹惰性快照与编辑防丢守卫',
+    why: 'M12 留下四条尾巴：bsearchHalve("arr", 32) 判对了却因 tag 参数被拒绝合成且文案写错原因；powerAlt 的 15→14→7→6→3→2→1 奇偶交替链识别不到；stageHistory 把整条 frames 常驻内存，长轨迹多级重构占用堆；手改代码后切换阶段会被快照源码静默覆盖。',
+    what: [
+      'aiDiagnostics.ts：形态 A 放宽为「多参 + 透传门」——非折半槽位必须在每个自调用中原样透传，否则拒绝；合成保留原函数签名，并新增 extractTopLevelCallArgs 从源码函数体之后取真实实参字面量，生成 bsearchHalveIter("arr", 32)。',
+      'aiDiagnostics.ts：拒绝原因分型为 coupled / composition / exponent，分别输出 coupled multi-parameter state / custom return composition / negative/non-integer exponent → source preserved。',
+      'aiDiagnostics.ts：detectHalvingArgs 兼容 floor(a/2) 与「奇数减一」交替步进，要求首值 ≥8、总步数 ≥2、折半步占比 ≥50%；交替链标 INTERLEAVED_DESCENT，且计数形态拒绝合成、只允许快速幂等价展开。',
+      'App.tsx：LAZY_FRAME_THRESHOLD = 250，StageSnapshot 增加 frameCount 与 kind；非激活大轨迹释放 frames 只留元数据，胶囊显示 LAZY，点击后 runInSandbox 重水化且不重算诊断（hydrateTokenRef 丢弃过期结果）。',
+      'App.tsx：dirtyEdit 守卫——横幅显示 UNSAVED EDIT DRAFT 并隐藏 Apply；Compile & Trace 以手改代码为全新基准清空历史；切阶段前把脏代码真实跑成 Draft 临时阶段，保证源码/帧/报告同源且可无损找回。',
+    ],
+    conflicts: [
+      '「多参数」不等于「状态耦合」：若自调用是 fn(tag + 1, n/2)，忽略 tag 就改变了语义。最终用非折半槽位原样透传门区分，bsearchHalve 可合成、bsearchCoupled 明确拒绝。',
+      'M11 的计数前缀匹配会误收 return 1 + fn(...) + tag；M13 改为整句匹配到分号，组合式落到 custom return composition，不再进入计数模板。',
+      '运行时签名会丢掉字符串引号（bsearchHalve(arr,32)），直接回填会生成未定义的 arr；必须回溯源码顶层调用字面量，实测生成 bsearchHalveIter("arr", 32) 并输出 steps = 5。',
+      '交替链不能套 floor(x/2) 计数循环：15→14→7→6→3→2→1 的真实步数与纯折半不同，计数形态遇到交替链必须拒绝，只有二进制快速幂能等价吸收。',
+      'frames.length 不能同时表示「内存是否持有」与「轨迹规模」：惰性驱逐后必须改用 frameCount，否则胶囊会瞬间显示 0f；重水化也必须只跑沙箱，否则冻结的 aiReport 会被重算。',
+      'fib(8) 实测只有 134 帧，不足以触发 250 阈值；改用 fib(10) 得到 354 帧后才真正观察到 LAZY 驱逐与 <120ms 重水化。',
+    ],
+    impact: [
+      'bsearchHalve("arr", 32)：7 帧、栈深 7，判 O(log n) Logarithmic Recursion，Apply 可见；生成 bsearchHalveIter("arr", 32)，终端 steps = 5；Apply 后 20 帧 O(log n) Iterative Halving、STACK REDUCTION -71.4% / PEAK STACK 7 → 2。',
+      'powerAlt(2, 15)：链 15 → 14 → 7 → 6 → 3 → 2 → 1（6 步中 3 步折半）、9 帧、栈深 9，标 INTERLEAVED_DESCENT；Apply 后 powerAltIter(2, 15) = 32768、22 帧、STACK REDUCTION -77.8% / PEAK STACK 9 → 2。',
+      '拒绝文案：bsearchCoupled(tag + 1) → coupled multi-parameter state；weirdHalve2（1 + fn(...) + n）→ custom return composition；power(2, 16.5) → negative/non-integer exponent；三者 Apply 均隐藏。',
+      '惰性快照：自定义 fib(10) Stage-0 354 帧 / Stage-1 80 帧；切到 Stage 1 后胶囊 Stage 0 (354f · LAZY)；点回后 <120ms 恢复 354 帧、INSPECTING STAGE 0 BASELINE 出现、判据仍为 O(2^n)。',
+      '编辑守卫：编辑 Stage 1 后出现 UNSAVED EDIT DRAFT；点 Stage 0 自动冻结 Draft 2 (22f) 并恢复 Stage 0；点 Draft 2 手改源码与 22 帧完整回来；Compile & Trace 在脏编辑下清空历史、以手改代码重开 Stage 0。',
+      '回归：Fast Power 13 → 22 帧且终端 65536；power(2, -4) 仍判 O(∞) Unbounded Recursion / Stack Depth 150；Rain 40 帧 Two-Pointer；fib 31 → 41 → 11 帧零延迟；顶栏 44px / scrollWidth == clientWidth == 770；控制台无 error/warn。',
     ],
   },
 ];
@@ -899,6 +936,10 @@ export default function App() {
   // 多阶段全息快照栈：Stage-0 / Stage-1 / Stage-2 … 各自保存源码、帧、报告与指标
   const [stageHistory, setStageHistory] = useState<StageSnapshot[]>([]);
   const [activeStage, setActiveStage] = useState<number>(0);
+  const [hydratingStage, setHydratingStage] = useState<number | null>(null);
+  const [savingDraft, setSavingDraft] = useState<boolean>(false);
+  // 每次切换/重跑都推进令牌，丢弃过期的重水化结果，避免异步写回覆盖当前轨迹
+  const hydrateTokenRef = useRef(0);
 
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
@@ -1114,6 +1155,9 @@ export default function App() {
     setEditMode(false);
     setStageHistory([]);
     setActiveStage(0);
+    setHydratingStage(null);
+    setSavingDraft(false);
+    hydrateTokenRef.current++;
     setBreakpoints(new Set<number>());
     executeCode(preset.code);
   };
@@ -1132,7 +1176,8 @@ export default function App() {
     trace: TraceFrame[],
     latency: number,
     err: string | undefined,
-    report: AIDiagnosticReport
+    report: AIDiagnosticReport,
+    kind: 'normal' | 'draft' = 'normal'
   ): StageSnapshot => {
     const m = analyzeTraceMetrics(trace);
     return {
@@ -1140,6 +1185,8 @@ export default function App() {
       label,
       sourceCode: code,
       frames: trace,
+      frameCount: trace.length,
+      kind,
       execTimeMs: latency,
       sandboxError: err,
       aiReport: report,
@@ -1155,10 +1202,26 @@ export default function App() {
     };
   };
 
+  /** 非激活的大轨迹阶段释放帧数组，只留源码/报告/指标；frameCount 保证横幅数字不变 */
+  const evictBackgroundFrames = (history: StageSnapshot[], activeIndex: number): StageSnapshot[] =>
+    history.map((s) =>
+      s.stageIndex !== activeIndex && s.frames.length > LAZY_FRAME_THRESHOLD
+        ? { ...s, frames: [] }
+        : s
+    );
+
+  const activeSnapshot = stageHistory[activeStage];
+  const dirtyEdit =
+    stageHistory.length > 0 &&
+    !!activeSnapshot &&
+    sourceCode !== activeSnapshot.sourceCode;
+
   const handleApplyOptimized = async () => {
-    if (!aiReport?.optimizedCode) return;
+    if (!aiReport?.optimizedCode || dirtyEdit || savingDraft) return;
     // 历史分支上不允许继续分叉：只有停在最新阶段才能再 Apply
     if (stageHistory.length > 0 && activeStage !== stageHistory.length - 1) return;
+    hydrateTokenRef.current++;
+    setHydratingStage(null);
 
     // 首次 Apply 时把当前 Stage-0 的完整状态（含 aiReport 与 frames）冻结进历史
     const history = stageHistory.length
@@ -1180,22 +1243,85 @@ export default function App() {
       after.error,
       after.report
     );
-    setStageHistory([...history, snapshot]);
+    setStageHistory(evictBackgroundFrames([...history, snapshot], nextIndex));
     setActiveStage(nextIndex);
   };
 
-  // 零延迟全息切换：直接同步恢复该阶段的源码、帧、错误与该阶段的 aiReport，不重跑沙箱
-  const restoreStage = (index: number) => {
-    const snap = stageHistory[index];
-    if (!snap) return;
-    setActiveStage(index);
+  // 零延迟全息切换：轻量快照直接同步恢复；背景重轨迹（>250 帧）按源码重水化帧序列
+  const applySnapshot = async (snap: StageSnapshot) => {
+    const token = ++hydrateTokenRef.current;
+    setActiveStage(snap.stageIndex);
     setSourceCode(snap.sourceCode);
-    setFrames(snap.frames);
-    setCurrentFrameIdx(0);
-    setIsPlaying(false);
     setSandboxError(snap.sandboxError);
     setExecTimeMs(snap.execTimeMs);
     setAiReport(snap.aiReport);
+    setCurrentFrameIdx(0);
+    setIsPlaying(false);
+    setEditMode(false);
+    setStageHistory((prev) => evictBackgroundFrames(prev, snap.stageIndex));
+
+    if (snap.frames.length === 0 && snap.frameCount > 0) {
+      setFrames([]);
+      setHydratingStage(snap.stageIndex);
+      const res = await runInSandbox(snap.sourceCode);
+      if (hydrateTokenRef.current !== token) return;
+      const restored = res.frames || [];
+      setFrames(restored);
+      setHydratingStage(null);
+      setStageHistory((prev) =>
+        prev.map((s) =>
+          s.stageIndex === snap.stageIndex
+            ? { ...s, frames: restored, frameCount: restored.length }
+            : s
+        )
+      );
+    } else {
+      setFrames(snap.frames);
+      setHydratingStage(null);
+    }
+  };
+
+  // 编辑态防丢守卫：切阶段前把用户手改代码真实跑一遍并冻结为临时 Draft 阶段，绝不静默覆盖
+  const handleRestoreStage = async (index: number) => {
+    const snap = stageHistory[index];
+    if (!snap || savingDraft || hydratingStage !== null) return;
+    if (dirtyEdit && activeSnapshot) {
+      const token = ++hydrateTokenRef.current;
+      setSavingDraft(true);
+      const draftIndex = stageHistory.length;
+      const draftRun = await runInSandbox(sourceCode);
+      const draftFrames = draftRun.frames || [];
+      const draftReport = await runAIDiagnostics(sourceCode, draftFrames, draftRun.error, apiKey);
+      if (hydrateTokenRef.current !== token) return;
+      const draftSnap = snapshotOf(
+        draftIndex,
+        `Stage ${draftIndex} · Draft`,
+        sourceCode,
+        draftFrames,
+        draftRun.executionTimeMs,
+        draftRun.error,
+        draftReport,
+        'draft'
+      );
+      const nextHistory = [...stageHistory, draftSnap];
+      setStageHistory(evictBackgroundFrames(nextHistory, index));
+      setSavingDraft(false);
+      await applySnapshot(nextHistory[index]);
+      return;
+    }
+    await applySnapshot(snap);
+  };
+
+  // 显式重跑手改代码 = 以它为全新基准：历史栈归零，草稿本身成为新的 Stage 0
+  const handleCompile = () => {
+    hydrateTokenRef.current++;
+    setHydratingStage(null);
+    setSavingDraft(false);
+    if (dirtyEdit) {
+      setStageHistory([]);
+      setActiveStage(0);
+    }
+    executeCode(sourceCode);
   };
 
   const atLatestStage = stageHistory.length === 0 || activeStage === stageHistory.length - 1;
@@ -1506,7 +1632,7 @@ export default function App() {
           </div>
 
           <button
-            onClick={() => executeCode(sourceCode)}
+            onClick={handleCompile}
             className="px-2.5 py-1 shrink-0 whitespace-nowrap rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold text-[11px] flex items-center gap-1.5 transition shadow-sm"
           >
             <Zap className="w-3 h-3 fill-current" />
@@ -2401,7 +2527,7 @@ export default function App() {
                   </button>
                 )}
 
-                {aiReport && aiReport.optimizedCode !== sourceCode && atLatestStage && (
+                {aiReport && aiReport.optimizedCode !== sourceCode && atLatestStage && !dirtyEdit && !savingDraft && hydratingStage === null && (
                   <button
                     onClick={handleApplyOptimized}
                     className="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-[11px] flex items-center gap-1 transition shadow-sm shrink-0 whitespace-nowrap"
@@ -2430,20 +2556,45 @@ export default function App() {
                 ))}
                 {stageHistory.length > 1 && (
                   <div className="ml-auto flex items-center gap-1 shrink-0">
-                    {stageHistory.map((s) => (
-                      <button
-                        key={s.stageIndex}
-                        onClick={() => restoreStage(s.stageIndex)}
-                        title={`${s.label} · ${s.metrics.timeComplexity} · ${s.frames.length} frames — full snapshot (source + frames + AI report + sandbox error)`}
-                        className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] font-mono transition ${
-                          s.stageIndex === activeStage
-                            ? 'border-emerald-300/80 bg-emerald-400/25 text-emerald-50 shadow-glow'
-                            : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200/80 hover:bg-emerald-500/20'
-                        }`}
+                    {dirtyEdit && (
+                      <span
+                        className="whitespace-nowrap rounded border border-amber-400/60 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-amber-200"
+                        title="The editor differs from the active stage snapshot. Compile & Trace resets history from your draft; switching stages freezes the draft as a real Draft stage first."
                       >
-                        Stage {s.stageIndex} ({s.frames.length}f)
-                      </button>
-                    ))}
+                        {savingDraft ? 'SAVING DRAFT...' : 'UNSAVED EDIT DRAFT'}
+                      </span>
+                    )}
+                    {hydratingStage !== null && (
+                      <span className="whitespace-nowrap rounded border border-sky-400/60 bg-sky-500/20 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-sky-200">
+                        RE-HYDRATING STAGE {hydratingStage} ({LAZY_FRAME_THRESHOLD}+ frames)
+                      </span>
+                    )}
+                    {stageHistory.map((s) => {
+                      const evicted = s.frames.length === 0 && s.frameCount > 0;
+                      const isDraft = s.kind === 'draft';
+                      return (
+                        <button
+                          key={s.stageIndex}
+                          onClick={() => handleRestoreStage(s.stageIndex)}
+                          disabled={savingDraft || hydratingStage !== null}
+                          title={`${s.label} · ${s.metrics.timeComplexity} · ${s.frameCount} frames — ${
+                            evicted
+                              ? `background frames evicted (lazy re-hydration on click, threshold ${LAZY_FRAME_THRESHOLD})`
+                              : 'full snapshot (source + frames + AI report + sandbox error)'
+                          }`}
+                          className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] font-mono transition ${
+                            s.stageIndex === activeStage
+                              ? 'border-emerald-300/80 bg-emerald-400/25 text-emerald-50 shadow-glow'
+                              : isDraft
+                                ? 'border-amber-500/50 bg-amber-500/15 text-amber-200/90 hover:bg-amber-500/25'
+                                : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200/80 hover:bg-emerald-500/20'
+                          } ${savingDraft || hydratingStage !== null ? 'opacity-60 cursor-wait' : ''}`}
+                        >
+                          {isDraft ? 'Draft' : 'Stage'} {s.stageIndex} ({s.frameCount}f
+                          {evicted ? ' · LAZY' : ''})
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -2781,6 +2932,32 @@ export default function App() {
                       <br />• M12: multi-stage holographic snapshot stack (Stage 0/1/2 with reports
                       restored in one click), mixed-argument slot halving, exponent legality gate, and the
                       Fast Power preset.
+                      <br />• M13: passthrough multi-parameter halving synthesis, odd/even interleaved
+                      fast-power detection, lazy frame eviction with sandbox re-hydration for 250+ frame
+                      snapshots, and a dirty-edit guard that freezes hand-edited code as a Draft stage
+                      instead of silently discarding it.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-violet-400 font-semibold">13. Passthrough Halving, Lazy Snapshots &amp; Draft Guard (M13)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Count-form halving now accepts multiple parameters when every non-halving slot is
+                      passed through unchanged in each self-call, so bsearchHalve(tag, n) lowers to a
+                      cursor loop while keeping its signature and the original call literals. Refusals are
+                      typed: coupled multi-parameter state, custom return composition and
+                      negative/non-integer exponent no longer share one misleading sentence.
+                      <br />• Argument chains may alternate floor(a/2) with an odd n - 1 step (at least 50%
+                      halving), which recognises the classic 15 → 14 → 7 → 6 → 3 → 2 → 1 fast power; only
+                      binary exponentiation may lower that shape, because a floor-halving counter would
+                      undercount it.
+                      <br />• Snapshots above 250 frames are evicted from inactive stages while frameCount,
+                      source, report and metrics stay frozen; clicking the LAZY capsule re-hydrates frames
+                      through the sandbox without re-running diagnostics. Snapshots at or below the
+                      threshold still switch in 0ms.
+                      <br />• When the editor differs from the active stage snapshot, an UNSAVED EDIT DRAFT
+                      chip appears and Apply is hidden. Compile &amp; Trace restarts history from the hand
+                      edit; switching stages first traces the draft and freezes it as a real Draft stage, so
+                      edits are never silently overwritten.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
