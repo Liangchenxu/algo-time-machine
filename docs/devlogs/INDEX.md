@@ -21,7 +21,8 @@
 | M11 | `564e022` | [M11-positional-halving-and-ab-toggle.md](./M11-positional-halving-and-ab-toggle.md) | 多参槽位折半与快速幂等价合成、突变熵 Watch 排序、Benchmark 横幅一键 A/B 轨迹切换 |
 | M12 | `cc324f1` | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
 | M13 | `b129f95` | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
-| M14 | 本次提交 | [M14-byte-budget-and-kernel-selftest.md](./M14-byte-budget-and-kernel-selftest.md) | 双维度惰性预算、非确定性重水化漂移守卫、广义小步交错折半与 6 项内核实时自检台 |
+| M14 | `a34b16c` | [M14-byte-budget-and-kernel-selftest.md](./M14-byte-budget-and-kernel-selftest.md) | 双维度惰性预算、非确定性重水化漂移守卫、广义小步交错折半与 6 项内核实时自检台 |
+| M15 | 本次提交 | [M15-automated-judge-tour-and-whitepaper.md](./M15-automated-judge-tour-and-whitepaper.md) | 评委五幕自动路演导览（可中断真实内核驱动）、WebCrypto 非确定性守卫与工程白皮书 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -199,12 +200,30 @@
     （TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读写分离 / 窄视口可达性），
     每项显示 PASS 或 FAIL 与实测耗时；夹具不得依赖 Worker、网络或 API Key。
     自检是「当前内核活体证据」，任何一项 FAIL 都必须显式展示，不得吞掉或降级成提示。
+21. **评委自动导览可中断性与窄视口零溢出契约**（M15 确立）：
+    （a）**导览必须驱动真实内核**：五幕只允许调用「最新一次渲染」的 handler
+    （`handleSelectPreset` / `handleApplyOptimized` / `adoptWatchExpr` / `seekNextTrue` / `runKernelSelfCheck`
+    经 `liveActionsRef` 每帧刷新），严禁预录动画或假数据；
+    异步串联中直接使用旧闭包会把上一个预设的源码冻结成 Stage 0，属于必须避免的正确性事故。
+    （b）**幕间等待必须是运行条件 + 可取消驻留**：完成判据只能取真实信号
+    （帧数阈值、`isAnalyzing` 归位、`stageHistory.length`、自检结果**对象引用变化**），
+    `tourHold` 驻留必须被 `Skip Next`、`Stop Tour` 与字幕条外的任意 `pointerdown` 立即结束
+    （`closest('[data-tour-bar]')` 是字幕条自身的豁免，否则 Skip 按钮会被全局中断监听吃掉），
+    中断后控制权与当前轨迹原样交还评委。
+    （c）**顶栏预算不得松动**：新增 `Tour` 按钮后 770 宽度仍要求 `header 44px` 且
+    `scrollWidth == clientWidth == 770`；运行态文案 `Stop Tour (Act X/5)` 允许**只**隐藏装饰性
+    `AST-IR v2.4 · WORKER SANDBOX` 徽章来腾出宽度，可压缩区仍只允许预设切换器（#12a / #12b 不变）。
+    （d）**不变量条数必须单一来源**：自检页签与导览第五幕标题的条数取自 `KERNEL_INVARIANT_COUNT`，
+    必须等于本文件不变量登记条数（当前 21）；写死数字随里程碑过期视为文档缺陷。
+    （e）**非确定性源清单只增不减**：`hasNonDeterministicCalls` 现覆盖 `Math.random(` / `Date.now(` /
+    `performance.now(` / `new Date` / `crypto.getRandomValues(` / `crypto.randomUUID(`；
+    新增宿主随机/时间源必须同步扩充正则、#20b 契约与本表。豁免驱逐（≤600 帧）与漂移芯片语义对全部来源一致生效。
 
-## 当前实测基线（M14 复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M15 复测，视口 770×553，`npm run build` 零 TS 报错）
 
-> M14 轮在 770×553 同源 iframe 测试台复测了 Rain / Fast Power / fib / bsearchHalve / 广义交错 /
-> `fib(8)+大数组` 字节驱逐 / `fib(5)+Math.random` 豁免 / `fib(12)+Math.random` 漂移 / Draft 时延 / 6 项自检；
-> 其余预设（DP、Binary、Comb、死循环、`depth(400)`、`fact(6)`）沿用 M12/M13 实测值，未在本轮重跑。
+> M15 轮在 770×553 同源 iframe 测试台跑完五幕导览，并逐预设复测 Rain / DP / Binary / Fast Power / fib /
+> Comb / 死循环，以及 `crypto.getRandomValues` 豁免与 `crypto.randomUUID` 漂移；
+> 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`）沿用 M12–M14 实测值，未在本轮重跑。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -286,6 +305,16 @@
 | Draft 瞬时冻结（M14） | fib Stage 0/1/2 后编辑 Stage 2，点 Stage 0 → Draft 3 冻结；MutationObserver 实测点击到胶囊 DOM 提交 **22.6ms**（<30ms），Stage 0 恢复 31 帧、脏标记消失 |
 | 内核自检（M14） | Spec 第 3 页签 `Live Kernel Self-Check (20 Invariants)` 在 770×553 实测 **6/6 PASS**：TDZ 13.5ms / Fuse 0.9ms / Recursion 0.6ms / Halving 0.6ms / Matrix 0.0ms / Viewport 0.9ms（`header 770px / 770px · viewport 770x553`） |
 | 回归（M14） | Fast Power 13 → 22 帧、终端 `65536`；Rain 40 帧 Two-Pointer；bsearchHalve 7 → 20 帧、`steps = 5`；顶栏 44px 且 `scrollWidth == clientWidth == 770`；控制台无 error/warn |
+| 导览全程（M15） | 点击 `Tour` → 字幕条 `ACT 1/5`…`ACT 5/5`，实测 total **17.6s** 完成并定格 `TOUR COMPLETE · total 17.6s`；运行态按钮文案 `Stop Tour (Act 1/5)` |
+| ACT 1 熔断现场（M15） | 自动切 `infinite-loop`：400ms 时熔断横幅显示 `Pre-crash trace preserved (1334 frames)`，800ms 游标跳到 `FRAME 1333 / 1334` 且判据归位 `O(∞) Non-Terminating`，持续展示至 3.6s 后交棒 ACT 2 |
+| ACT 2 三级火箭（M15） | 自动切 `fib-tree`：31 帧 Stage-0 → Apply → 41 帧 `O(n) Memoized Linear`（`SUBTREE PRUNING` 在位、胶囊数 2）→ Apply → 11 帧 `O(n) Linear Iterative Scan`（胶囊数 3） |
+| ACT 3 跨维转场（M15） | 自动切 `pascal-comb` 并推进两次 Apply 至 17 帧，跳第 7 帧：`2D Matrix: dp [5×3]` + `Cursor [3][1]` + `WRITES: 5`，判据 `O(M * N) Matrix DP` |
+| ACT 4 观察点（M15） | 自动采纳 `dp[4][2] === 6` 并触发 `→T`：瞬移到 `FRAME 15 / 17`、徽章 `→ #15`、断言 `TRUE`、`Cursor [4][2]` |
+| ACT 5 自检（M15） | 自动打开 Spec 第 3 页签并跑完 **6/6 PASS**，导览结束后顶栏仍 44px 且 `scrollWidth == clientWidth == 770` |
+| 导览中断（M15） | `Stop Tour (Act 1/5)` 点击后：字幕条消失、按钮回到 `Tour`、`AST-IR v2.4` 徽章恢复、`FRAME 1333 / 1334` 现场保留；页面任意处 `pointerdown` 同样立即中断；`Skip Next →` 从 ACT 1 直进 ACT 2 且导览不退出 |
+| WebCrypto 豁免（M15） | `crypto.getRandomValues` 版 `fib(5)+6000 数组`：33 帧 / `~1073 KB`（>180KB）仍**不驱逐**，tooltip `full snapshot` |
+| WebCrypto 漂移（M15） | `crypto.randomUUID` 版 `fib(12)`：931 帧 `Stage 0 (931f · LAZY)` → 点回 477ms 恢复 931 帧，出现 `NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)`，报告保持冻结 `O(2^n)` |
+| 预设复测（M15） | Rain 40 帧 Two-Pointer（Apply 退场）、DP 29 帧 `O(M*N) Matrix DP`、Binary 10 帧 `O(log n) Logarithmic Halving`、Fast Power 13 → 22 帧且终端 `65536` |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -354,10 +383,13 @@
 - [x] 重水化会真实重跑源码：含 `Math.random` / `Date.now()` 时帧内容可能与冻结指标漂移（M13 报备 → **M14 闭合**：≤600 帧非确定性全量保留；超限重水化显示 `NON-DETERMINISTIC RE-HYDRATION` 并只更新 frameCount，冻结报告不变）
 - [x] 交替折半只识别 `floor(a/2)` 与奇数 `-1`，其它小步变体断链（M13 报备 → **M14 闭合**：严格递减且每步 `a[k]-a[k+1] <= 2` 均计入，实测 `18→9→7→3→2→1` 命中并标 `INTERLEAVED_DESCENT`；递增/大步跳跃仍拒绝）
 - [x] Draft 冻结需一次沙箱 + 380ms 人工诊断延迟（M13 报备 → **M14 闭合**：`runAIDiagnostics` 新增 `skipDelay`，脏编辑切阶段实测 DOM 提交 22.6ms）
+- [x] 非确定性检测是源码正则，无法识别 `crypto.getRandomValues` 或经 helper 间接调用的时间源（M14 报备 → **M15 闭合**：正则补入 `crypto.getRandomValues(` / `crypto.randomUUID(`，实测 `crypto.getRandomValues` 版 33 帧 / ~1073KB 豁免驱逐、`crypto.randomUUID` 版 931 帧重水化显示漂移芯片；经 helper 间接调用仍属开放项）
 - [ ] 字节预算是抽样估算（中段/末帧变量的 1.15 倍外推），不是真实堆占用；极端异构帧可能高估或低估（M14 新遗留）
-- [ ] 非确定性检测是源码正则，无法识别 `crypto.getRandomValues` 或经 helper 间接调用的时间源（M14 新遗留）
 - [ ] 重水化成本随帧数增长：931 帧非确定性快照实测约 1.7s（含渲染与轮询），期间仅显示 `RE-HYDRATING` 提示（M14 新遗留）
 - [ ] Live Kernel Self-Check 使用合成帧夹具，覆盖内核判据但不替代全预设浏览器回归（M14 新遗留）
+- [ ] 五幕导览只深度演示 infinite-loop / fib-tree / pascal-comb 三个预设，DP 滚动压缩、Fast Power、Rain 双指针等壁垒仍需手动或按 README 指南查看（M15 新遗留）
+- [ ] 幕间切换后判据芯片最多滞后约 380ms（本地引擎节流）；导览用条件等待规避，但视觉上仍可能出现一帧「新轨迹 + 旧结论」的空档（M15 新遗留）
+- [ ] 导览被中断后不自动续演（控制权彻底交还），需要重新点击 Tour 从 ACT 1 开始（M15 新遗留）
 
 ## 全仓 emoji 扫描基线（可复现）
 

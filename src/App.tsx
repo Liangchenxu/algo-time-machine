@@ -22,6 +22,7 @@ import {
   CircleDot,
   Pin,
   Sigma,
+  Square,
   X,
 } from 'lucide-react';
 import { runInSandbox } from './core/sandboxRunner';
@@ -78,9 +79,11 @@ const LAZY_BYTE_BUDGET = 180_000;
 /** 非确定性源码在 600 帧内豁免驱逐：优先保证历史重放 100% 一致 */
 const NONDETERMINISTIC_KEEP_FRAMES = 600;
 
-/** 轻量纯函数：识别会在重跑时产生不同轨迹的宿主调用 */
+/** 轻量纯函数：识别会在重跑时产生不同轨迹的宿主调用（含 Web Crypto 随机源） */
 const hasNonDeterministicCalls = (code: string) =>
-  /\bMath\s*\.\s*random\s*\(|\bDate\s*\.\s*now\s*\(|\bperformance\s*\.\s*now\s*\(|\bnew\s+Date\b/.test(code);
+  /\bMath\s*\.\s*random\s*\(|\bDate\s*\.\s*now\s*\(|\bperformance\s*\.\s*now\s*\(|\bnew\s+Date\b|\bcrypto\s*\.\s*getRandomValues\s*\(|\bcrypto\s*\.\s*randomUUID\s*\(/.test(
+    code
+  );
 
 /** 抽样中段帧与末帧的变量负载，按帧数放大，避免逐帧序列化（O(1) 抽样） */
 const estimateSnapshotBytes = (trace: TraceFrame[]): number => {
@@ -120,6 +123,35 @@ const buildSelfCheckFrame = (
   stdout: [],
   lineHits: { 1: frameIndex + 1 },
 });
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
+const KERNEL_INVARIANT_COUNT = 21;
+
+/** 评委导览的五幕脚本：每一幕都驱动真实内核，不做假动画 */
+const TOUR_ACTS: { title: string; note: string }[] = [
+  {
+    title: 'Three-Tier Safety Fuse & Crash Recovery',
+    note: '2000-step guard + globalThis.__mtmFrames preserves the pre-crash trace',
+  },
+  {
+    title: 'Three-Stage Recursion Lowering',
+    note: 'DUP subtree -> HIT memo pruning -> 1D dp tabulation, Stage 0/1/2 capsules',
+  },
+  {
+    title: 'Cross-Dimensional Lowering',
+    note: 'recursion tree -> 2D Matrix dp crosshair with runtime WRITES badge',
+  },
+  {
+    title: 'Runtime Watchpoint and ->T Four-State Seek',
+    note: 'adopt adaptive dp[][] chip, then jump to the real write frame',
+  },
+  {
+    title: `Live Kernel Self-Check (${KERNEL_INVARIANT_COUNT} Invariants)`,
+    note: '6 deterministic micro-benchmarks executed in this tab',
+  },
+];
 
 const PRESETS: PresetItem[] = [
   {
@@ -961,7 +993,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M14',
-    commit: '本次提交',
+    commit: 'a34b16c',
     doc: 'docs/devlogs/M14-byte-budget-and-kernel-selftest.md',
     title: '双维度惰性预算、非确定性漂移守卫、广义小步交错折半与 6 项内核实时自检台',
     why: 'M13 仍有四条尾巴：惰性只按 250 帧判断，60 帧的大矩阵快照依旧占内存；非确定性源码重水化可能悄悄改变轨迹；交错折半只支持 -1，-2 断链；Draft 冻结还要等 380ms 人工诊断延迟。评委也缺少一个能当场验证内核判据的入口。',
@@ -990,6 +1022,38 @@ const DEVLOGS: DevlogEntry[] = [
       '回归：Fast Power 13 → 22 帧且终端 65536；Rain 40 帧 Two-Pointer；bsearchHalve 7 → 20 帧且 steps = 5；顶栏 44px / scrollWidth == clientWidth == 770；控制台无 error/warn。',
     ],
   },
+  {
+    tag: 'M15',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M15-automated-judge-tour-and-whitepaper.md',
+    title: '评委五幕自动路演导览、WebCrypto 非确定性守卫与工程白皮书',
+    why: '内核能力已到 M14，但验收成本仍压在评委身上：要手动切 7 个预设、连点两次 Apply、再找芯片点 →T 才能看全壁垒；同时 M14 遗留的 crypto 随机源未被非确定性守卫覆盖（会悄悄漂移）；根 README 还是脚手架默认文本，无法说明工程范式。',
+    what: [
+      'App.tsx：顶栏在 Compile & Trace 与 Qoder Engineering Spec 之间新增紧凑 Tour 按钮，运行态换为琥珀色 Stop Tour (Act X/5)；导览期间隐藏装饰性 AST-IR 徽章以守住 770px 单行预算。',
+      'App.tsx：startJudgeTour 五幕状态机由 tourTokenRef 驱动，tourWaitFor 只等真实运行条件（帧数、isAnalyzing、stageHistory 长度、自检结果对象变化），tourHold 支持 Skip Next 与取消立即让位；导览字幕条 data-tour-bar 显示 ACT X/5 + 技术看点 + Skip Next / Exit。',
+      'App.tsx：liveActionsRef 每帧刷新，导览调用的是「最新渲染」的 handleSelectPreset / handleApplyOptimized / adoptWatchExpr / seekNextTrue / runKernelSelfCheck，避免异步串联里的过期闭包把 Stage 冻结错阶段。',
+      'App.tsx：运行期 window pointerdown 捕获阶段监听，除字幕条外的任何点击立即 exitJudgeTour 交还控制权；hasNonDeterministicCalls 补入 crypto.getRandomValues( 与 crypto.randomUUID(。',
+      'README.md：重写为工程白皮书（技术壁垒、架构图与 5 大亮点、Qoder 协同三铁律 + 21 条不变量 + 15 篇日志 + 6 项自检、30 秒验收指南、已知边界）。',
+    ],
+    conflicts: [
+      '导览最初直接复用组件里的 handler，但 await 之后闭包里的 stageHistory / aiReport 仍是导览开始前那一帧：第二次 Apply 会把上一个预设的源码当成 Stage 0 冻结进历史。改为 liveActionsRef 每次渲染重新挂载最新 handler，并用条件等待确认重渲染已完成再执行下一步。',
+      '「点击任意位置即中断」与字幕条按钮冲突：若不排除字幕条，点 Skip Next 会先被全局监听吃掉变成退出。用 closest([data-tour-bar]) 把导览控件划为例外，其余 pointerdown 一律中断。',
+      '770px 顶栏预算：Stop Tour (Act 2/5) 全文案 + Compile + Spec 全称会挤破 44px 单行。做法是导览运行时隐藏装饰徽章 AST-IR v2.4（可压缩区仍只允许预设切换器），实测运行态 header 仍 44px 且 scrollWidth == clientWidth == 770。',
+      '页签标题的不变量条数会随里程碑过期：M14 写死的 20 条在 M15 追加 #21 后就不实。改由 KERNEL_INVARIANT_COUNT 单一来源渲染，导览第五幕标题同步取该常量。',
+      'tourHold 的等待不能是真 sleep 空转：每幕驻留都可被 Skip / 取消立即结束，避免评委想手动接手时还要等完。',
+      'Act 5 的完成判据不能看 selfCheckResults 是否存在（上一轮已有结果），必须比较对象引用是否变化，否则会误判自检已完成。',
+    ],
+    impact: [
+      '导览全程实测 total 17.6s（<25s），逐幕采样到：ACT 1 死循环 1334 帧、游标 FRAME 1333/1334、[FUSE_STEP_LIMIT] 横幅、O(∞) Non-Terminating。',
+      'ACT 2 fib：31 帧 Stage-0 → 41 帧 O(n) Memoized Linear（SUBTREE PRUNING 横幅、胶囊数 2）→ 11 帧 O(n) Linear Iterative Scan（胶囊数 3）。',
+      'ACT 3 comb：13 帧 → 37 帧记忆化 → 17 帧 O(M*N) Matrix DP，跳到第 7 帧显示 2D Matrix: dp [5×3]、Cursor [3][1]、WRITES: 5。',
+      'ACT 4 观察点：自动采纳 dp[4][2] === 6，→T 瞬移到 FRAME 15/17、徽章 → #15、断言翻绿 TRUE、Cursor [4][2]。',
+      'ACT 5 自检：自动打开 Spec 第 3 页签并跑完 6/6 PASS；导览结束后顶栏仍 44px 且 scrollWidth == clientWidth == 770。',
+      '中断语义：Stop Tour 与页面任意处 pointerdown 都能立即结束（字幕条消失、按钮回到 Tour、AST-IR 徽章恢复、FRAME 1333/1334 现场保留可继续操作）；Skip Next 从 ACT 1 直接推进到 ACT 2 且导览不退出。',
+      'crypto 守卫：crypto.getRandomValues 版 fib(5)+6000 数组 33 帧 / ~1073KB（>180KB）仍不驱逐（≤600 豁免）；crypto.randomUUID 版 fib(12) 931 帧重水化后显示 NON-DETERMINISTIC RE-HYDRATION，报告仍为冻结 O(2^n)。',
+      '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)（Apply 退场）、Fast Power 13 → 22 帧且终端 65536；npm run build 零报错、src emoji 扫描 0 命中、16 篇文档表格列数一致、控制台无 error/warn。',
+    ],
+  },
 ];
 
 export default function App() {
@@ -1014,6 +1078,13 @@ export default function App() {
   const [devlogIdx, setDevlogIdx] = useState<number>(0);
   const [selfCheckResults, setSelfCheckResults] = useState<KernelSelfCheckResult[] | null>(null);
   const [selfCheckRunning, setSelfCheckRunning] = useState<boolean>(false);
+
+  // 评委五幕自动导览：tourAct 1..5 运行中，6 表示已完成定格
+  const [tourAct, setTourAct] = useState<number>(0);
+  const [tourRunning, setTourRunning] = useState<boolean>(false);
+  const [tourElapsedMs, setTourElapsedMs] = useState<number>(0);
+  const tourTokenRef = useRef(0);
+  const tourSkipRef = useRef<(() => void) | null>(null);
 
   // 多阶段全息快照栈：Stage-0 / Stage-1 / Stage-2 … 各自保存源码、帧、报告与指标
   const [stageHistory, setStageHistory] = useState<StageSnapshot[]>([]);
@@ -1831,6 +1902,179 @@ export default function App() {
     });
   }, [currentFrameIdx, treeView, treeVisible, treeLayout, activeNodeIds]);
 
+  // 导览必须驱动「最新一次渲染」的 handler，否则 stageHistory / aiReport 会停在过期闭包里
+  const liveActionsRef = useRef({
+    frames: [] as TraceFrame[],
+    stageHistory: [] as StageSnapshot[],
+    selfCheckResults: null as KernelSelfCheckResult[] | null,
+    quickWatches: [] as string[],
+    isAnalyzing: false,
+    selectPreset: (_preset: PresetItem) => {},
+    apply: async () => {},
+    adoptWatch: (_expr: string) => {},
+    seek: (_expr: string) => {},
+    selfCheck: async () => {},
+  });
+  liveActionsRef.current = {
+    frames,
+    stageHistory,
+    selfCheckResults,
+    quickWatches,
+    isAnalyzing,
+    selectPreset: handleSelectPreset,
+    apply: handleApplyOptimized,
+    adoptWatch: adoptWatchExpr,
+    seek: seekNextTrue,
+    selfCheck: runKernelSelfCheck,
+  };
+
+  /** 一幕的驻留时间：Skip 或取消都能立即结束，不做假等待 */
+  const tourHold = (token: number, ms: number) =>
+    new Promise<void>((resolve) => {
+      let settled = false;
+      let timer = 0;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        tourSkipRef.current = null;
+        clearTimeout(timer);
+        resolve();
+      };
+      timer = window.setTimeout(finish, ms);
+      if (tourTokenRef.current !== token) {
+        finish();
+        return;
+      }
+      tourSkipRef.current = finish;
+    });
+
+  const tourWaitFor = async (token: number, cond: () => boolean, timeoutMs: number) => {
+    const t0 = Date.now();
+    while (tourTokenRef.current === token && !cond()) {
+      if (Date.now() - t0 > timeoutMs) return false;
+      await sleepMs(60);
+    }
+    return tourTokenRef.current === token && cond();
+  };
+
+  const finishJudgeTour = (token: number, startedAt: number) => {
+    if (tourTokenRef.current !== token) return;
+    setTourElapsedMs(Math.round(performance.now() - startedAt));
+    setTourRunning(false);
+    setTourAct(6);
+  };
+
+  const exitJudgeTour = () => {
+    tourTokenRef.current++;
+    const releaseHold = tourSkipRef.current;
+    tourSkipRef.current = null;
+    releaseHold?.();
+    setTourRunning(false);
+    setTourAct(0);
+  };
+
+  const skipTourAct = () => {
+    tourSkipRef.current?.();
+  };
+
+  // 五幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画
+  const startJudgeTour = async () => {
+    if (tourRunning) return;
+    const token = ++tourTokenRef.current;
+    const startedAt = performance.now();
+    setTourRunning(true);
+    setTourAct(1);
+    setTourElapsedMs(0);
+    setShowArchModal(false);
+
+    const alive = () => tourTokenRef.current === token;
+    const traced = () => !liveActionsRef.current.isAnalyzing && liveActionsRef.current.frames.length > 0;
+    const staged = (count: number) => liveActionsRef.current.stageHistory.length >= count && traced();
+    const presetOf = (id: string) => PRESETS.find((p) => p.id === id);
+
+    // ACT 1 · 三层熔断与崩溃前现场
+    const fusePreset = presetOf('infinite-loop');
+    if (fusePreset) liveActionsRef.current.selectPreset(fusePreset);
+    await tourWaitFor(
+      token,
+      () => liveActionsRef.current.frames.length >= 1000 && !liveActionsRef.current.isAnalyzing,
+      8000
+    );
+    if (!alive()) return;
+    setCurrentFrameIdx(Math.max(0, liveActionsRef.current.frames.length - 2));
+    await tourHold(token, 3200);
+    if (!alive()) return;
+
+    // ACT 2 · fib 三级火箭（DUP -> HIT -> 1D dp）
+    setTourAct(2);
+    const fibPreset = presetOf('fib-tree');
+    if (fibPreset) liveActionsRef.current.selectPreset(fibPreset);
+    await tourWaitFor(token, traced, 8000);
+    await tourHold(token, 1500);
+    if (!alive()) return;
+    await liveActionsRef.current.apply();
+    await tourWaitFor(token, () => staged(2), 8000);
+    await tourHold(token, 1800);
+    if (!alive()) return;
+    await liveActionsRef.current.apply();
+    await tourWaitFor(token, () => staged(3), 8000);
+    await tourHold(token, 1500);
+    if (!alive()) return;
+
+    // ACT 3 · comb 递归树转二维矩阵十字准星
+    setTourAct(3);
+    const combPreset = presetOf('pascal-comb');
+    if (combPreset) liveActionsRef.current.selectPreset(combPreset);
+    await tourWaitFor(token, traced, 8000);
+    await tourHold(token, 900);
+    if (!alive()) return;
+    await liveActionsRef.current.apply();
+    await tourWaitFor(token, () => staged(2), 8000);
+    if (!alive()) return;
+    await liveActionsRef.current.apply();
+    await tourWaitFor(token, () => staged(3), 8000);
+    if (!alive()) return;
+    setCurrentFrameIdx(6);
+    await tourHold(token, 2200);
+    if (!alive()) return;
+
+    // ACT 4 · 采纳自适应下标芯片并触发 →T 条件观察点
+    setTourAct(4);
+    const chip =
+      liveActionsRef.current.quickWatches.find((expr) => expr.startsWith('dp[')) ??
+      liveActionsRef.current.quickWatches[0];
+    if (chip) {
+      liveActionsRef.current.adoptWatch(chip);
+      await sleepMs(160);
+      if (!alive()) return;
+      liveActionsRef.current.seek(chip);
+    }
+    await tourHold(token, 2000);
+    if (!alive()) return;
+
+    // ACT 5 · 打开 Spec 弹窗并跑完 6 项内核自检
+    setTourAct(5);
+    const previousChecks = liveActionsRef.current.selfCheckResults;
+    setShowArchModal(true);
+    setSpecTab('selftest');
+    await liveActionsRef.current.selfCheck();
+    await tourWaitFor(token, () => liveActionsRef.current.selfCheckResults !== previousChecks, 8000);
+    await tourHold(token, 2200);
+    finishJudgeTour(token, startedAt);
+  };
+
+  // 运行期间评委的任何点击（导览字幕条自身除外）都立即中断并把控制权交还
+  useEffect(() => {
+    if (!tourRunning) return;
+    const abortOnPress = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('[data-tour-bar]')) return;
+      exitJudgeTour();
+    };
+    window.addEventListener('pointerdown', abortOnPress, true);
+    return () => window.removeEventListener('pointerdown', abortOnPress, true);
+  }, [tourRunning]);
+
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
       {/* ==================== TOP INDUSTRIAL WORKBENCH BAR (44px) ==================== */}
@@ -1844,7 +2088,12 @@ export default function App() {
             <span className="font-semibold tracking-tight text-xs text-zinc-100 whitespace-nowrap">
               ALGO<span className="text-sky-400">TIME</span>MACHINE
             </span>
-            <span className="text-[10px] font-mono text-zinc-500 hidden sm:inline whitespace-nowrap">
+            {/* 导览运行时让出装饰性徽章宽度，保证 Stop Tour 全文案在 770px 下不撑破顶栏 */}
+            <span
+              className={`text-[10px] font-mono text-zinc-500 whitespace-nowrap ${
+                tourRunning ? 'hidden' : 'hidden sm:inline'
+              }`}
+            >
               AST-IR v2.4 · WORKER SANDBOX
             </span>
           </div>
@@ -1902,6 +2151,27 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => (tourRunning ? exitJudgeTour() : startJudgeTour())}
+            title={
+              tourRunning
+                ? 'Abort the 5-act judge tour and hand control back immediately'
+                : 'Run the 5-act automated judge tour over the live engine'
+            }
+            className={`px-2.5 py-1 shrink-0 whitespace-nowrap rounded text-[11px] font-semibold flex items-center gap-1.5 transition border ${
+              tourRunning
+                ? 'bg-amber-500/20 text-amber-200 border-amber-400/60'
+                : 'bg-zinc-900 text-amber-300 border-amber-500/40 hover:bg-amber-500/15'
+            }`}
+          >
+            {tourRunning ? (
+              <Square className="w-3 h-3 fill-current" />
+            ) : (
+              <Play className="w-3 h-3 fill-current" />
+            )}
+            <span>{tourRunning ? `Stop Tour (Act ${Math.min(tourAct, 5)}/5)` : 'Tour'}</span>
+          </button>
+
+          <button
             onClick={() => setShowArchModal(true)}
             className="px-2.5 py-1 shrink-0 whitespace-nowrap rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 text-[11px] flex items-center gap-1.5 transition"
           >
@@ -1910,6 +2180,42 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* ==================== JUDGE TOUR CAPTION BAR ==================== */}
+      {tourAct > 0 && (
+        <div
+          data-tour-bar
+          className="shrink-0 border-b border-amber-500/40 bg-[#170F04] px-3 py-1 flex items-center gap-2 text-[11px] font-mono overflow-x-auto no-scrollbar"
+        >
+          <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-200 font-semibold whitespace-nowrap">
+            {tourAct >= 6 ? 'TOUR COMPLETE' : `ACT ${tourAct}/5`}
+          </span>
+          <span className="shrink-0 text-amber-100 whitespace-nowrap">
+            {tourAct >= 6 ? 'Five-act showcase finished' : TOUR_ACTS[tourAct - 1].title}
+          </span>
+          <span className="text-amber-200/70 whitespace-nowrap">
+            {tourAct >= 6
+              ? `total ${(tourElapsedMs / 1000).toFixed(1)}s · engine left live for inspection`
+              : TOUR_ACTS[tourAct - 1].note}
+          </span>
+          <div className="ml-auto flex items-center gap-1 shrink-0">
+            {tourRunning && (
+              <button
+                onClick={skipTourAct}
+                className="px-2 py-0.5 rounded border border-amber-500/40 bg-zinc-900 text-amber-200 text-[10px] hover:bg-amber-500/15 whitespace-nowrap"
+              >
+                Skip Next →
+              </button>
+            )}
+            <button
+              onClick={exitJudgeTour}
+              className="px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 text-[10px] hover:text-zinc-100 whitespace-nowrap"
+            >
+              Exit
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ==================== SANDBOX FUSE TRIPPED BANNER ==================== */}
       {sandboxError && (
@@ -3148,7 +3454,7 @@ export default function App() {
                     : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
-                Live Kernel Self-Check (20 Invariants)
+                Live Kernel Self-Check ({KERNEL_INVARIANT_COUNT} Invariants)
               </button>
               <span className="ml-auto hidden xl:inline text-[10px] font-mono text-zinc-600">
                 {specTab === 'arch'
@@ -3227,6 +3533,29 @@ export default function App() {
                       non-deterministic re-hydration guard with a visible drift chip, bounded-step
                       interleaving (differences up to 2), instant Draft freezing via skipDelay, and a
                       browser-side Live Kernel Self-Check tab with 6 deterministic assertions.
+                      <br />• M15: a cancellable 5-act automated judge tour that drives the real engine
+                      end to end, WebCrypto sources added to the non-determinism guard, and an engineering
+                      whitepaper README for reviewers.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-amber-400 font-semibold">15. Automated Judge Tour &amp; Whitepaper (M15)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The Tour button in the 44px top bar runs a five-act showcase over the live engine:
+                      fuse recovery, the fib three-stage rocket, comb tree-to-2D-matrix lowering, the
+                      adaptive dp subscript chip with a →T watchpoint jump, and the kernel self-check tab.
+                      Measured total 17.6s at 770x553, and the top bar stays scrollWidth == clientWidth
+                      while it runs.
+                      <br />• Every act waits on real runtime conditions (frame count, analyzing flag,
+                      stageHistory length, a changed self-check result object) instead of blind sleeps, and
+                      every hold yields instantly to Skip Next, Stop Tour or a click anywhere outside the
+                      caption bar.
+                      <br />• The tour calls the handlers captured from the newest render through a ref, so
+                      stage freezing never uses a stale stageHistory or aiReport closure.
+                      <br />• The invariant count in the self-check tab label comes from one constant, so it
+                      cannot silently lag behind the registry in docs/devlogs/INDEX.md.
+                      <br />• WebCrypto random sources (crypto.getRandomValues, crypto.randomUUID) now get
+                      the same ≤600-frame eviction exemption and drift chip as Math.random and Date.now.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

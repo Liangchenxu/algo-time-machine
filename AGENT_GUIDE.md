@@ -93,6 +93,8 @@ Key 仅驻留内存，不写入 localStorage。
 - 窄视口布局契约：44px 顶栏与各 `h-9` 子标题栏必须单行且 `scrollWidth == clientWidth`
   （不折行不等于可达，禁止用 `overflow-hidden` 裁掉操作按钮）；单行代码严禁自带 `overflow-x-auto`，
   横向滚动责任在外层容器，滚动条外观由 `src/index.css` 全局统一为 5px 暗色。
+  顶栏加入 `Tour` 按钮后仍须零溢出：唯一允许的让步是导览运行时临时隐藏装饰性 `AST-IR v2.4` 徽章，
+  可压缩区依旧只有预设切换器。
 - 基准对比语义：基线若被 `[FUSE_*]` 截断而重跑完整，横幅只显示
   `STATUS: FUSE_ABORTED → COMPLETED` 与栈深收益，不得计算帧数百分比；
   两侧均未熔断但属于「递归转迭代的栈空间降维」（`base 栈深 >= 4`、`curr <= 2` 且帧数上升）时，
@@ -147,17 +149,24 @@ Key 仅驻留内存，不写入 localStorage。
   非激活快照满足任一阈值即释放 `frames` 但保留 `frameCount` / `approxBytes` / 源码 / 报告 / 指标
   （胶囊标 `LAZY`，tooltip 给出 KB 与双阈值），点击胶囊用 `runInSandbox` 重水化、不重算诊断；
   ≤250 帧且 ≤180KB 仍 0ms 同步切换。
-  **非确定性重放守卫**：源码含 `Math.random(` / `Date.now(` / `performance.now(` / `new Date`
+  **非确定性重放守卫**：源码含 `Math.random(` / `Date.now(` / `performance.now(` / `new Date` /
+  `crypto.getRandomValues(` / `crypto.randomUUID(`
   且帧数 ≤600 时豁免一切驱逐（保证 100% 历史重放）；超限重水化若长度变化或仍含非确定性标记，
   遥测条显示 `NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)`，只更新 frameCount/字节估算，
   冻结报告与指标不重算。
   **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
   `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
   `Draft` 临时阶段再切换（诊断走 `skipDelay=true`，实测 22.6ms），绝不静默丢弃。
-- Spec 弹窗第 3 页签 **Live Kernel Self-Check (20 Invariants)**：6 项确定性微基准
+- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 21)**：6 项确定性微基准
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
   矩阵读写分离 / 窄视口 `scrollWidth == clientWidth`），每项显示 PASS/FAIL 与实测 ms，
-  夹具纯浏览器执行，不使用 Worker、网络或 API Key。
+  夹具纯浏览器执行，不使用 Worker、网络或 API Key。页签条可横滚，三个页签在 770px 下均可达。
+- 评委五幕自动导览（顶栏 `Tour`）：`tourTokenRef` 驱动的真实内核编排，逐幕 = 熔断现场抢救 →
+  fib 三级火箭（DUP → HIT → 1D dp）→ comb 递归树转二维矩阵十字准星 → 自适应 `dp[4][2] === 6`
+  芯片 + `→T` 观察点瞬移 → Spec 自检台点亮。幕间只等**真实运行条件**（帧数 / `isAnalyzing` /
+  `stageHistory.length` / 自检结果对象变化），驻留可被 `Skip Next →`、`Stop Tour (Act X/5)`
+  与字幕条外的任意 `pointerdown` 立即中断；handler 一律经 `liveActionsRef` 取最新渲染，
+  避免异步串联里的过期闭包把错误源码冻结成 Stage 0。实测全程 17.6s，运行态顶栏仍 44px 零溢出。
 
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
   `HIT`（翠绿 `#10b981`，首次展开过而本次零子节点直接退栈 = 被记忆化缓存拦截），
@@ -168,7 +177,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M14 各一篇）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M15 各一篇，共 21 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 
