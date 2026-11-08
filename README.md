@@ -100,7 +100,7 @@ Stage-0 暴力递归  →  Stage-1 通用 Top-Down 记忆化  →  Stage-2 递�
 - 编辑态防丢：脏编辑显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；`Compile & Trace` 以手改代码归零历史；
   误触阶段胶囊前会先把草稿真实跑成 `Draft` 阶段（诊断走 `skipDelay`，实测 DOM 提交 **22.6ms**）。
 
-**2.5 GDB 级 Watch 守卫与 `→T` 四态观察点**
+**2.5 GDB 级 Watch 守卫、`→T` 四态观察点与跨阶段栈深包络图**
 断言在**当前帧的变量快照**上求值，四态诚实：`TRUE` / `FALSE` / `INVALID` / `ERROR`
 （作用域缺变量必须是 `ERROR` 而不是谎报 `FALSE`）。安全闸门放行 `[` `]` 下标（`dp[1][2] === 6`），
 同时禁止点号、引号与单等号赋值，以切断 `obj.constructor` 与 `obj["constructor"]` 两条成员注入路径。
@@ -108,11 +108,17 @@ Stage-0 暴力递归  →  Stage-1 通用 Top-Down 记忆化  →  Stage-2 递�
 `→ #n` / `↺ #n (wrapped)` / `= only @ #n` / `no TRUE frame`。
 Quick-Watch 芯片由当前轨迹派生并逐条验证"至少一帧 TRUE"，因此重构后死变量自动退场、`→T` 恒可命中。
 
+多阶段对比不再只有数字：每个快照自带 `depthCurve`（每帧 `callStack.length` 一个整数），
+`LAZY` 驱逐只清 `frames` 不清曲线，因此单张 SVG 里始终能叠出全部阶段的栈深折线与半透明面积包络
+（Stage 0 玫红虚线 / Stage 1 天蓝 / Stage 2 翠绿加粗，横轴按各阶段进度归一化）。
+当前帧在激活曲线上以圆点 + 竖向游标标出，点击横轴按比例直接跳帧；
+实测 `fib(10)` 三级火箭后 `Stage 0 (354f · LAZY)` 仍完整绘出 354 个点。
+
 ---
 
 ## 3. 人机协同工程范式（Context Engineering with Qoder）
 
-本项目的"护城河"不只是功能，而是**15 个里程碑零幻觉、零回归的协作流程**。
+本项目的"护城河"不只是功能，而是**16 个里程碑零幻觉、零回归的协作流程**。
 
 **三大铁律（`AGENT_GUIDE.md`）**
 
@@ -124,14 +130,14 @@ Quick-Watch 芯片由当前轨迹派生并逐条验证"至少一帧 TRUE"，因�
 3. **准则 3 · 原子化验证与自动提交**：`npm run build` 零报错 → 浏览器实测（含一条边界路径）→
    `git status` 复核 → 一个里程碑一次提交，Git 历史与 DevLog 一一对应。
 
-**21 条系统不变量（`docs/devlogs/INDEX.md`）** 覆盖 TDZ 安全读取、帧回收双写、顶层覆盖、退栈契约、
+**22 条系统不变量（`docs/devlogs/INDEX.md`）** 覆盖 TDZ 安全读取、帧回收双写、顶层覆盖、退栈契约、
 逐帧热力、判据只信运行时证据、`[FUSE_*]` 前缀耦合、`retainLines` 前提、Tailwind 标度补丁、
 `noUnusedLocals`、带参签名三处下游消费者、771px 窄视口 `scrollWidth == clientWidth` 可达性、
 合成一致性、HIT/DUP 拓扑、二级火箭阶段单调性、Seek 四态完备、读写分离纯运行时取证、
 快照报告同步、透传等价合成、双维度惰性预算与自检契约……
 每条都对应一次**被实测推翻的假设**，而不是设计时的愿望。
 
-**15 个原子化演进日志（M1–M15）** 每篇都保留"改之前长什么样"和"哪条指令自带的代码有缺陷"，
+**16 个原子化演进日志（M1–M16）** 每篇都保留"改之前长什么样"和"哪条指令自带的代码有缺陷"，
 例如 M9 发现 M8 的种子公式 `max(baseMax, offsets)+1` 在 fib 上会写出错误的 `dp[2] = 2`，
 M12 发现负指数熔断后被误判为指数级并推荐救不了它的记忆化。
 
@@ -144,15 +150,22 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
 
 ## 4. 评委 30 秒快速验收指南
 
-1. 点击顶栏 **`Tour`** —— 约 20 秒的五幕自动驾驶，全程驱动真实内核：
+1. 点击顶栏 **`Tour`** —— 六幕自动驾驶，全程驱动真实内核（幕内驻留设计合计 19.1s）：
    `ACT 1` 死循环三层熔断与 1334 帧崩溃现场 → `ACT 2` fib 的 `DUP → HIT → 1D dp` 三级火箭与
    `Stage 0/1/2` 全息胶囊 → `ACT 3` `comb(4,2)` 递归树转 `2D Matrix dp` 十字准星与 `WRITES` 徽章 →
-   `ACT 4` 自动采纳 `dp[4][2] === 6` 并触发 `→T` 观察点瞬移 → `ACT 5` 打开 Spec 弹窗点亮 6 项自检。
-   期间点击页面任意处或 `Stop Tour (Act X/5)` / `Exit` 立即中断并把控制权交还；字幕条提供 `Skip Next →`。
-2. 点击 **`Qoder Engineering Spec`**：
-   `Architecture & Safety Fuse`（架构与契约）· `DevLog [M1-M15]`（演进与实测）·
-   `Live Kernel Self-Check (20 Invariants)`（当场重跑内核回归）。
-3. 想看细节：左侧点行号设断点（`b` / `F8` 续跳），底部空格播放、方向键逐帧，
+   `ACT 4` 自动采纳 `dp[4][2] === 6` 并触发 `→T` 观察点瞬移 →
+   `ACT 5` `Min Path Sum` 的 `2D → 1D Rolling Buffer` 空间降维 + `Fast Power` 槽位 1 折半消栈（`65536`）→
+   `ACT 6` 打开 Spec 弹窗点亮 6 项内核自检。
+   导览期间诊断跳过 380ms 人工延迟（幕标签到「轨迹 + 判据」齐备实测 12~56ms）。
+   点击页面任意处或 `Stop Tour (Act k/6)` 会**暂停到当前幕**，字幕条随即给出
+   `Resume Act k/6` / `Restart` / `Dismiss ×`，不必从第一幕重看；想在本幕内加快进度点 `Skip Next →`
+   （它结束的是当前驻留，一幕可能有多段）。
+2. 多阶段重构后看 **Cross-Stage Stack Envelope**：三条栈深曲线（玫红虚线 / 天蓝 / 翠绿）同图叠加，
+   点击横轴按比例跳帧；即使阶段被 `LAZY` 驱逐，曲线也由快照自带的 `depthCurve` 完整绘出。
+3. 点击 **`Qoder Engineering Spec`**：
+   `Architecture & Safety Fuse`（架构与契约）· `DevLog [M1-M16]`（演进与实测）·
+   `Live Kernel Self-Check (22 Invariants)`（当场重跑内核回归）。
+4. 想看细节：左侧点行号设断点（`b` / `F8` 续跳），底部空格播放、方向键逐帧，
    `Edit Code` 粘自己的代码即可复用全部判据与合成管线（支持任意函数名）。
 
 ---
@@ -169,6 +182,10 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
 | 字节预算驱逐 | `fib(8)+6000 数组` 135 帧 / `~4382 KB` → `Stage 0 (135f · LAZY)` |
 | 非确定性守卫 | `fib(5)+大数组+Math.random` 32 帧 / `~1040 KB` 豁免驱逐；`fib(12)+Math.random` 931 帧重水化显示漂移芯片 |
 | Draft 冻结 | 脏编辑切阶段自动保存 `Draft` 阶段，DOM 提交 22.6ms |
+| 跨阶段包络图 | fib 三级火箭 3 条曲线 31 / 41 / 11 点（玫红虚线 / 天蓝 / 翠绿加粗），点击横轴 0 / 25 / 50 / 100% → 帧 1 / 3 / 6 / 11 |
+| LAZY 态曲线 | `fib(10)` 三级后 `Stage 0 (354f · LAZY)` 仍完整绘出 354 / 80 / 21 个点 |
+| 导览零延迟 | 幕标签到「轨迹 + 判据」齐备 12~56ms（导览外手动切预设判据滞后 948ms） |
+| 导览续播 | ACT 3 中断 → `PAUSED · ACT 3/6` + `Resume Act 3/6`；续播跑到 `TOUR COMPLETE · total 20.1s` 且 `6/6 PASS` |
 | 内核自检 | 770×553 下 6/6 PASS（TDZ 13.5ms / Fuse 0.9ms / Recursion 0.6ms / Halving 0.6ms / Matrix 0.0ms / Viewport 0.9ms） |
 | 顶栏 | 44px 单行，`scrollWidth == clientWidth == 770`，`Tour` 加入后仍零溢出 |
 
@@ -193,5 +210,5 @@ src/services/aiDiagnostics.ts   运行时证据判档、等价代码合成、Ben
 src/App.tsx                     IDE 工作台、时间旅行回放、全息快照栈、评委导览、内核自检台
 AGENT_GUIDE.md                  架构契约 + 三大铁律（反幻觉回味 / 强制归档 / 原子化提交）
 docs/devlogs/INDEX.md           里程碑索引、20 条系统不变量、实测基线、回归核对表
-docs/devlogs/M1..M15-*.md       15 篇原子化演进日志
+docs/devlogs/M1..M16-*.md       16 篇原子化演进日志
 ```

@@ -22,7 +22,8 @@
 | M12 | `cc324f1` | [M12-stage-history-stack-and-mixed-args.md](./M12-stage-history-stack-and-mixed-args.md) | 多阶段全息快照栈、混合实参槽位折半、指数合法性门控、不收敛递归判据与 Fast Power 预设 |
 | M13 | `b129f95` | [M13-passthrough-halving-and-draft-guard.md](./M13-passthrough-halving-and-draft-guard.md) | 透传多参计数折半合成、奇偶交替快速幂识别、大轨迹惰性快照与编辑防丢 Draft 守卫 |
 | M14 | `a34b16c` | [M14-byte-budget-and-kernel-selftest.md](./M14-byte-budget-and-kernel-selftest.md) | 双维度惰性预算、非确定性重水化漂移守卫、广义小步交错折半与 6 项内核实时自检台 |
-| M15 | 本次提交 | [M15-automated-judge-tour-and-whitepaper.md](./M15-automated-judge-tour-and-whitepaper.md) | 评委五幕自动路演导览（可中断真实内核驱动）、WebCrypto 非确定性守卫与工程白皮书 |
+| M15 | `588709b` | [M15-automated-judge-tour-and-whitepaper.md](./M15-automated-judge-tour-and-whitepaper.md) | 评委五幕自动路演导览（可中断真实内核驱动）、WebCrypto 非确定性守卫与工程白皮书 |
+| M16 | 本次提交 | [M16-telemetry-curve-and-resumable-tour.md](./M16-telemetry-curve-and-resumable-tour.md) | 跨阶段 SVG 栈深包络遥测图（depthCurve 随快照持久化）、导览零延迟同步与六幕断点续播 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -218,12 +219,35 @@
     （e）**非确定性源清单只增不减**：`hasNonDeterministicCalls` 现覆盖 `Math.random(` / `Date.now(` /
     `performance.now(` / `new Date` / `crypto.getRandomValues(` / `crypto.randomUUID(`；
     新增宿主随机/时间源必须同步扩充正则、#20b 契约与本表。豁免驱逐（≤600 帧）与漂移芯片语义对全部来源一致生效。
+22. **轻量 depthCurve 随快照持久化与导览可续播契约**（M16 确立）：
+    （a）**曲线必须独立于 frames 存活**：`StageSnapshot.depthCurve = frames.map(f => f.callStack.length)`
+    在 `snapshotOf` 时构建、重水化后刷新；`evictBackgroundFrames` 只清 `frames`，不得连带清空曲线。
+    跨阶段包络图因此能在 `LAZY` 态依旧画出完整轨迹（实测 354 帧阶段仍为 354 个点）。
+    曲线的数据源只能是帧本身，禁止用 `metrics.maxStackDepth` 之类标量「补画」成假曲线。
+    （b）**包络图渲染与交互契约**：一个 SVG 坐标系内叠加各阶段折线 + 半透明面积包络，
+    Stage 0 玫红 `#f43f5e` 虚线、Stage 1 天蓝 `#38bdf8`、Stage 2 翠绿 `#10b981`（激活阶段加粗 2px），
+    高度 56–68px 紧凑嵌入；横轴按各阶段进度归一化，激活阶段当前帧必须是圆点 + 竖向游标，
+    点击横轴需按 `clientX` 比例 `setCurrentFrameIdx` 并先停播；容器宽度必须先同步读 `clientWidth`，
+    `ResizeObserver` / `resize` 只作兜底——被遮挡的测试环境里 RO 回调可能根本不投递。
+    （c）**导览零延迟**：`tourRunningRef` 为真时 `executeCode` 必须以 `skipDelay=true` 调用诊断，
+    幕间不得再叠加 380ms 人工延迟；由于 `setFrames` 与 `setAiReport` 分属两次提交，
+    可承诺的是「判据只等诊断本身」（实测 12~56ms 齐备），不得把该机制写成字面意义的同一渲染周期。
+    （d）**导览可续播**：中断（`Stop Tour` 或字幕条外任意 `pointerdown`）必须记录 `pausedTourAct`，
+    字幕条收敛为 `ACT k/6 · PAUSED` 并提供 `Resume Act k/6` / `Restart` / `Dismiss ×`；
+    Resume 从第 k 幕**整幕**重跑（不伪造半幕中间态），Dismiss 彻底清除；
+    中断监听对非 Element 目标（如直接派发到 `window` 的事件）也必须生效，
+    因此豁免判定用 `target?.closest?.('[data-tour-bar]')`，不得让一次异常吃掉「幕外一律暂停」承诺；
+    幕内多段驻留意味着 `Skip Next →` 只结束当前驻留而非跳到下一幕，文案与文档都不得夸大为一键跳幕。
+    （e）**六幕全覆盖与文案单一来源**：`TOUR_ACTS` 为六幕且必须与 `TOUR_ACTS.length` 驱动的文案同源，
+    顶栏 `Stop Tour (Act k/N)` / `Resume Tour (Act k/N)` 不得写死 `/5`；
+    导览期间允许隐藏装饰性 `AST-IR v2.4` 徽章腾出宽度，但任何状态下顶栏仍需 `44px` 且
+    `scrollWidth == clientWidth == 770`（#12/#21c 的延续）。
 
-## 当前实测基线（M15 复测，视口 770×553，`npm run build` 零 TS 报错）
+## 当前实测基线（M16 复测，视口 770×553，`npm run build` 零 TS 报错）
 
-> M15 轮在 770×553 同源 iframe 测试台跑完五幕导览，并逐预设复测 Rain / DP / Binary / Fast Power / fib /
-> Comb / 死循环，以及 `crypto.getRandomValues` 豁免与 `crypto.randomUUID` 漂移；
-> 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`）沿用 M12–M14 实测值，未在本轮重跑。
+> M16 轮在 770×553 同源 iframe 测试台复测了跨阶段栈深包络图（含 LAZY 态）、导览零延迟与六幕断点续播，
+> 并重跑 fib / comb / dp-matrix / fast-power 的多阶段链路；
+> 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`、`crypto.*` 变体）沿用 M12–M15 实测值。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
 | --- | --- | --- | --- | --- |
@@ -315,6 +339,18 @@
 | WebCrypto 豁免（M15） | `crypto.getRandomValues` 版 `fib(5)+6000 数组`：33 帧 / `~1073 KB`（>180KB）仍**不驱逐**，tooltip `full snapshot` |
 | WebCrypto 漂移（M15） | `crypto.randomUUID` 版 `fib(12)`：931 帧 `Stage 0 (931f · LAZY)` → 点回 477ms 恢复 931 帧，出现 `NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)`，报告保持冻结 `O(2^n)` |
 | 预设复测（M15） | Rain 40 帧 Two-Pointer（Apply 退场）、DP 29 帧 `O(M*N) Matrix DP`、Binary 10 帧 `O(log n) Logarithmic Halving`、Fast Power 13 → 22 帧且终端 `65536` |
+| 跨阶段包络图（M16） | fib 三级火箭后 SVG 同时渲染 3 条曲线：Stage 0 `#f43f5e` 虚线（dash `4 3`，31 点）、Stage 1 `#38bdf8`（41 点）、Stage 2 `#10b981`（11 点，激活 `stroke-width 2`）；面积包络透明度 `0.07 / 0.07 / 0.18`；`svg 388×64` 与容器同宽 |
+| 包络图点击跳帧（M16） | 0% → `FRAME 1 / 11`（`cx 34`）、25% → `FRAME 3 / 11`（102.4）、50% → `FRAME 6 / 11`（205）、100% → `FRAME 11 / 11`（376） |
+| LAZY 态曲线完整性（M16） | `fib(10)` 三级后 `Stage 0 (354f · LAZY)` / `Stage 1 (80f)` / `Stage 2 (21f)`，包络图仍绘出 354 / 80 / 21 个点，图例 `Stage 0 peak 11 dashed · 354f · LAZY` |
+| 导览零延迟（M16） | MutationObserver 时间线：幕标签到「轨迹 + 判据」齐备 56ms（ACT 2）、12ms（ACT 3）、14ms（ACT 5）；`setFrames` 与 `setAiReport` 仍是两次提交，但两次之间不再叠加 380ms 延迟，7 次 Apply 无一出现「新轨迹 + 旧结论」的秒级空档；对照导览外手动切预设 `FRAME 1/40` 已换而判据在 948ms 后才归位 |
+| 六幕导览（M16） | 新增 ACT 5：`dp-matrix` 29 → 15 帧 `O(M * N) Optimal Scan`（2D→1D 滚动）与 `fast-power` 13 → 22 帧 `O(log n) Iterative Halving` + 终端 `65536`；自检后移至 ACT 6 |
+| 断点续播（M16） | ACT 3 处 `pointerdown` → 字幕条 `ACT 3/6 · PAUSED` + `Resume Act 3/6` / `Restart` / `Dismiss ×`，顶栏 `Resume Tour (Act 3/6)`，`FRAME 1 / 13` 与 `O(2^n)` 现场保留；Resume 后 3→4→5→6 跑到 `TOUR COMPLETE · total 20.1s` 且 `6/6 PASS` |
+| 顶栏零溢出（M16） | 闲时 / 运行态 `Stop Tour (Act 6/6)` / 暂停态 `Resume Tour (Act 3/6)` 三种文案下均实测 `header 44px` 且 `scrollWidth == clientWidth == 770` |
+| Skip 语义（M16） | `Skip Next →` 结束的是**当前驻留**：ACT 2 内含 3 段驻留（预设后 + 两次 Apply 后），需连点 3 次才进 ACT 3；导览不因 Skip 退出 |
+| 导览时长口径（M16） | 驻留设计合计 19.14s；本测试 iframe 定时器被限频（回调 ≥1s 对齐），整轮实测 28.3s、续播段实测 20.1s，两个数字均如实归档，不拿设计值冒充实测 |
+| 提交前复跑·包络图（M16） | 同一 iframe 复跑 fib 三级火箭：`svg 388×64`、三条 polyline 31 / 41 / 11 点、`#f43f5e` 虚线 dash `4 3`、激活阶段 `stroke-width 2`、包络透明度 `0.07 / 0.07 / 0.18`、游标 `cx 34`；点击轴 0/25/50/100% → `FRAME 1 / 3 / 6 / 11`（共 11 帧） |
+| 提交前复跑·LAZY 曲线（M16） | 手写 `fib(11)`：`Stage 0 (289f · LAZY)` / `Stage 1 (69f)` / `Stage 2 (23f)`，包络图 polyline 仍为 289 / 69 / 23 点，图例 `Stage 0 peak 12 dashed · 289f · LAZY` |
+| 提交前复跑·续播（M16） | `Tour` → `Stop Tour (Act 1/6)`；对 `window` 派发 `pointerdown` 同样暂停为 `Resume Tour (Act 1/6)` + `ACT 1/6 · PAUSED` + `Resume Act 1/6` / `Restart` / `Dismiss ×`；续播至 `TOUR COMPLETE · total 32.5s`、自检页签 `Live Kernel Self-Check (22 Invariants)` 实测 `6/6 PASS`（FAIL 0）；三种导览状态下 `header 44px` 且 `scrollWidth == clientWidth == 770` |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -387,9 +423,13 @@
 - [ ] 字节预算是抽样估算（中段/末帧变量的 1.15 倍外推），不是真实堆占用；极端异构帧可能高估或低估（M14 新遗留）
 - [ ] 重水化成本随帧数增长：931 帧非确定性快照实测约 1.7s（含渲染与轮询），期间仅显示 `RE-HYDRATING` 提示（M14 新遗留）
 - [ ] Live Kernel Self-Check 使用合成帧夹具，覆盖内核判据但不替代全预设浏览器回归（M14 新遗留）
-- [ ] 五幕导览只深度演示 infinite-loop / fib-tree / pascal-comb 三个预设，DP 滚动压缩、Fast Power、Rain 双指针等壁垒仍需手动或按 README 指南查看（M15 新遗留）
-- [ ] 幕间切换后判据芯片最多滞后约 380ms（本地引擎节流）；导览用条件等待规避，但视觉上仍可能出现一帧「新轨迹 + 旧结论」的空档（M15 新遗留）
-- [ ] 导览被中断后不自动续演（控制权彻底交还），需要重新点击 Tour 从 ACT 1 开始（M15 新遗留）
+- [x] 五幕导览只深度演示 infinite-loop / fib-tree / pascal-comb 三个预设（M15 报备 → **M16 部分闭合**：新增 ACT 5 覆盖 `dp-matrix` 2D→1D 滚动压缩与 `fast-power` 槽位折半消栈（终端 `65536`），导览升为六幕；Rain 双指针与 Binary 区间折半仍未纳入自动导览）
+- [x] 幕间切换后判据芯片最多滞后约 380ms（M15 报备 → **M16 闭合**：导览期间 `executeCode` 以 `skipDelay=true` 调用诊断，实测幕标签到轨迹+判据齐备仅 12~56ms；导览外手动切预设仍保留 380ms「思考感」，属有意的产品差异）
+- [x] 导览被中断后不自动续演，需要重新点击 Tour 从 ACT 1 开始（M15 报备 → **M16 闭合**：`tourPhase` + `pausedTourAct` 记录中断幕，字幕条收敛为 `ACT k/6 · PAUSED` 并提供 `Resume Act k/6` / `Restart` / `Dismiss ×`，实测 ACT 3 暂停后续播到 `TOUR COMPLETE`）
+- [ ] `Skip Next →` 只结束当前驻留而非跳到下一幕，ACT 2 这类多驻留幕需要连点多次；若要「一键跳幕」还需引入幕级取消（M16 新遗留）
+- [ ] 包络图横轴按各阶段进度归一化，因此不同帧数的阶段在同一 x 位置代表不同的绝对步数；绝对刻度模式仍待补（M16 新遗留）
+- [ ] `depthCurve` 每帧一个整数：1334 帧阶段曲线约 1334 个数字，远小于帧对象图，但尚未做分段抽样（M16 新遗留）
+- [ ] 导览时长在定时器被限频的隐藏式视口里会被拉长（实测 28.3s / 20.1s），可见浏览器下的整轮时长未实测（M16 新遗留）
 
 ## 全仓 emoji 扫描基线（可复现）
 

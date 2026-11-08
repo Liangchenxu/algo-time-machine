@@ -149,6 +149,12 @@ Key 仅驻留内存，不写入 localStorage。
   非激活快照满足任一阈值即释放 `frames` 但保留 `frameCount` / `approxBytes` / 源码 / 报告 / 指标
   （胶囊标 `LAZY`，tooltip 给出 KB 与双阈值），点击胶囊用 `runInSandbox` 重水化、不重算诊断；
   ≤250 帧且 ≤180KB 仍 0ms 同步切换。
+  **跨阶段栈深包络遥测图**：快照自带 `depthCurve`（每帧 `callStack.length` 一个整数，重水化时刷新），
+  `evictBackgroundFrames` 只清 `frames` 不动曲线，因此 `LAZY` 阶段的曲线依然完整；
+  单个 SVG 坐标系叠加各阶段折线 + 半透明面积包络（Stage 0 玫红 `#f43f5e` 虚线、Stage 1 天蓝 `#38bdf8`、
+  Stage 2 翠绿 `#10b981`，激活阶段加粗），横轴按各阶段进度归一化、高 64px，
+  激活曲线当前帧画圆点 + 竖向游标，点击横轴按比例 `setCurrentFrameIdx` 跳帧；
+  容器宽度先同步读 `clientWidth`，`ResizeObserver` 与 `resize` 只作兜底（遮挡环境下 RO 可能不投递）。
   **非确定性重放守卫**：源码含 `Math.random(` / `Date.now(` / `performance.now(` / `new Date` /
   `crypto.getRandomValues(` / `crypto.randomUUID(`
   且帧数 ≤600 时豁免一切驱逐（保证 100% 历史重放）；超限重水化若长度变化或仍含非确定性标记，
@@ -161,12 +167,15 @@ Key 仅驻留内存，不写入 localStorage。
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
   矩阵读写分离 / 窄视口 `scrollWidth == clientWidth`），每项显示 PASS/FAIL 与实测 ms，
   夹具纯浏览器执行，不使用 Worker、网络或 API Key。页签条可横滚，三个页签在 770px 下均可达。
-- 评委五幕自动导览（顶栏 `Tour`）：`tourTokenRef` 驱动的真实内核编排，逐幕 = 熔断现场抢救 →
+- 评委六幕自动导览（顶栏 `Tour`）：`tourTokenRef` 驱动的真实内核编排，逐幕 = 熔断现场抢救 →
   fib 三级火箭（DUP → HIT → 1D dp）→ comb 递归树转二维矩阵十字准星 → 自适应 `dp[4][2] === 6`
-  芯片 + `→T` 观察点瞬移 → Spec 自检台点亮。幕间只等**真实运行条件**（帧数 / `isAnalyzing` /
-  `stageHistory.length` / 自检结果对象变化），驻留可被 `Skip Next →`、`Stop Tour (Act X/5)`
-  与字幕条外的任意 `pointerdown` 立即中断；handler 一律经 `liveActionsRef` 取最新渲染，
-  避免异步串联里的过期闭包把错误源码冻结成 Stage 0。实测全程 17.6s，运行态顶栏仍 44px 零溢出。
+  芯片 + `→T` 观察点瞬移 → `dp-matrix` 2D→1D 滚动压缩 + `fast-power` 槽位折半消栈 → Spec 自检台点亮。
+  幕间只等**真实运行条件**（帧数 / `isAnalyzing` / `stageHistory.length` / 自检结果对象变化），
+  且导览期间诊断走 `skipDelay=true`，判据与轨迹实测 12~56ms 内齐备（导览外手动切预设仍有 380ms 差异）；
+  驻留可被 `Skip Next →`、`Stop Tour (Act k/N)` 与字幕条外的任意 `pointerdown` 立即结束——
+  中断会记录 `pausedTourAct`，字幕条收敛为 `ACT k/6 · PAUSED` 并提供
+  `Resume Act k/6` / `Restart` / `Dismiss ×`；handler 一律经 `liveActionsRef` 取最新渲染，
+  避免异步串联里的过期闭包把错误源码冻结成 Stage 0。幕内驻留是多段的，`Skip Next` 只结束当前驻留。
 
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
   `HIT`（翠绿 `#10b981`，首次展开过而本次零子节点直接退栈 = 被记忆化缓存拦截），
@@ -177,7 +186,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M15 各一篇，共 21 条不变量）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M16 各一篇，共 22 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

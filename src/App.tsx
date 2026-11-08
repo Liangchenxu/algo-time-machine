@@ -23,6 +23,7 @@ import {
   Pin,
   Sigma,
   Square,
+  Activity,
   X,
 } from 'lucide-react';
 import { runInSandbox } from './core/sandboxRunner';
@@ -65,6 +66,8 @@ interface StageSnapshot {
   frameCount: number;
   /** O(1) 抽样估算的帧负载字节数（中段帧 + 末帧变量 JSON 长度 × 帧数） */
   approxBytes: number;
+  /** 每帧调用栈深度的轻量曲线（1 帧 = 1 个整数），frames 被惰性释放后仍可完整绘图 */
+  depthCurve: number[];
   kind: 'normal' | 'draft';
   execTimeMs: number;
   sandboxError?: string;
@@ -101,6 +104,12 @@ const estimateSnapshotBytes = (trace: TraceFrame[]): number => {
   return Math.round(sample * trace.length * 1.15);
 };
 
+/** 快照栈深曲线：每帧一个整数（callStack.length），体积远小于帧对象图，惰性驱逐后仍可用 */
+const buildDepthCurve = (trace: TraceFrame[]): number[] => trace.map((f) => f.callStack.length);
+
+/** 跨阶段曲线的稳定配色：Stage 0 玫红虚线、Stage 1 天蓝、Stage 2 翠绿，后续阶段循环取色 */
+const STAGE_CURVE_COLORS = ['#f43f5e', '#38bdf8', '#10b981', '#a78bfa', '#f59e0b', '#e879f9'];
+
 interface KernelSelfCheckResult {
   id: string;
   title: string;
@@ -127,9 +136,9 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 21;
+const KERNEL_INVARIANT_COUNT = 22;
 
-/** 评委导览的五幕脚本：每一幕都驱动真实内核，不做假动画 */
+/** 评委导览的六幕脚本：每一幕都驱动真实内核，不做假动画 */
 const TOUR_ACTS: { title: string; note: string }[] = [
   {
     title: 'Three-Tier Safety Fuse & Crash Recovery',
@@ -146,6 +155,10 @@ const TOUR_ACTS: { title: string; note: string }[] = [
   {
     title: 'Runtime Watchpoint and ->T Four-State Seek',
     note: 'adopt adaptive dp[][] chip, then jump to the real write frame',
+  },
+  {
+    title: '2D Rolling Buffer & Positional Halving',
+    note: 'min-path 2D -> 1D rolling compression, then slot-1 fast power lowering to 65536',
   },
   {
     title: `Live Kernel Self-Check (${KERNEL_INVARIANT_COUNT} Invariants)`,
@@ -1024,7 +1037,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M15',
-    commit: '本次提交',
+    commit: '588709b',
     doc: 'docs/devlogs/M15-automated-judge-tour-and-whitepaper.md',
     title: '评委五幕自动路演导览、WebCrypto 非确定性守卫与工程白皮书',
     why: '内核能力已到 M14，但验收成本仍压在评委身上：要手动切 7 个预设、连点两次 Apply、再找芯片点 →T 才能看全壁垒；同时 M14 遗留的 crypto 随机源未被非确定性守卫覆盖（会悄悄漂移）；根 README 还是脚手架默认文本，无法说明工程范式。',
@@ -1054,6 +1067,39 @@ const DEVLOGS: DevlogEntry[] = [
       '回归：Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 O(log n)（Apply 退场）、Fast Power 13 → 22 帧且终端 65536；npm run build 零报错、src emoji 扫描 0 命中、16 篇文档表格列数一致、控制台无 error/warn。',
     ],
   },
+  {
+    tag: 'M16',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M16-telemetry-curve-and-resumable-tour.md',
+    title: '跨阶段 SVG 栈深包络遥测图、导览零延迟同步与六幕断点续播',
+    why: 'M15 之后还剩三处不体面：幕间切换时判据芯片比轨迹慢约 380ms，肉眼能看到「新轨迹 + 旧结论」的空档；导览被中断只能从 ACT 1 重跑，评委想接手再回去就得重来；多阶段对比只有帧数与横幅数字，看不到三条轨迹在栈深维度上的形状差异，而后台 LAZY 驱逐后帧数组已不在内存，绘图似乎也没了数据源。',
+    what: [
+      'App.tsx：StageSnapshot 新增 depthCurve（每帧 callStack.length 一个整数），snapshotOf 构建、重水化时刷新；evictBackgroundFrames 只清 frames，因此曲线在 LAZY 态依然完整。',
+      'App.tsx：Cross-Stage Stack Envelope 原生 SVG 面板（高 64px，宽度取容器 clientWidth 实测 388px）：Stage 0 玫红 #f43f5e 虚线 + 面积包络、Stage 1 天蓝 #38bdf8、Stage 2 翠绿 #10b981 加粗 2px，横轴按各阶段进度归一化；当前帧在激活曲线上以圆点 + 竖向游标标出，点击横轴按比例直接跳帧。',
+      'aiDiagnostics/App.tsx：executeCode 在 tourRunningRef 为真时向 runAIDiagnostics 传 skipDelay=true，导览期间的 preset 切换与 Apply 不再叠加 380ms 人工延迟。',
+      'App.tsx：导览扩为六幕，新增 ACT 5 二维滚动压缩 + 槽位折半快速幂（dp-matrix 29 → 15 Optimal Scan，fast-power 13 → 22 且终端 65536），自检后移到 ACT 6；TOUR_ACTS 与 Stop/Resume 文案统一用 TOUR_ACTS.length。',
+      'App.tsx：tourPhase（idle/running/paused/complete）+ pausedTourAct + tourActRef 实现断点续播；中断（Stop / 幕条外 pointerdown）记录当前幕，字幕条收敛为 PAUSED 态并提供 Resume Act k/6、Restart、Dismiss ×。',
+      'KERNEL_INVARIANT_COUNT 升至 22；README 白皮书补充跨阶段包络图与六幕续播说明。',
+    ],
+    conflicts: [
+      '惰性驱逐把 frames 清空后，包络图按「读帧」的直觉会退化成空洞；改为让 depthCurve 与 frames 同生命周期但独立存储——每帧仅 1 个小整数，实测 354 帧阶段的曲线在 Stage 0 (354f · LAZY) 下仍画出完整 354 个点。',
+      '「同一渲染周期」在 React 里并不成立：setFrames 与 await 之后的 setAiReport 必然分两次提交。真正可承诺的是「第二次提交只等诊断本身」，于是导览期间传 skipDelay，实测幕标签到轨迹+判据齐备仅 12~56ms（导览外手动切预设仍会看到 948ms 的旧结论窗口）。',
+      '宽度测量不能只靠 ResizeObserver：本环境 iframe 被遮挡时定时器与 RO 回调都会被限频，RO 迟迟不投递会让 SVG 一直停在初始 300px。改为 effect 里先同步读 clientWidth，再用 RO + window resize 双兜底，实测 svg width 立刻跟随容器 388px。',
+      'Skip Next 的语义被澄清为「结束当前驻留」而不是「跳到下一幕」：一幕内可能有 2~3 段驻留（每个 Apply 后各一段），所以从 ACT 2 到 ACT 3 需要多次 Skip；这条差异在 DevLog 里如实记录，避免文档把它写成一键跳幕。',
+      '导览总时长在本测试环境被定时器限频放大（驻留合计 19.14s，实测整轮 28.3s、续播段 20.1s），不拿设计值冒充实测值，两个数字都写进档案。',
+      '中断后 Resume 是从 ACT k 整幕重跑，而不是从被切断的那一段驻留继续——快照与轨迹必须自洽，不能伪造「已经演到一半」的中间态。',
+      '幕外点击即暂停的监听原本写 target.closest(...)：事件直接派发到 window 时没有 closest，处理器抛异常并让暂停永不发生，复跑时导览因此继续自己往下演。改为可选调用 target?.closest?.(\'[data-tour-bar]\')，非 Element 目标也一律落进暂停分支。',
+    ],
+    impact: [
+      '包络图（fib 三级火箭）：3 条曲线 31 / 41 / 11 个点，Stage 0 玫红虚线 dash 4 3、Stage 2 翠绿 stroke-width 2（激活），面积包络透明度 0.07 / 0.07 / 0.18；svg 388×64 与容器同宽。',
+      '点击跳帧：0% → FRAME 1/11（cx 34）、25% → FRAME 3/11（102.4）、50% → FRAME 6/11（205）、100% → FRAME 11/11（376）。',
+      'LAZY 完整性：fib(10) 三级后胶囊 Stage 0 (354f · LAZY) / Stage 1 (80f) / Stage 2 (21f)，包络图仍渲染 354 / 80 / 21 个点，图例标注 Stage 0 peak 11 dashed · 354f · LAZY。',
+      '零延迟：导览内幕标签到「轨迹 + 判据」齐备实测 56ms（ACT 2）、12ms（ACT 3）、14ms（ACT 5）；setFrames 与 setAiReport 仍是两次提交，但两次之间不再叠加 380ms，7 次 Apply 无一出现秒级「新轨迹 + 旧结论」空档；对照导览外手动切预设 frames 已换而判据延迟 948ms。',
+      '六幕续播：ACT 3 处 pointerdown 暂停 → 字幕条 ACT 3/6 · PAUSED + Resume Act 3/6 / Restart / Dismiss ×，顶栏按钮改为 Resume Tour (Act 3/6)，FRAME 1/13 与 O(2^n) 现场保留；点 Resume 后 3 → 4 → 5 → 6 跑到 TOUR COMPLETE · total 20.1s 且 6/6 PASS、终端 65536。',
+      '顶栏零溢出：闲时与运行态 Stop Tour (Act 6/6)、暂停态 Resume Tour (Act 3/6) 均实测 header 44px、scrollWidth == clientWidth == 770。',
+      '回归：DP 29 → 15 帧 O(M*N) Optimal Scan、Fast Power 13 → 22 帧 65536、Rain 40 帧 Two-Pointer、Binary 10 帧 O(log n)；npm run build 零报错、src emoji 0 命中、17 篇文档表格列数一致、22 条不变量、控制台无 error/warn。',
+    ],
+  },
 ];
 
 export default function App() {
@@ -1079,12 +1125,17 @@ export default function App() {
   const [selfCheckResults, setSelfCheckResults] = useState<KernelSelfCheckResult[] | null>(null);
   const [selfCheckRunning, setSelfCheckRunning] = useState<boolean>(false);
 
-  // 评委五幕自动导览：tourAct 1..5 运行中，6 表示已完成定格
+  // 评委六幕自动导览：phase 驱动 UI，pausedTourAct 支持中断后原地续播
   const [tourAct, setTourAct] = useState<number>(0);
-  const [tourRunning, setTourRunning] = useState<boolean>(false);
+  const [tourPhase, setTourPhase] = useState<'idle' | 'running' | 'paused' | 'complete'>('idle');
+  const [pausedTourAct, setPausedTourAct] = useState<number | null>(null);
   const [tourElapsedMs, setTourElapsedMs] = useState<number>(0);
   const tourTokenRef = useRef(0);
   const tourSkipRef = useRef<(() => void) | null>(null);
+  const tourRunningRef = useRef<boolean>(false);
+  const tourActRef = useRef<number>(0);
+  const tourRunning = tourPhase === 'running';
+  const tourActive = tourPhase !== 'idle';
 
   // 多阶段全息快照栈：Stage-0 / Stage-1 / Stage-2 … 各自保存源码、帧、报告与指标
   const [stageHistory, setStageHistory] = useState<StageSnapshot[]>([]);
@@ -1126,7 +1177,8 @@ export default function App() {
     }
 
     setIsAnalyzing(true);
-    const report = await runAIDiagnostics(codeToRun, res.frames || [], res.error, apiKey);
+    // 导览期间跳过 380ms 人工思考延迟：判据只等诊断本身，不与新轨迹之间留下秒级空档
+    const report = await runAIDiagnostics(codeToRun, res.frames || [], res.error, apiKey, tourRunningRef.current);
     setAiReport(report);
     setIsAnalyzing(false);
 
@@ -1504,6 +1556,7 @@ export default function App() {
       frames: trace,
       frameCount: trace.length,
       approxBytes: estimateSnapshotBytes(trace),
+      depthCurve: buildDepthCurve(trace),
       kind,
       execTimeMs: latency,
       sandboxError: err,
@@ -1603,6 +1656,7 @@ export default function App() {
                 frames: restored,
                 frameCount: restored.length,
                 approxBytes: estimateSnapshotBytes(restored),
+                depthCurve: buildDepthCurve(restored),
               }
             : s
         )
@@ -1957,33 +2011,46 @@ export default function App() {
     return tourTokenRef.current === token && cond();
   };
 
-  const finishJudgeTour = (token: number, startedAt: number) => {
-    if (tourTokenRef.current !== token) return;
-    setTourElapsedMs(Math.round(performance.now() - startedAt));
-    setTourRunning(false);
-    setTourAct(6);
-  };
-
-  const exitJudgeTour = () => {
+  const pauseJudgeTour = () => {
+    if (!tourRunningRef.current) return;
+    const interruptedAct = tourActRef.current >= 1 ? tourActRef.current : 1;
     tourTokenRef.current++;
     const releaseHold = tourSkipRef.current;
     tourSkipRef.current = null;
     releaseHold?.();
-    setTourRunning(false);
+    tourRunningRef.current = false;
+    tourActRef.current = 0;
+    setTourPhase('paused');
+    setPausedTourAct(interruptedAct);
+  };
+
+  const dismissJudgeTour = () => {
+    tourTokenRef.current++;
+    const releaseHold = tourSkipRef.current;
+    tourSkipRef.current = null;
+    releaseHold?.();
+    tourRunningRef.current = false;
+    tourActRef.current = 0;
+    setTourPhase('idle');
     setTourAct(0);
+    setPausedTourAct(null);
+    setTourElapsedMs(0);
   };
 
   const skipTourAct = () => {
     tourSkipRef.current?.();
   };
 
-  // 五幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画
-  const startJudgeTour = async () => {
-    if (tourRunning) return;
+  // 六幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画；fromAct 支持断点续播
+  const runJudgeTourFrom = async (fromAct: number) => {
+    if (tourRunningRef.current) return;
     const token = ++tourTokenRef.current;
     const startedAt = performance.now();
-    setTourRunning(true);
-    setTourAct(1);
+    tourRunningRef.current = true;
+    tourActRef.current = fromAct;
+    setTourPhase('running');
+    setPausedTourAct(null);
+    setTourAct(fromAct);
     setTourElapsedMs(0);
     setShowArchModal(false);
 
@@ -1991,89 +2058,183 @@ export default function App() {
     const traced = () => !liveActionsRef.current.isAnalyzing && liveActionsRef.current.frames.length > 0;
     const staged = (count: number) => liveActionsRef.current.stageHistory.length >= count && traced();
     const presetOf = (id: string) => PRESETS.find((p) => p.id === id);
+    const selectAndTrace = async (id: string) => {
+      const preset = presetOf(id);
+      if (preset) liveActionsRef.current.selectPreset(preset);
+      await tourWaitFor(token, traced, 8000);
+    };
 
-    // ACT 1 · 三层熔断与崩溃前现场
-    const fusePreset = presetOf('infinite-loop');
-    if (fusePreset) liveActionsRef.current.selectPreset(fusePreset);
-    await tourWaitFor(
-      token,
-      () => liveActionsRef.current.frames.length >= 1000 && !liveActionsRef.current.isAnalyzing,
-      8000
-    );
-    if (!alive()) return;
-    setCurrentFrameIdx(Math.max(0, liveActionsRef.current.frames.length - 2));
-    await tourHold(token, 3200);
-    if (!alive()) return;
+    const acts: Array<() => Promise<void>> = [
+      // ACT 1 · 三层熔断与崩溃前现场
+      async () => {
+        const fusePreset = presetOf('infinite-loop');
+        if (fusePreset) liveActionsRef.current.selectPreset(fusePreset);
+        await tourWaitFor(
+          token,
+          () => liveActionsRef.current.frames.length >= 1000 && !liveActionsRef.current.isAnalyzing,
+          8000
+        );
+        if (!alive()) return;
+        setCurrentFrameIdx(Math.max(0, liveActionsRef.current.frames.length - 2));
+        await tourHold(token, 3500);
+      },
+      // ACT 2 · fib 三级火箭（DUP -> HIT -> 1D dp）
+      async () => {
+        await selectAndTrace('fib-tree');
+        await tourHold(token, 1400);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(2), 8000);
+        await tourHold(token, 1600);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(3), 8000);
+        await tourHold(token, 1400);
+      },
+      // ACT 3 · comb 递归树转二维矩阵十字准星
+      async () => {
+        await selectAndTrace('pascal-comb');
+        await tourHold(token, 800);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(2), 8000);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(3), 8000);
+        if (!alive()) return;
+        setCurrentFrameIdx(6);
+        await tourHold(token, 1900);
+      },
+      // ACT 4 · 采纳自适应下标芯片并触发 →T 条件观察点
+      async () => {
+        const chip =
+          liveActionsRef.current.quickWatches.find((expr) => expr.startsWith('dp[')) ??
+          liveActionsRef.current.quickWatches[0];
+        if (chip) {
+          liveActionsRef.current.adoptWatch(chip);
+          await sleepMs(140);
+          if (!alive()) return;
+          liveActionsRef.current.seek(chip);
+        }
+        await tourHold(token, 1800);
+      },
+      // ACT 5 · 二维滚动压缩 + 槽位折半快速幂（补齐 M15 未覆盖的两个壁垒）
+      async () => {
+        await selectAndTrace('dp-matrix');
+        await tourHold(token, 700);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(2), 8000);
+        await tourHold(token, 1500);
+        if (!alive()) return;
+        await selectAndTrace('fast-power');
+        await tourHold(token, 700);
+        if (!alive()) return;
+        await liveActionsRef.current.apply();
+        await tourWaitFor(token, () => staged(2), 8000);
+        await tourHold(token, 1700);
+      },
+      // ACT 6 · 打开 Spec 弹窗并跑完 6 项内核自检
+      async () => {
+        const previousChecks = liveActionsRef.current.selfCheckResults;
+        setShowArchModal(true);
+        setSpecTab('selftest');
+        await liveActionsRef.current.selfCheck();
+        await tourWaitFor(token, () => liveActionsRef.current.selfCheckResults !== previousChecks, 8000);
+        await tourHold(token, 2000);
+      },
+    ];
 
-    // ACT 2 · fib 三级火箭（DUP -> HIT -> 1D dp）
-    setTourAct(2);
-    const fibPreset = presetOf('fib-tree');
-    if (fibPreset) liveActionsRef.current.selectPreset(fibPreset);
-    await tourWaitFor(token, traced, 8000);
-    await tourHold(token, 1500);
-    if (!alive()) return;
-    await liveActionsRef.current.apply();
-    await tourWaitFor(token, () => staged(2), 8000);
-    await tourHold(token, 1800);
-    if (!alive()) return;
-    await liveActionsRef.current.apply();
-    await tourWaitFor(token, () => staged(3), 8000);
-    await tourHold(token, 1500);
-    if (!alive()) return;
-
-    // ACT 3 · comb 递归树转二维矩阵十字准星
-    setTourAct(3);
-    const combPreset = presetOf('pascal-comb');
-    if (combPreset) liveActionsRef.current.selectPreset(combPreset);
-    await tourWaitFor(token, traced, 8000);
-    await tourHold(token, 900);
-    if (!alive()) return;
-    await liveActionsRef.current.apply();
-    await tourWaitFor(token, () => staged(2), 8000);
-    if (!alive()) return;
-    await liveActionsRef.current.apply();
-    await tourWaitFor(token, () => staged(3), 8000);
-    if (!alive()) return;
-    setCurrentFrameIdx(6);
-    await tourHold(token, 2200);
-    if (!alive()) return;
-
-    // ACT 4 · 采纳自适应下标芯片并触发 →T 条件观察点
-    setTourAct(4);
-    const chip =
-      liveActionsRef.current.quickWatches.find((expr) => expr.startsWith('dp[')) ??
-      liveActionsRef.current.quickWatches[0];
-    if (chip) {
-      liveActionsRef.current.adoptWatch(chip);
-      await sleepMs(160);
+    for (let i = fromAct - 1; i < acts.length; i++) {
+      setTourAct(i + 1);
+      tourActRef.current = i + 1;
+      await acts[i]();
       if (!alive()) return;
-      liveActionsRef.current.seek(chip);
     }
-    await tourHold(token, 2000);
-    if (!alive()) return;
 
-    // ACT 5 · 打开 Spec 弹窗并跑完 6 项内核自检
-    setTourAct(5);
-    const previousChecks = liveActionsRef.current.selfCheckResults;
-    setShowArchModal(true);
-    setSpecTab('selftest');
-    await liveActionsRef.current.selfCheck();
-    await tourWaitFor(token, () => liveActionsRef.current.selfCheckResults !== previousChecks, 8000);
-    await tourHold(token, 2200);
-    finishJudgeTour(token, startedAt);
+    setTourElapsedMs(Math.round(performance.now() - startedAt));
+    tourRunningRef.current = false;
+    tourActRef.current = 0;
+    setTourAct(acts.length);
+    setTourPhase('complete');
   };
 
-  // 运行期间评委的任何点击（导览字幕条自身除外）都立即中断并把控制权交还
+  const handleTourButton = () => {
+    if (tourPhase === 'running') pauseJudgeTour();
+    else if (tourPhase === 'paused') void runJudgeTourFrom(pausedTourAct ?? 1);
+    else void runJudgeTourFrom(1);
+  };
+
+  // 运行期间评委的任何点击（导览字幕条自身除外）都立即暂停到当前幕并交还控制权
   useEffect(() => {
-    if (!tourRunning) return;
+    if (tourPhase !== 'running') return;
     const abortOnPress = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('[data-tour-bar]')) return;
-      exitJudgeTour();
+      // 事件可能派发到 window（非 Element），用可选调用保证「幕条外一律暂停」始终成立
+      if (target?.closest?.('[data-tour-bar]')) return;
+      pauseJudgeTour();
     };
     window.addEventListener('pointerdown', abortOnPress, true);
     return () => window.removeEventListener('pointerdown', abortOnPress, true);
-  }, [tourRunning]);
+  }, [tourPhase]);
+
+  // ==================== 跨阶段栈深包络遥测图（M16） ====================
+  // 曲线数据来自快照自带的 depthCurve，因此后台大轨迹即使被 LAZY 驱逐也能 100% 绘出
+  const telemetryRef = useRef<HTMLDivElement | null>(null);
+  const [telemetryWidth, setTelemetryWidth] = useState<number>(300);
+  useEffect(() => {
+    const el = telemetryRef.current;
+    if (!el) return;
+    // 先同步量一次：被遮挡的标签页里 ResizeObserver 回调可能不投递，不能让它成为宽度的唯一来源
+    const sync = () => {
+      const w = el.clientWidth;
+      if (w > 0) setTelemetryWidth(w);
+    };
+    sync();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null;
+    ro?.observe(el);
+    window.addEventListener('resize', sync);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', sync);
+    };
+  }, [stageHistory.length]);
+
+  const TELEMETRY_H = 64;
+  const TELEMETRY_LEFT = 34;
+  const TELEMETRY_RIGHT = 12;
+  const TELEMETRY_TOP = 10;
+  const TELEMETRY_BASE = 46;
+  const stageCurves = useMemo(
+    () =>
+      stageHistory.map((s, idx) => ({
+        stageIndex: s.stageIndex,
+        kind: s.kind,
+        label: s.label,
+        depths: s.depthCurve,
+        peak: s.depthCurve.reduce((acc, d) => Math.max(acc, d), 1),
+        frames: s.frameCount,
+        verdict: s.metrics.timeComplexity,
+        evicted: s.frames.length === 0 && s.frameCount > 0,
+        color: STAGE_CURVE_COLORS[idx % STAGE_CURVE_COLORS.length],
+        active: s.stageIndex === activeStage,
+      })),
+    [stageHistory, activeStage]
+  );
+  const telemetryVisible = stageCurves.length >= 2;
+  const telemetryMaxDepth = stageCurves.reduce((acc, c) => Math.max(acc, c.peak), 2);
+  const telemetryPlotW = Math.max(40, telemetryWidth - TELEMETRY_LEFT - TELEMETRY_RIGHT);
+  const telemetryX = (length: number, i: number) =>
+    TELEMETRY_LEFT + (length <= 1 ? 0 : (i / (length - 1)) * telemetryPlotW);
+  const telemetryY = (depth: number) =>
+    TELEMETRY_BASE - ((depth - 1) / Math.max(1, telemetryMaxDepth - 1)) * (TELEMETRY_BASE - TELEMETRY_TOP);
+  const activeCurve = stageCurves.find((c) => c.active) ?? stageCurves[stageCurves.length - 1];
+  const markerFrame = Math.max(
+    0,
+    Math.min(currentFrameIdx, Math.max(0, (activeCurve?.depths.length ?? 1) - 1), Math.max(0, frames.length - 1))
+  );
+  const markerX = activeCurve ? telemetryX(activeCurve.depths.length, markerFrame) : 0;
+  const markerY = activeCurve ? telemetryY(activeCurve.depths[markerFrame] ?? 1) : 0;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -2091,7 +2252,7 @@ export default function App() {
             {/* 导览运行时让出装饰性徽章宽度，保证 Stop Tour 全文案在 770px 下不撑破顶栏 */}
             <span
               className={`text-[10px] font-mono text-zinc-500 whitespace-nowrap ${
-                tourRunning ? 'hidden' : 'hidden sm:inline'
+                tourActive ? 'hidden' : 'hidden sm:inline'
               }`}
             >
               AST-IR v2.4 · WORKER SANDBOX
@@ -2151,24 +2312,32 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => (tourRunning ? exitJudgeTour() : startJudgeTour())}
+            onClick={handleTourButton}
             title={
-              tourRunning
-                ? 'Abort the 5-act judge tour and hand control back immediately'
-                : 'Run the 5-act automated judge tour over the live engine'
+              tourPhase === 'running'
+                ? `Pause the ${TOUR_ACTS.length}-act judge tour and hand control back`
+                : tourPhase === 'paused'
+                  ? `Resume the judge tour from Act ${pausedTourAct ?? 1}/${TOUR_ACTS.length}`
+                  : `Run the ${TOUR_ACTS.length}-act automated judge tour over the live engine`
             }
             className={`px-2.5 py-1 shrink-0 whitespace-nowrap rounded text-[11px] font-semibold flex items-center gap-1.5 transition border ${
-              tourRunning
+              tourActive
                 ? 'bg-amber-500/20 text-amber-200 border-amber-400/60'
                 : 'bg-zinc-900 text-amber-300 border-amber-500/40 hover:bg-amber-500/15'
             }`}
           >
-            {tourRunning ? (
+            {tourPhase === 'running' ? (
               <Square className="w-3 h-3 fill-current" />
             ) : (
               <Play className="w-3 h-3 fill-current" />
             )}
-            <span>{tourRunning ? `Stop Tour (Act ${Math.min(tourAct, 5)}/5)` : 'Tour'}</span>
+            <span>
+              {tourPhase === 'running'
+                ? `Stop Tour (Act ${tourAct}/${TOUR_ACTS.length})`
+                : tourPhase === 'paused'
+                  ? `Resume Tour (Act ${pausedTourAct ?? 1}/${TOUR_ACTS.length})`
+                  : 'Tour'}
+            </span>
           </button>
 
           <button
@@ -2182,21 +2351,30 @@ export default function App() {
       </header>
 
       {/* ==================== JUDGE TOUR CAPTION BAR ==================== */}
-      {tourAct > 0 && (
+      {tourPhase !== 'idle' && (
         <div
           data-tour-bar
           className="shrink-0 border-b border-amber-500/40 bg-[#170F04] px-3 py-1 flex items-center gap-2 text-[11px] font-mono overflow-x-auto no-scrollbar"
         >
           <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-200 font-semibold whitespace-nowrap">
-            {tourAct >= 6 ? 'TOUR COMPLETE' : `ACT ${tourAct}/5`}
+            {tourPhase === 'complete'
+              ? 'TOUR COMPLETE'
+              : `ACT ${tourPhase === 'paused' ? (pausedTourAct ?? tourAct) : tourAct}/${TOUR_ACTS.length}`}
+            {tourPhase === 'paused' && ' · PAUSED'}
           </span>
           <span className="shrink-0 text-amber-100 whitespace-nowrap">
-            {tourAct >= 6 ? 'Five-act showcase finished' : TOUR_ACTS[tourAct - 1].title}
+            {tourPhase === 'complete'
+              ? `Six-act showcase finished · total ${(tourElapsedMs / 1000).toFixed(1)}s`
+              : TOUR_ACTS[
+                  (tourPhase === 'paused' ? pausedTourAct ?? tourAct : tourAct) - 1
+                ]?.title ?? 'Judge tour'}
           </span>
           <span className="text-amber-200/70 whitespace-nowrap">
-            {tourAct >= 6
-              ? `total ${(tourElapsedMs / 1000).toFixed(1)}s · engine left live for inspection`
-              : TOUR_ACTS[tourAct - 1].note}
+            {tourPhase === 'complete'
+              ? 'engine left live for inspection'
+              : tourPhase === 'paused'
+                ? 'resumable · Resume continues from this act, Restart replays from Act 1'
+                : TOUR_ACTS[tourAct - 1]?.note ?? ''}
           </span>
           <div className="ml-auto flex items-center gap-1 shrink-0">
             {tourRunning && (
@@ -2207,11 +2385,27 @@ export default function App() {
                 Skip Next →
               </button>
             )}
+            {tourPhase === 'paused' && (
+              <button
+                onClick={() => runJudgeTourFrom(pausedTourAct ?? 1)}
+                className="px-2 py-0.5 rounded border border-emerald-500/50 bg-emerald-500/15 text-emerald-200 text-[10px] hover:bg-emerald-500/25 whitespace-nowrap"
+              >
+                Resume Act {pausedTourAct ?? 1}/{TOUR_ACTS.length}
+              </button>
+            )}
+            {(tourPhase === 'paused' || tourPhase === 'complete') && (
+              <button
+                onClick={() => runJudgeTourFrom(1)}
+                className="px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 text-[10px] hover:text-zinc-100 whitespace-nowrap"
+              >
+                Restart
+              </button>
+            )}
             <button
-              onClick={exitJudgeTour}
+              onClick={tourRunning ? pauseJudgeTour : dismissJudgeTour}
               className="px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 text-[10px] hover:text-zinc-100 whitespace-nowrap"
             >
-              Exit
+              {tourRunning ? 'Exit' : 'Dismiss ×'}
             </button>
           </div>
         </div>
@@ -2536,6 +2730,150 @@ export default function App() {
 
             {/* Canvas Scroll Area */}
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+              {/* Cross-Stage Stack Envelope — 每阶段一条栈深包络曲线，数据来自快照 depthCurve */}
+              {telemetryVisible && (
+                <div className="p-3 rounded-md bg-[#0E1117] border border-zinc-800/90">
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-300 whitespace-nowrap min-w-0">
+                      <Activity className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span className="truncate">Cross-Stage Stack Envelope</span>
+                    </span>
+                    <span className="shrink-0 text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                      peak {telemetryMaxDepth} · click axis to seek
+                    </span>
+                  </div>
+                  <div ref={telemetryRef}>
+                    <svg
+                      width={telemetryWidth}
+                      height={TELEMETRY_H}
+                      className="block cursor-crosshair"
+                      onClick={(e) => {
+                        if (!activeCurve || activeCurve.depths.length === 0) return;
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const ratio = Math.min(
+                          1,
+                          Math.max(0, (e.clientX - rect.left - TELEMETRY_LEFT) / telemetryPlotW)
+                        );
+                        const idx = Math.round(ratio * (activeCurve.depths.length - 1));
+                        setIsPlaying(false);
+                        setCurrentFrameIdx(Math.max(0, Math.min(frames.length - 1, idx)));
+                      }}
+                    >
+                      <line
+                        x1={TELEMETRY_LEFT}
+                        y1={TELEMETRY_BASE}
+                        x2={TELEMETRY_LEFT + telemetryPlotW}
+                        y2={TELEMETRY_BASE}
+                        stroke="#27272a"
+                        strokeWidth={1}
+                      />
+                      <line
+                        x1={TELEMETRY_LEFT}
+                        y1={TELEMETRY_TOP}
+                        x2={TELEMETRY_LEFT + telemetryPlotW}
+                        y2={TELEMETRY_TOP}
+                        stroke="#1f1f23"
+                        strokeWidth={1}
+                        strokeDasharray="3 3"
+                      />
+                      <text x={2} y={TELEMETRY_BASE + 3} fill="#71717a" fontSize={8} fontFamily="monospace">
+                        1
+                      </text>
+                      <text x={2} y={TELEMETRY_TOP + 3} fill="#71717a" fontSize={8} fontFamily="monospace">
+                        {telemetryMaxDepth}
+                      </text>
+                      {stageCurves.map((c) => {
+                        const pts = c.depths
+                          .map((d, i) => `${telemetryX(c.depths.length, i).toFixed(1)},${telemetryY(d).toFixed(1)}`)
+                          .join(' ');
+                        if (!pts) return null;
+                        return (
+                          <g key={c.stageIndex}>
+                            <polygon
+                              points={`${TELEMETRY_LEFT},${TELEMETRY_BASE} ${pts} ${telemetryX(
+                                c.depths.length,
+                                c.depths.length - 1
+                              ).toFixed(1)},${TELEMETRY_BASE}`}
+                              fill={c.color}
+                              opacity={c.active ? 0.18 : 0.07}
+                            />
+                            <polyline
+                              points={pts}
+                              fill="none"
+                              stroke={c.color}
+                              strokeWidth={c.active ? 2 : 1.3}
+                              strokeDasharray={c.stageIndex === 0 ? '4 3' : undefined}
+                              opacity={c.active ? 1 : 0.7}
+                            />
+                          </g>
+                        );
+                      })}
+                      {activeCurve && activeCurve.depths.length > 0 && (
+                        <g>
+                          <line
+                            x1={markerX}
+                            y1={TELEMETRY_TOP}
+                            x2={markerX}
+                            y2={TELEMETRY_BASE}
+                            stroke="#e4e4e7"
+                            strokeWidth={0.8}
+                            opacity={0.55}
+                          />
+                          <circle
+                            cx={markerX}
+                            cy={markerY}
+                            r={3.2}
+                            fill="#0E1117"
+                            stroke="#e4e4e7"
+                            strokeWidth={1.6}
+                          />
+                        </g>
+                      )}
+                      <text
+                        x={TELEMETRY_LEFT}
+                        y={TELEMETRY_H - 2}
+                        fill="#52525b"
+                        fontSize={8}
+                        fontFamily="monospace"
+                      >
+                        0%
+                      </text>
+                      <text
+                        x={TELEMETRY_LEFT + telemetryPlotW - 22}
+                        y={TELEMETRY_H - 2}
+                        fill="#52525b"
+                        fontSize={8}
+                        fontFamily="monospace"
+                      >
+                        100%
+                      </text>
+                    </svg>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                    {stageCurves.map((c) => (
+                      <button
+                        key={c.stageIndex}
+                        onClick={() => void handleRestoreStage(c.stageIndex)}
+                        title={`${c.label} · ${c.verdict} · peak stack ${c.peak} · ${c.frames} frames${
+                          c.evicted ? ' (frames lazy-evicted, curve drawn from depthCurve)' : ''
+                        } — click to restore this stage`}
+                        className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-mono transition ${
+                          c.active
+                            ? 'border-zinc-500 bg-zinc-800/80 text-zinc-100'
+                            : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: c.color }} />
+                        Stage {c.stageIndex} peak {c.peak}
+                        {c.stageIndex === 0 ? ' dashed' : ''} · {c.frames}f
+                        {c.evicted ? ' · LAZY' : ''}
+                        {c.kind === 'draft' ? ' · draft' : ''}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* 0. Call-Tree Topology & Subproblem Inspector */}
               {treeVisible && (
                 <div className="p-3 rounded-md bg-[#0E1117] border border-zinc-800/90">
@@ -3536,6 +3874,30 @@ export default function App() {
                       <br />• M15: a cancellable 5-act automated judge tour that drives the real engine
                       end to end, WebCrypto sources added to the non-determinism guard, and an engineering
                       whitepaper README for reviewers.
+                      <br />• M16: a cross-stage SVG stack-depth envelope fed by a lightweight depthCurve
+                      that survives lazy eviction, zero-delay verdict updates while the tour runs, and a
+                      six-act tour that can be interrupted and resumed on the same act.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-sky-400 font-semibold">16. Cross-Stage Envelope &amp; Resumable Tour (M16)</div>
+                    <p className="text-zinc-400 text-[11px]">
+                      Every snapshot now carries depthCurve - one integer per frame - so the envelope chart
+                      keeps drawing all stages even after lazy eviction removed the frame arrays
+                      (measured: a 354-frame LAZY stage still renders 354 points). Stage 0 is the rose dashed
+                      line, Stage 1 sky, Stage 2 emerald and twice as thick when active; the x-axis is
+                      normalized progress, the current frame is a dot plus cursor line, and clicking the
+                      axis seeks proportionally (0 / 25 / 50 / 100 percent mapped to frames 1 / 3 / 6 / 11).
+                      <br />• While the tour runs, executeCode passes skipDelay=true to the diagnostics
+                      engine, so the verdict chips land with the new trace instead of 380ms later -
+                      measured 12-56ms from act label to a fully consistent trace plus verdict.
+                      <br />• The tour is six acts now (fuse, fib rocket, comb to 2D, watchpoint seek,
+                      2D rolling buffer plus positional halving, kernel self-check) and every interruption
+                      records pausedTourAct, so the caption bar offers Resume Act k/6, Restart and Dismiss
+                      instead of forcing a replay from act one.
+                      <br />• Chart width comes from a synchronous clientWidth read with ResizeObserver and
+                      window resize as fallbacks, because a throttled or occluded browsing context may never
+                      deliver the observer callback.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

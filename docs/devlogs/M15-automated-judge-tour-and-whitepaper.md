@@ -1,6 +1,6 @@
 # M15 · 评委五幕自动路演导览、WebCrypto 非确定性守卫与工程白皮书
 
-Commit：本次提交（`git log -1`）— feat(tour): 完成 Milestone 15 评委五幕自动路演导览引擎、WebCrypto非确定性守卫与工程白皮书
+Commit：`588709b` — feat(tour): 完成 Milestone 15 评委五幕自动路演导览引擎、WebCrypto非确定性守卫与工程白皮书
 
 ## Why · 背景动机
 
