@@ -120,6 +120,24 @@ Quick-Watch 芯片由当前轨迹派生并逐条验证"至少一帧 TRUE"，因�
 诚实的另一半：这条改动**没有**让「投递后跳幕」变快（`324 / 332 / 361 / 365 / 370 / 372ms`），
 M19 那句「因为 1334 根竖条压垮 Commit」的归因已被本轮实验推翻，该耗时仍是未闭合敞口（详见 M20 DevLog）。
 
+**2.7 长任务拆测与 Watch 求值函数编译缓存**
+M21 不再猜，直接用 `performance.now()` 把那段 285~294ms 的阻塞任务拆成四段：
+`instrumentCode`（Babel AST，主线程）`1.7~2.4ms`、Worker 往返含结构化克隆 `26.4~35.8ms`、
+`runAIDiagnostics`（`skipDelay` 通道）`0.8~1.5ms`——三个都不是大头；
+真正的大头是渲染期的 `deriveRuntimeQuickWatches`，单趟 **141ms**，
+因为它对每条候选表达式调用 `hasTrueFrame`，后者在 1334 帧上**每帧重新 `new Function` 一次**
+（该趟编译 2872 个函数、整窗累计 6060 个）。
+修法是**闸门之后**才缓存编译结果，键取 `(表达式, 形参名序列)`——形参表由这一帧可见变量决定，
+只按表达式缓存会把后一帧的 `dp` 值塞进前一帧 `n` 的位置；
+编译失败不写缓存，**运行期抛错不剔除缓存**（否则恒定越界的断言恰好退回逐帧重编译）。
+三道安全闸门每次调用照旧全部重跑，`dp[99][0] === 1` 仍是 `ERROR`、`alert(n)` 仍是 `INVALID`。
+结果：投递后跳幕六轮 `129 / 134 / 134 / 139 / 140 / 141ms`、长任务 `123 / 131ms`（约 -61%）。
+**但剩下的 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有扫描成本，缓存消不掉，不写「长任务已归零」**。
+同轮**否决**了一条指令自带的优化：`analyzeMatrixWrites` 的「首末帧无二维变量就 O(1) 返回空」——
+块内二维表只存在于中间帧，实测 shipped 代码在 `FRAME 6 / 10` 仍报 `WRITES: 2`，
+那条短路会删掉 #16a 依赖的证据，而它本省下的只有 `0.5~2.3ms`。
+拆测用的探针是临时插桩，提交前确认零残留；带探针的占比表与无探针的最终耗时表分开标注。
+
 多阶段对比不再只有数字：每个快照自带 `depthCurve`，且做**保峰保谷分桶**——最多 `128` 个整数
 （≤128 帧逐帧 1:1，更长轨迹取「首帧 + 126 个桶 + 末帧」，每桶同时取最大与最小栈深），
 因此 467 帧的基线只占 128 个数字，而曲线峰值仍与冻结报告的 `Stack Depth 13` 严格相等。
@@ -156,26 +174,32 @@ M19 那句「因为 1334 根竖条压垮 Commit」的归因已被本轮实验推
 3. **准则 3 · 原子化验证与自动提交**：`npm run build` 零报错 → 浏览器实测（含一条边界路径）→
    `git status` 复核 → 一个里程碑一次提交，Git 历史与 DevLog 一一对应。
 
-**26 条系统不变量（`docs/devlogs/INDEX.md`）** 覆盖 TDZ 安全读取、帧回收双写、顶层覆盖、退栈契约、
+**27 条系统不变量（`docs/devlogs/INDEX.md`）** 覆盖 TDZ 安全读取、帧回收双写、顶层覆盖、退栈契约、
 逐帧热力、判据只信运行时证据、`[FUSE_*]` 前缀耦合、`retainLines` 前提、Tailwind 标度补丁、
 `noUnusedLocals`、带参签名三处下游消费者、771px 窄视口 `scrollWidth == clientWidth` 可达性、
 合成一致性、HIT/DUP 拓扑、二级火箭阶段单调性、Seek 四态完备、读写分离纯运行时取证、
 快照报告同步、透传等价合成、双维度惰性预算与自检契约、导览可中断与零溢出、depthCurve 与续播契约、
 包络图双轴几何与 128 点保峰抽样与幕级一键跳过、游标真实深度与桶峰值双层指示、
 五字段 URL 自动演进与事件驱动等待、全容器零横向溢出与 Min-Max 双包络与世代取消与源码入链、
-火焰轨 160 桶上限与显式横滚属性契约与 `code + stage` 起点语义……
+火焰轨 160 桶上限与显式横滚属性契约与 `code + stage` 起点语义、
+Watch 求值函数编译缓存（闸门后置 + 键含形参序列）与 flex chrome 双端零溢出与断点行界两阶段裁剪……
 每条都对应一次**被实测推翻的假设**，而不是设计时的愿望。
 
-**20 个原子化演进日志（M1–M20）** 每篇都保留"改之前长什么样"和"哪条指令自带的代码有缺陷"，
+**21 个原子化演进日志（M1–M21）** 每篇都保留"改之前长什么样"和"哪条指令自带的代码有缺陷"，
 例如 M9 发现 M8 的种子公式 `max(baseMax, offsets)+1` 在 fib 上会写出错误的 `dp[2] = 2`，
 M12 发现负指数熔断后被误判为指数级并推荐救不了它的记忆化，
 M19 发现「改了已知的那条溢出」不等于全容器干净——新写的自检第一次真跑就 FAIL 在瓶颈跳转行上，
 M20 则发现**自己上一轮给出的根因是错的**：火焰条从 1334 根降到 160 根之后，
-「投递后跳幕」的 ~330ms 一毫秒都没少，于是把它从「已解释」降回「未闭合」。
+「投递后跳幕」的 ~330ms 一毫秒都没少，于是把它从「已解释」降回「未闭合」，
+M21 用四段 `performance.now()` 拆测把它结案——大头是 Quick-Watch 扫描里**每帧重新编译一次求值函数**
+（单趟 2872 次 `new Function`、整窗 6060 次），加编译缓存后实测降到 `129~141ms`；
+同轮还**否决**了一条指令自带的优化：`analyzeMatrixWrites` 的「首末帧没有二维变量就返回空」
+会删掉只存在于中间帧的 `WRITES` 证据，而它本省下的只有 0.5~2.3ms。
 
 **浏览器端 9 项实时内核自检台**（`Qoder Engineering Spec` → 第 3 页签）
 TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读写分离 /
-窄视口**全量纵向滚动盒**零横向溢出（豁免读显式 `data-scroll-x-owner` 并断言与 legacy 集合相等）/
+窄视口**全量纵向滚动盒 + 具名 flex chrome（header / footer / 根容器）**零横向溢出
+（豁免读显式 `data-scroll-x-owner` 并断言与 legacy 集合相等）/
 128 点保峰分桶 / Permalink 哈希解析与清洗（含 `code` 往返与 `code + stage` 共存）/
 火焰轨 160 桶虚拟化（长度恒 160、平铺无隙无叠、断点 `repFrame` 精确命中、峰值与热点不丢），
 每项输出 PASS 徽章与实测毫秒，夹具不依赖 Worker、网络与 API Key。
@@ -226,8 +250,8 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
    实测 `#preset=binary-search&stage=1&frame=0&code=…`（294 字符）重载后
    `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14` 逐胶囊复现。
 4. 点击 **`Qoder Engineering Spec`**：
-   `Architecture & Safety Fuse`（架构与契约）· `DevLog [M1-M20]`（演进与实测）·
-   `Live Kernel Self-Check (26 Invariants)`（当场重跑 9 项内核回归）。
+   `Architecture & Safety Fuse`（架构与契约）· `DevLog [M1-M21]`（演进与实测）·
+   `Live Kernel Self-Check (27 Invariants)`（当场重跑 9 项内核回归）。
 5. 想看细节：左侧点行号设断点（`b` / `F8` 续跳），底部空格播放、方向键逐帧，
    `Edit Code` 粘自己的代码即可复用全部判据与合成管线（支持任意函数名）。
 
@@ -253,6 +277,12 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
 | 跳幕取消隔离（M19） | `Skip Act →` 落在 1334 帧熔断轨迹投递**之前**：五轮 fresh-page `18 / 18 / 22 / 26 / 27ms` 进 `ACT 2/7`，重轨迹一次都没上屏；落在投递**之后**（延迟 80 / 90ms 才点）两轮仍 `361 / 370ms`——那笔提交已在渲染队列里，`terminate` 救不了，作为边界保留 |
 | 火焰轨 DOM 虚拟化（M20） | `infinite-loop` 1334 帧：竖条 **1334 → 160（-88.0%）**、该行盒子 `4009px → 197px`、`footer 4572/770 → 770/770`、整页元素数 **451**；短轨迹仍 1:1（40/29/10/13/31/13 帧对应同数量竖条）。自检第 9 项断言长度恒 160、平铺 `0..1333` 无隙无叠、断点 `@#777` 的 `repFrame` 恰为 777、峰值 10 与热点 L42 不丢（0.4ms） |
 | 投递后跳幕归因复算（M20） | 六轮 `324 / 332 / 361 / 365 / 370 / 372ms`——与 M19 同量级，**虚拟化没有改善它**；对照：1334 帧单独落地 `56ms` 且长任务 0 条、已就位时逐帧步进长任务 0 条。M19 的「1334 根竖条压垮 Commit」归因被推翻，该支耗时**仍未闭合**（投递前五轮 `16 / 17 / 18 / 19 / 21ms` 无回归） |
+| 长任务四段拆测（M21，带临时探针） | `instrumentCode 1.7~2.4ms` · `Worker 往返含克隆 26.4~35.8ms` · `deriveRuntimeQuickWatches 1.3 / 135.4+135.1 / 141ms`（最差一趟编译 **2872** 个 `new Function`，整窗 **6060**） · `runAIDiagnostics 0.8~1.5ms` · `analyzeMatrixWrites 0.5~2.3ms` · `longtask 280~293ms`。真凶是 Quick-Watch 的逐帧重编译 |
+| Watch 编译缓存后（M21，无探针六轮） | 投递后跳幕 `129 / 134 / 134 / 139 / 140 / 141ms`、长任务 `123 / 131ms`（对 M20 基线均值约 **-61%**），暖身后每轮编译 0 次；投递前五轮 `16 / 17 / 18 / 19 / 21ms` 无回归。**剩余 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有成本，未归零** |
+| 缓存未放宽安全闸门（M21） | `dp[99][0] === 1` 仍 `ERROR`；`alert(n)` / `process.exit()` 仍 `INVALID`；三道闸门每次调用全部重跑，缓存只在闸门之后读写；键含形参名序列，杜绝跨帧串参 |
+| flex chrome 零溢出（M21） | 第 6 项 detail `header 770/770 · footer 770/770 · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 670/670) · 6 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553`（2.8ms）；**注入反证**：footer 塞 3800px 假子元素 → `chrome overflow: footer 4365>770` 且整台 `8/9 PASS`，仅该项 FAIL |
+| `analyzeMatrixWrites` 短路被否（M21） | 块内二维表样本的首帧与末帧作用域都没有 `table`，而 shipped 代码在 `FRAME 6 / 10` 仍报 `WRITES: 2`；按首末帧裁剪会删掉 #16a 依赖的证据，收益却只有 0.5~2.3ms → **保留原实现** |
+| `code + stage` 断点两阶段裁剪（M21） | `#preset=fib-tree&stage=1&frame=0&bp=18`（Stage 0 起点仅 12 行）重载 → `Stage 0 (31f)` + `Stage 1 (41f)`、`FRAME 1 / 41`、`Remove breakpoint at L18`；同链 `bp=18,63` 的 63 被最终 20 行源码剔除 |
 | 显式横滚契约（M20） | 豁免改读 `data-scroll-x-owner="true"`，并断言标记集合 == legacy class 集合；自检第 6 项 detail `header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 7 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553`（1.5ms） |
 | 全阶段振幅带（M20） | Stage 2 激活时，非激活的 `Stage 0 · 354f · LAZY` 仍绘 256 点带（`fill #f43f5e` / `opacity 0.09`），激活阶段保持 `0.26`；1:1 短轨迹阶段无带、芯片不出现（不造假数据） |
 | `code + stage` 组合链接（M20） | 手改 `dbl(6)`（17 帧）Apply 到 Stage 1 → `#preset=binary-search&stage=1&frame=0&code=…`（**294 字符**，两字段共存）；重载后 `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14`，链接带的是演进**起点**源码而非当前产物 |
@@ -263,7 +293,7 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
 | 导览零延迟 | 幕标签到「轨迹 + 判据」齐备 12~56ms（导览外手动切预设判据滞后 948ms） |
 | 七幕全预设 | 整轮实测激活预设集合 7/7（infinite-loop → fib-tree → pascal-comb → dp-matrix → fast-power → rainwater → binary-search），`TOUR COMPLETE · total 36.6s`（定时器限频环境） |
 | 导览续播 | ACT 3 中断 → `PAUSED · ACT 3/7` + `Resume Act 3/7`；续播跑到 `TOUR COMPLETE` 且 `8/8 PASS` |
-| 内核自检 | 770×553 下 **9/9 PASS**（FAIL 0），逐项毫秒：TDZ 4.6 / Fuse 0.7 / Recursion A-A′-B 0.3 / Halving 0.1 / Matrix 0.0 / Viewport & Container 1.5 / Downsampler 0.0（`500 frames -> 128 points · peak 42`）/ Permalink 0.5（`… bp 5,9 · watch 1 · code 41ch round-trip OK · code+stage=2 coexist OK`）/ Flame 0.4（`1334 frames -> 160 bars · tiled 0..1333 · breakpoint @#777 repFrame exact`）；页签标题 `Live Kernel Self-Check (26 Invariants)` |
+| 内核自检 | 770×553 下 **9/9 PASS**（FAIL 0），逐项毫秒：TDZ 4.6 / Fuse 0.7 / Recursion A-A′-B 0.3 / Halving 0.1 / Matrix 0.0 / Viewport & Container 1.5~2.8 / Downsampler 0.0（`500 frames -> 128 points · peak 42`）/ Permalink 0.5（`… bp 5,9 · watch 1 · code 41ch round-trip OK · code+stage=2 coexist OK`）/ Flame 0.4（`1334 frames -> 160 bars · tiled 0..1333 · breakpoint @#777 repFrame exact`）；页签标题 `Live Kernel Self-Check (27 Invariants)` |
 | 全容器零横向溢出（M19） | 自检第 6 项枚核实测 `header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 8 code/x-axis owners exempt by #12b`；AI 面板容器由 `266/251` 修到 `251/251`（首轮 FAIL 的元凶是不可断行的 `[MEMO_INJECTION_TARGET]` 把 `Jump #353` 顶出右沿 5px） |
 | 顶栏 | 44px 单行，`scrollWidth == clientWidth == 770`，`Tour` + 两枚轴模式芯片 + `Share` 全部加入后仍零溢出（`footer 770 == 770`、面板 `412 == 412`） |
 
@@ -280,20 +310,30 @@ TDZ 闭包 / 熔断前缀 / 递归 A-A′-B / 槽位与交错折半 / 矩阵读�
   M20 起**激活与非激活阶段都绘**（`0.26` / `0.09` 分层）；`<= 128` 帧的 1:1 曲线不存下沿，此时带整条不出现。
   逐帧精确仍需要帧级曲线；阶段数继续增多时 `0.09` 与面积包络 `0.07` 的层次差是否够用需重估。
 - 事件驱动跳幕有两种真实耗时，必须分开报：`Skip Act →` 落在 1334 帧投递**之前**实测 `16~21ms`（五轮），
-  落在投递**之后**仍是 `324 / 332 / 361 / 365 / 370 / 372ms`。
-  M19 把后者归因于「1334 根火焰条的 Commit 成本」，**M20 已证伪**：竖条虚拟化到恒 160 根后该耗时没变，
-  而 1334 帧单独落地只要 56ms 且零长任务、逐帧步进也是零长任务。
-  这 ~330ms 的内部占比（Worker 回传 / 诊断 / 下一幕首绘）仍未拆，是 v1.0 唯一带性能标签的敞口。
+  落在投递**之后** M20 是 `324 / 332 / 361 / 365 / 370 / 372ms`。
+  M19 把后者归因于「1334 根火焰条的 Commit 成本」，**M20 已证伪**（竖条降到恒 160 根后耗时没变，
+  而 1334 帧单独落地只要 56ms 且零长任务）；**M21 拆测结案**：大头是 Quick-Watch 在 1334 帧上
+  每帧重新 `new Function`（单趟 2872 次、整窗 6060 次、141ms），
+  加闸门后置的编译缓存后降到 `129~141ms`、长任务 `123~131ms`。
+  **剩余 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有扫描成本**：
+  要再压就得给候选验证设帧数上限或分层抽样，那会改变 #16b「至少一帧 TRUE」的完备性语义，
+  属于需要单独决策的事项，不在性能优化里顺手放宽。
 - URL 的 `stage` 只承诺 1..2 级 Apply 序列；`code`（上限 1600 字符）承载起点源码，M20 起两者**可共存**——
   共存时 `code` 取演进起点而非当前合成产物，超长则明说 `Link without code`，不退回预设原文冒充同一个现场。
-  仍未放宽的一处：`bp` 的行号上界按 **Stage 0 起点源码**计算，
-  断点若落在 Apply 合成代码新增的行上会被判越界丢弃，这类链接需人工补断点。`API Key` 从不进入 URL 或本地存储。
+  `bp` 的行界 M21 起改为**两阶段裁剪**（`stage >= 1` 时静态放宽到 `Math.max(起点行数, 64)`，
+  演进落地后再按最终源码行数二次过滤），打在合成代码新增行上的断点现在能随链接复现。
+  `API Key` 从不进入 URL 或本地存储。
 - AI 面板遥测条的 `537px > 251px` 已在 M19 修掉（徽章折行 + 芯片 `truncate`，弃用横滚退路），
   自检第 6 项也从「只测顶栏」升级为**全量纵向滚动盒枚举**；M20 又把豁免口径从 class 正则
   改为显式 `data-scroll-x-owner="true"`，并断言「标记集合 == legacy class 集合」，
   改类名不再能让豁免静默扩大。
-  **但枚举域盲区仍在**：断言只看纵向滚动盒，flex 容器的横向溢出扫不到——
-  本轮 footer 的 `4572/770`（1334 根竖条把火焰行撑到 4009px）就是靠降子项数而非靠断言消掉的。
+  **枚举域盲区已收窄一半**：M21 把 `header` / `footer` / 整页根容器这三个 `overflow: visible` 的
+  flex chrome 纳入具名断言（`footer 4572/770` 正是 M20 前的真实缺陷值），
+  并用「注入 3800px 假子元素 → 该项转 FAIL」的反证确认它真的有牙。
+  仍未解决的是另一半：其余 flex 容器若出现同类撑爆依旧不在断言范围内——
+  盲目扩大枚举域会把设计内的 `overflow-hidden` 裁剪误判成溢出，该权衡尚未收敛。
+- Watch 求值函数缓存用「超限整体清空」（512 条）而不是 LRU：极端多阶段 / 多预设会话理论上
+  会一次性丢弃全部已编译函数并在下一轮重编译。实测暖身后每轮编译 0 次、未见抖动，故未引入 LRU 复杂度。
 - 火焰轨聚合让细粒度交互退化：`> 160` 帧时一次点击的定位粒度是 8 帧（1334 / 160），
   `repFrame` 只保证「断点优先、否则最深」，不保证等于用户想去的帧；精确逐帧仍走方向键或包络图横轴。
 - 剪贴板成功分支未实测：自动化环境没有用户手势，`writeText` 被拒并降级为 `Link in URL`；
@@ -311,6 +351,6 @@ src/core/sandboxRunner.ts       Blob Worker 沙箱 + 3000ms 看门狗
 src/services/aiDiagnostics.ts   运行时证据判档、等价代码合成、Benchmark 指标
 src/App.tsx                     IDE 工作台、时间旅行回放、全息快照栈、评委导览、内核自检台
 AGENT_GUIDE.md                  架构契约 + 三大铁律（反幻觉回味 / 强制归档 / 原子化提交）
-docs/devlogs/INDEX.md           里程碑索引、26 条系统不变量、实测基线、回归核对表
-docs/devlogs/M1..M20-*.md       20 篇原子化演进日志
+docs/devlogs/INDEX.md           里程碑索引、27 条系统不变量、实测基线、回归核对表
+docs/devlogs/M1..M21-*.md       21 篇原子化演进日志
 ```

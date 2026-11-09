@@ -1,6 +1,6 @@
 # M20 · 火焰轨 160 桶 DOM 虚拟化、显式横滚契约、`code + stage` 组合演进与 9 项自检（v1.0 封盘）
 
-Commit：本次提交（`git log -1`）— feat(v1-seal): 完成 Milestone 20 火焰图160桶DOM虚拟化、显式横滚契约、code+stage组合演进与9项自检
+Commit：`d81e6c1` — feat(v1-seal): 完成 Milestone 20 火焰图160桶DOM虚拟化、显式横滚契约、code+stage组合演进与9项自检
 
 ## Why · 背景动机
 

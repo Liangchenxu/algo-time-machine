@@ -27,7 +27,8 @@
 | M17 | `7a3b96a` | [M17-dual-axis-envelope-and-act-skip.md](./M17-dual-axis-envelope-and-act-skip.md) | 包络图双轴（绝对帧刻度 ⇄ 归一化 / 线性 ⇄ sqrt）、128 点保峰抽样、一键整幕跳过、七幕全预设与 URL 现场分享 |
 | M18 | `3c95084` | [M18-exact-cursor-and-full-permalink.md](./M18-exact-cursor-and-full-permalink.md) | 游标真实帧栈深与桶峰值双指示、全状态 URL 自动演进、事件驱动零延迟跳幕与 8 项内核自检（v1.0 收官） |
 | M19 | `9e0c81d` | [M19-zero-overflow-and-minmax-band.md](./M19-zero-overflow-and-minmax-band.md) | 全容器零横向溢出治理、128 桶保峰保谷 Min-Max 振幅带、跳幕短路取消在跑批次与自定义源码 `&code=` 分享 |
-| M20 | 本次提交 | [M20-flame-virtualization-and-v1-seal.md](./M20-flame-virtualization-and-v1-seal.md) | 火焰轨 160 桶 DOM 虚拟化、`data-scroll-x-owner` 显式横滚契约、全阶段振幅带、`code+stage` 组合演进与 9 项自检（v1.0 封盘） |
+| M20 | `d81e6c1` | [M20-flame-virtualization-and-v1-seal.md](./M20-flame-virtualization-and-v1-seal.md) | 火焰轨 160 桶 DOM 虚拟化、`data-scroll-x-owner` 显式横滚契约、全阶段振幅带、`code+stage` 组合演进与 9 项自检（v1.0 封盘） |
+| M21 | 本次提交 | [M21-watch-fn-cache-and-longtask-autopsy.md](./M21-watch-fn-cache-and-longtask-autopsy.md) | Watch 求值函数编译缓存消解 285~294ms 长任务、`footer` 纳入第 6 项溢出自检、`code+stage` 断点行界两阶段对齐（v1.0 终极收官） |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -364,6 +365,7 @@
     两者数量不等即 FAIL 并回显两侧计数——这样改类名既不能让豁免静默扩大，也不能让标记静默漂离审计口径。
     该断言的枚举范围仍是纵向滚动盒；**flex 容器不是豁免对象也不是盲区**：
     它的横向溢出必须由子项数量/宽度自律解决（见 #26b），不得靠给父层加 `overflow` 藏起来。
+    （M21 起页面级 flex chrome 由第 6 项直接断言零溢出，见 #27d；「只认显式属性 + 与 legacy 集合相等」继续生效。）
     （b）**火焰轨的 DOM 竖条数恒 `<= MAX_FLAME_BARS = 160`**：`buildFlameBuckets(frames, breakpoints, hotspotLine, currentFrameIdx?)`
     在 `<= 160` 帧时逐帧 1:1，超过时均匀切成**恒 160 个桶**，桶边界 `floor(b*n/160)` 保证无缝平铺 `0..n-1`、
     相邻桶首尾相接且桶宽 `>= 1`（永不为空）。每桶必须保留**真实证据**而不是新真相：
@@ -379,16 +381,59 @@
     跑出根本不存在的 Stage 3）；不带 `stage` 时取当前 `sourceCode`。只要这份源码不等于预设原文就写 `code`。
     还原侧不改语义：`sourceCode` 初值取 `code ?? preset.code` 先跑出自定义 Stage 0，
     再由既有演进 effect 按序真实 Apply 到目标级（#24b 的「不涨级即停止、不伪造阶段」继续生效）。
+    （M21 起 `code + stage` 共存时的 `bp` 行界改两阶段裁剪，见 #27e；「起点源码而非合成产物」的取值口径不变。）
     （e）**度量不得为迎合假设而软化**：M19 把「投递后跳幕 ~361ms」归因于 1334 根火焰条的 Commit，
     M20 虚拟化后竖条确实降到 160（-88.0%）并顺带消除一个真实的 4009px 溢出，
     但该场景实测 324 / 332 / 361 / 365 / 370 / 372ms **没有改善**，
     而单独落地 1334 帧只花 56ms 且零长任务、在已就位的 1334 帧上逐帧步进也是零长任务——
     因此必须报「归因被推翻、此项仍未闭合」，不得写成「虚拟化已解决投递后延迟」。
+    （M21 已拆测出真凶是 Quick-Watch 的逐帧重编译并把它消掉，见 #27b；本条「推翻就报推翻」的纪律原样继续生效。）
 
-## 当前实测基线（M20 复测，视口 770×553，`npm run build` 零 TS 报错）
+27. **Watch 求值函数编译缓存与顶栏/底栏双端零溢出断言**（M21 确立，v1.0 收官）：
+    （a）**缓存只能站在闸门之后**：`evalWatchExpression` 的三道闸门（字符白名单、禁调用形态、禁宿主名）
+    **每次调用都要重跑**，只有全部通过之后才允许读写 `WATCH_FN_CACHE`。
+    若为了命中率把闸门也一起缓存或跳过，等于给 URL / Quick-Watch 输入开一条绕过白名单的执行入口，
+    直接违反 #13d / #14d——`alert(n)`、`process.exit()` 必须仍然是 `INVALID`，
+    作用域缺变量必须仍然是 `ERROR` 而不是 `FALSE`。
+    缓存键**必须包含形参名序列**（`${expr}\u0000${names.join(',')}`）：`new Function(...names, body)` 的
+    形参表由「这一帧可见变量」决定，只按表达式缓存会把后一帧的 `dp` 值按位置塞进前一帧 `n` 的形参，
+    产出既不报错也不正确的求值结果。
+    失效策略也必须分情形：**编译失败不写缓存**（写进去永远跑不起来），
+    **运行期抛错不剔除缓存**（函数本身合法，只是这一帧缺变量；剔除会让恒定越界的断言退回逐帧重编译，
+    而那正是本轮要消掉的开销）。缓存设上限（`WATCH_FN_CACHE_LIMIT = 512`，超限整体清空），
+    否则换预设 / 换阶段累积出的变量组合会让它无界增长。
+    （b）**性能声明必须绑定测量口径**：本轮只承诺「消掉重复编译」，
+    实测投递后跳幕由 `324 / 332 / 361 / 365 / 370 / 372ms` 降到
+    `129 / 134 / 134 / 139 / 140 / 141ms`、长任务由 `285~294ms` 降到 `123 / 131ms`，
+    剩余的 ~130ms 是「对 1334 帧逐帧调用已编译函数 + `Object.keys(vars)`」的固有扫描成本，不是编译成本，
+    **不得写成「长任务已归零」**（#26e 的延续）。拆测用的 `performance.now()` 探针属临时插桩，
+    提交前必须确认零残留；带探针的占比表与无探针的最终耗时表要分开标注，不得混为一张表。
+    （c）**为省几毫秒而删证据，一律否决**：`analyzeMatrixWrites` 的「首帧与末帧都没有二维变量就 O(1) 返回空」
+    这条短路**没有实现**，因为它不成立而不是因为它不值：把二维表放在 `if` 块内时，
+    首帧（函数进入）与末帧（`return` 之后）的作用域里都没有它， shipped 代码却在 `FRAME 6 / 10` 报出
+    `WRITES: 2`——按首末帧裁剪会让这条证据凭空消失，而 #16a 的「只读输入与可变状态表同时存在才给一维滚动压缩」
+    正依赖它。实测该函数在 1334 帧标量轨迹上只花 `0.5~2.3ms`（占剩余任务的 1~2%），
+    **收益不足以支付语义损失**，此类提案必须带着两侧数字一起进文档，而不是默默实现或默默删掉。
+    （d）**零溢出断言必须覆盖 flex 的页面级 chrome**：自检第 6 项除纵向滚动盒外，
+    还要逐个断言 `header` / `footer` / 整页根容器（三者皆 `overflow: visible`）满足
+    `scrollWidth <= clientWidth + 1`，detail 回显 `header a/b · footer c/d` 两段原始数字。
+    理由不是「多测一处」，而是 M20 的 `footer 4572/770` 证明过：**flex 容器不属于 `overflowY auto|scroll` 枚举域**，
+    只扫滚动盒就会漏掉由 flex 子项 `min-width: auto` 撑爆的溢出。
+    带 `overflow-hidden` 的容器**明确排除**在外——那是设计内的裁剪，把它算成溢出等于把裁剪当 bug。
+    新增断言必须做反证（注入一个超宽子元素，确认该项转 FAIL 且其余项不受影响），
+    否则「加了断言」与「断言有牙」是两件事。
+    （e）**断点行界按两阶段裁剪，缺一半即为假**：链接带 `stage >= 1` 时 `parseShareHash` 把 `bp` 的静态上界
+    放宽到 `Math.max(起点行数, SHARE_STAGE_BP_FLOOR = 64)`，因为现场最终跑的是 Apply 合成代码，
+    其行数可以多于 Stage 0 起点；**演进落地后必须再按最终 `sourceCode` 的真实行数二次过滤**，
+    否则放宽就退化成无界放行。两侧都要有实测：`bp=18` 在 Stage 0 只有 12 行时仍能还原为
+    `Remove breakpoint at L18`，而同链的 `bp=63` 必须被 20 行的最终源码剔除。
+    读取最终源码只能走 `liveActionsRef`（#21a「只取最新渲染」的口径），不得新开过期闭包。
 
-> M20 轮在 770×553 同源 iframe 测试台重跑了 7 个内置预设的主路径 + 一条越界断言边界，
-> 并逐项验证火焰轨 160 桶虚拟化、显式横滚契约、全阶段振幅带与 `code + stage` 组合链接（见下表与小节）；
+## 当前实测基线（M21 复测，视口 770×553，`npm run build` 零 TS 报错）
+
+> M21 轮在 770×553 同源 iframe 测试台重跑了 7 个内置预设的主路径 + 边界路径，
+> 并逐项验证 Watch 编译缓存后的长任务拆测、footer/根容器零溢出断言（含注入反证）与
+> `code + stage` 断点两阶段裁剪（见下表与小节）；
 > 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`、`crypto.*` 变体）沿用 M12–M15 实测值。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
@@ -530,6 +575,13 @@
 | `code + stage` 组合链接（M20） | 手改 `dbl(6)`（17 帧）Apply 到 Stage 1 后导出 `#preset=binary-search&stage=1&frame=0&code=Ly8gTTIw…`（全长 **294 字符**，两个字段共存）；重载后胶囊 `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14`、源码区是合成产物而 Stage 0 仍是自定义起点——链接带的是**演进起点**而非当前产物 |
 | 9 项内核自检（M20） | 页签 `Live Kernel Self-Check (26 Invariants)`，实测 **9/9 PASS**（FAIL 0），逐项毫秒 `TDZ 4.6 / Fuse 0.7 / Recursion 0.3 / Halving 0.1 / Matrix 0.0 / Viewport 1.5 / Downsampler 0.0 / Permalink 0.5 / Flame 0.4`；第 9 项 detail `1334 frames -> 160 bars (cap 160) · tiled 0..1333 with no gap or overlap · breakpoint @#777 kept in 1 bucket(s) and repFrame lands exactly on it · peak depth 10 (real 10) · hotspot L42 kept`；第 8 项 detail 追加 `code+stage=2 coexist OK` |
 | 预设主路径与边界（M20） | 7/7 主路径全过（40 / 29 / 10 / 13 / 31 / 13 / 1334 帧，热点 `L9 11x / L14 6x / L2 1x / L2 6x / L2 15x / L2 11x / L5 666x`，火焰竖条依次为 40 / 29 / 10 / 13 / 31 / 13 / **160**）；越界断言 `dp[99][0] === 1` → `ERROR`；非法哈希仍整体忽略回默认预设 |
+| 长任务四段拆测（M21，带临时探针） | 1334 帧路径：`instrumentCode 1.7~2.4ms`、`Worker 往返含结构化克隆 26.4~35.8ms`、`deriveRuntimeQuickWatches 1.3ms（最好）/ 135.4 + 135.1ms（StrictMode 双跑）/ 141ms（单趟，编译 2872 个 Function）`、`runAIDiagnostics（skipDelay）0.8~1.5ms`、`analyzeMatrixWrites 0.5~2.3ms`；整个跳幕窗口累计 `6060` 次 `new Function`。**真凶是 Quick-Watch 的逐帧重编译**，既非火焰条 Commit（56ms）也非诊断 |
+| Watch 编译缓存效果（M21） | 投递后跳幕六轮 `129 / 134 / 134 / 139 / 140 / 141ms`（M20 基线 `324 / 332 / 361 / 365 / 370 / 372ms`，均值降幅约 -61%），`longtask` 由 `280~294ms` 降至 `123 / 131ms`；暖身后各轮编译次数 0。投递前五轮 `16 / 17 / 18 / 19 / 21ms` 无回归。**剩余 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有扫描成本**，不得写成长任务已归零 |
+| 闸门未因缓存放宽（M21） | `dp[99][0] === 1` 仍 `ERROR`（不谎报 `FALSE`）；`alert(n)`、`process.exit()` 仍 `INVALID`；Watch 四态与 `→T` 语义不变。缓存键含形参名序列（`${expr}\\u0000${names}`），只按表达式缓存会跨帧串参 |
+| footer / 根容器零溢出断言（M21） | detail 实测 `header 770/770 · footer 770/770 · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 670/670) · 6 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553`，2.8ms。**反证已做**：往 footer 注入 3800px 假子元素后 detail 变 `footer 4365/770 · chrome overflow: footer 4365>770`，整台降到 `8/9 PASS` 且仅该项 FAIL |
+| `analyzeMatrixWrites` 短路被否（M21） | 提案的「首末帧都无二维变量即 O(1) 返回空」不成立：手写 `if` 块内二维表样本，首帧（函数进入）与末帧（return 之后）作用域均无 `table`，而 shipped 代码在 `FRAME 6 / 10` 仍报 `WRITES: 2`——按首末帧裁剪会删掉 #16a 依赖的证据；该函数实测仅 `0.5~2.3ms`（占剩余任务 1~2%），**收益不足以支付语义损失，故未实现** |
+| `code + stage` 断点两阶段裁剪（M21） | `#preset=fib-tree&stage=1&frame=0&bp=18`（38 字符，Stage 0 起点源码仅 12 行）重载后 `Stage 0 (31f)` + `Stage 1 (41f)`、`FRAME 1 / 41`、L18 徽章为 `Remove breakpoint at L18`；同链改 `bp=18,63` 后 63 被最终 20 行源码剔除，仅保留 L18 |
+| 9 项内核自检（M21） | 页签 `Live Kernel Self-Check (27 Invariants)`，实测 **9/9 PASS**（FAIL 0）；预设主路径与火焰轨 160 根上限、`data-scroll-x-owner` 同源计数、`code+stage` 共存解析、桶平铺与断点保留全部复测通过 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -620,9 +672,12 @@
 - [x] 带 `code` 的链接只承诺源码可复现，不承诺 `stageHistory`：手改源码 + 已 Apply 过的多级现场仍只能带 `code` 或带 `stage` 二选一（`needsCode = sourceCode !== presetSource && !stageReproducible`），两者同时存在时优先走 `stage`（M19 报备 → **M20 闭合**：解除互斥，带 `stage` 时 `code` 取 `stageHistory[0].sourceCode` 即演进起点，还原侧既有 effect 先跑自定义 Stage 0 再按序真实 Apply；实测手改 `dbl(6)` + Apply 导出 294 字符 `#preset=binary-search&stage=1&frame=0&code=…`，重载后 `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14`。注意当初若直接带「当前源码」会把合成产物当 Stage 0 再多演进一级，跑出根本不存在的 Stage 3）
 - [x] 自检第 6 项的横滚豁免按 class 正则匹配，`PRE` / `overflow-x-auto` 一旦改名豁免会静默扩大（M19 报备 → **M20 闭合**：#12b 授权的容器全部显式标注 `data-scroll-x-owner="true"`，断言改读该属性，并额外要求「标记集合 == legacy class 规则集合」，不等即 FAIL 并回显两侧计数；实测 `7 explicit data-scroll-x-owner exempt == legacy #12b set`）
 - [x] 「投递后跳幕 361ms 是因为 1334 根火焰条的 DOM 提交」这条归因需要验证（M19 的推断 → **M20 证伪**：竖条确实从 1334 降到 160（-88.0%）、顺带消除一个真实的 `4009px` 横向溢出（footer 4572/770 → 770/770、整页 451 个元素），但该场景六轮实测 `324 / 332 / 361 / 365 / 370 / 372ms` 没有改善；对照：1334 帧那一跑单独落地只花 56ms 且零长任务、已就位时逐帧步进也零长任务。耗时项仍未闭合，见下条）
-- [ ] 投递后跳幕的 ~330ms 阻塞任务尚未定位到具体消费者：已知它不是火焰条 Commit（56ms / 0 长任务），`longtask` 只给出「点击后 6ms 起、持续 285~294ms」这一条信息，未拆出沙箱回传 / 诊断 / 下一幕首绘各自占比（M20 新遗留）
-- [ ] 自检第 6 项的枚举范围是纵向滚动盒（`overflowY auto|scroll`），**flex 容器的横向溢出不在扫描内**：M20 的 footer 溢出（4572/770）就是靠虚拟化而非靠断言发现的。是否把「所有 `clientWidth > 0` 且非横滚责任人的盒子」纳入断言尚未决定，扩大范围可能把设计内的 `overflow-hidden` 裁剪误判成溢出（M20 新遗留）
-- [ ] `code + stage` 共存时 `bp` 的行号上界仍按 Stage 0 起点源码计算（#25d 未放宽）：断点若落在 Apply 合成代码新增的行上会被判越界丢弃，此类链接需人工补断点（M20 新遗留）
+- [x] 投递后跳幕的 ~330ms 阻塞任务尚未定位到具体消费者：已知它不是火焰条 Commit（56ms / 0 长任务），`longtask` 只给出「点击后 6ms 起、持续 285~294ms」这一条信息，未拆出沙箱回传 / 诊断 / 下一幕首绘各自占比（M20 报备 → **M21 拆测并消解主因**：四段 `performance.now()` 拆测显示 `instrumentCode 1.7~2.4ms`、`Worker 往返含克隆 26.4~35.8ms`、`runAIDiagnostics（skipDelay）0.8~1.5ms`，而 `deriveRuntimeQuickWatches` 单趟 **141ms / 编译 2872 个 Function**、StrictMode 双跑 135.4 + 135.1ms、整窗累计 6060 次——真凶是 Quick-Watch 扫描里 `evalWatchExpression` 的逐帧重编译。加 `(expr, paramKeys)` 编译缓存后六轮实测 `129 / 134 / 134 / 139 / 140 / 141ms`、长任务 `123 / 131ms`，降幅约 -61%。**剩余 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有扫描成本，仍未归零**）
+- [x] 自检第 6 项的枚举范围是纵向滚动盒（`overflowY auto|scroll`），**flex 容器的横向溢出不在扫描内**：M20 的 footer 溢出（4572/770）就是靠虚拟化而非靠断言发现的。是否把「所有 `clientWidth > 0` 且非横滚责任人的盒子」纳入断言尚未决定，扩大范围可能把设计内的 `overflow-hidden` 裁剪误判成溢出（M20 报备 → **M21 闭合**：不盲目扩大枚举域，改为显式断言 `header` / `footer` / 整页根容器三个 `overflow: visible` 的 flex chrome 零溢出，`overflow-hidden` 容器明确排除；反证已做——注入 3800px 假子元素后该项转 FAIL、detail 变 `chrome overflow: footer 4365>770`、整台 8/9 PASS，其余八项不受影响）
+- [x] `code + stage` 共存时 `bp` 的行号上界仍按 Stage 0 起点源码计算（#25d 未放宽）：断点若落在 Apply 合成代码新增的行上会被判越界丢弃，此类链接需人工补断点（M20 报备 → **M21 闭合**：两阶段裁剪——`parseShareHash` 在 `stage >= 1` 时放宽到 `Math.max(起点行数, SHARE_STAGE_BP_FLOOR = 64)`，演进落地后再按 `liveActionsRef.current.sourceCode` 的真实行数二次过滤。实测 `#preset=fib-tree&stage=1&frame=0&bp=18`（Stage 0 仅 12 行）重载后 L18 徽章为 `Remove breakpoint at L18`；同链 `bp=18,63` 的 63 被最终 20 行源码剔除。两侧都有实测才算契约成立，见 #27e）
+- [ ] Quick-Watch 全轨迹扫描的**固有成本**仍在：缓存只消掉重复编译，1334 帧 × 每条候选的「已编译函数调用 + `Object.keys(vars)` + 数组映射」无法靠缓存消除，实测残留 ~130ms（M21 新遗留）
+- [ ] `WATCH_FN_CACHE` 的失效策略是「超限整体清空」（`WATCH_FN_CACHE_LIMIT = 512`），不是 LRU：极端多阶段 / 多预设会话下会一次性丢掉全部已编译函数、下一轮重新编译。当前实测暖身后每轮编译 0 次，未观察到抖动（M21 新遗留）
+- [ ] 第 6 项的 chrome 断言只覆盖 `header` / `footer` / 根容器三个具名盒子，其它 flex 容器若将来出现同类撑爆仍不在断言范围内——扩大枚举域会误判设计内 `overflow-hidden` 裁剪，仍未解决（M21 新遗留）
 - [ ] 桶聚合让细粒度交互退化：`> 160` 帧时一次点击最多只能定位到 8 帧的粒度（1334 / 160），精确逐帧仍需方向键或包络图横轴点击；桶内 `repFrame` 只保证「断点优先、否则最深」，不保证等于用户想去的帧（M20 新遗留）
 - [x] 抽样后游标圆点画在「所在桶的最大栈深」上，可能高于该帧真实栈深（M17 报备 → **M18 闭合**：实心点改取 `frames[markerFrame].callStack.length`，桶峰值降级为 dash 空心环 + 竖向细线，只在折叠时出现，芯片回显 `frame depth X (bucket peak Y)`；实测 467 帧抽样阶段三点 7/10、9/10、10/10 与火焰轨 54%/69%/77% × 峰值 13 逐一对上。128 点折线本身的下降沿仍是抹平的，只是不再冒充当前帧真相）
 - [x] 条件等待期间的 `Skip Act →` 让位粒度等于 `tourWaitFor` 的 60ms 轮询周期（M17 报备 → **M18 闭合**：`waitUntil` 改事件驱动，React 提交与 Skip/Stop/外部 pointerdown 都直接唤醒等待者，定时器仅作兜底；ACT 2 等待期实测 19ms，M17 同路径 977ms；ACT 1 重提交同批场景仍 304ms，见上条未隔离项）

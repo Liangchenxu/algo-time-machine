@@ -286,7 +286,7 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 26;
+const KERNEL_INVARIANT_COUNT = 27;
 
 /** 评委导览的七幕脚本：每一幕都驱动真实内核，不做假动画，note 里点名本幕负责的预设 */
 const TOUR_ACTS: { title: string; note: string }[] = [
@@ -492,6 +492,13 @@ interface ShareState {
 /** 分享链接里最多带 16 个断点，避免把手工堆出来的行号列表整份塞进 URL */
 const SHARE_BP_LIMIT = 16;
 
+/**
+ * 链接带 `stage >= 1` 时，`bp` 的静态上界至少要容得下 Apply 合成产物——
+ * 合成代码比 Stage 0 起点源码更长，按起点行数裁剪会把打在新行上的断点静默丢掉。
+ * 真正的裁剪在演进落地后按最终源码行数二次过滤，所以这里只是放行下限。
+ */
+const SHARE_STAGE_BP_FLOOR = 64;
+
 /** 手改源码最多带 1600 字符：再长就该走文件而不是地址栏 */
 const SHARE_CODE_LIMIT = 1600;
 
@@ -509,8 +516,12 @@ const parseShareHash = (raw: string): ShareState | null => {
   const code = params.get('code') ? decodeShareCode(params.get('code') as string) : null;
   const stage = Number.parseInt(params.get('stage') ?? '', 10);
   const frame = Number.parseInt(params.get('frame') ?? '', 10);
-  // 行号上界要用「真正会跑的那份源码」算，带 code 的现场不能拿预设行数当界
-  const lineCount = (code ?? preset.code).split('\n').length;
+  // 行号上界要用「真正会跑的那份源码」算，带 code 的现场不能拿预设行数当界。
+  // M21：链接同时带 stage >= 1 时，现场最终跑的是 Apply 合成代码，其行数可以多于 Stage 0 起点，
+  // 所以这里只放宽到 SHARE_STAGE_BP_FLOOR 下限，真正的裁剪留到演进落地后按最终源码行数二次过滤。
+  const baseLineCount = (code ?? preset.code).split('\n').length;
+  const targetStage = Number.isInteger(stage) && stage >= 1 ? stage : 0;
+  const lineCount = targetStage >= 1 ? Math.max(baseLineCount, SHARE_STAGE_BP_FLOOR) : baseLineCount;
   const bp = [
     ...new Set(
       (params.get('bp') ?? '')
@@ -740,6 +751,15 @@ const WATCH_FORBIDDEN =
 type WatchResult = { state: 'TRUE' | 'FALSE' | 'INVALID' | 'ERROR'; detail: string };
 
 /**
+ * 闸门之后编译出的求值函数按 (表达式, 形参名序列) 缓存复用。
+ * 键里必须带形参名序列：`new Function(...names, ...)` 的签名由该帧可见变量决定，
+ * 只按表达式缓存会让下一帧用同一函数去接不同的形参表（把 `dp` 的值塞进 `n` 的位置）。
+ * 缓存只在三道闸门全过之后写入，因此命中路径与逐次校验路径的准入判定完全一致。
+ */
+const WATCH_FN_CACHE = new Map<string, Function>();
+const WATCH_FN_CACHE_LIMIT = 512;
+
+/**
  * 条件断言求值：只在当前帧的变量快照上计算，且先过三道白名单闸门
  * （字符集、禁止调用形态、禁止宿主对象），因此求值面等价于一次纯算术比较，
  * 不给页面全局对象留入口。求值失败返回 ERROR 而不是抛出。
@@ -758,11 +778,28 @@ function evalWatchExpression(expr: string, vars: Record<string, any>): WatchResu
   if (WATCH_FORBIDDEN.test(trimmed)) return { state: 'INVALID', detail: 'host objects are not allowed' };
 
   const names = Object.keys(vars).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+  // 闸门全过才允许走缓存；键含形参名序列，杜绝跨作用域串参
+  const cacheKey = `${trimmed}\u0000${names.join(',')}`;
+  let compiled = WATCH_FN_CACHE.get(cacheKey);
+  if (!compiled) {
+    try {
+      // eslint-disable-next-line no-new-func
+      compiled = new Function(...names, `return (${trimmed});`);
+    } catch (e: any) {
+      // 语法本身不合法：编译就抛，返回 ERROR 且不写缓存（写进去也永远跑不起来）
+      return { state: 'ERROR', detail: (e?.message || 'compilation failed').slice(0, 48) };
+    }
+    // 换预设 / 换阶段会不断引入新的可见变量组合，不设上限就是无界内存增长
+    if (WATCH_FN_CACHE.size >= WATCH_FN_CACHE_LIMIT) WATCH_FN_CACHE.clear();
+    WATCH_FN_CACHE.set(cacheKey, compiled);
+  }
   try {
-    // eslint-disable-next-line no-new-func
-    const value = new Function(...names, `return (${trimmed});`)(...names.map((n) => vars[n]));
+    const value = compiled(...names.map((n) => vars[n]));
     return { state: value ? 'TRUE' : 'FALSE', detail: String(value) };
   } catch (e: any) {
+    // 作用域缺变量照旧返回 ERROR，不谎报 FALSE（#13d）；这里**不剔除缓存**——
+    // 函数本身合法，只是这一帧没有该变量；剔除会让恒定越界的断言退回逐帧重编译，
+    // 而「逐帧重编译」正是本轮要消掉的那笔开销。
     return { state: 'ERROR', detail: (e?.message || 'evaluation failed').slice(0, 48) };
   }
 }
@@ -1410,7 +1447,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M20',
-    commit: '本次提交',
+    commit: 'd81e6c1',
     doc: 'docs/devlogs/M20-flame-virtualization-and-v1-seal.md',
     title: '火焰图 160 桶 DOM 虚拟化、显式横滚契约、code+stage 组合演进与 9 项自检收官',
     why: 'M19 把跳幕残余拆成两支，但只解释了投递前那一支；投递之后仍要 361~370ms，当时的假设是「1334 帧 1:1 渲染的火焰条把 Layout/Commit 压垮了」。同时 M19 留下三条没闭合的口子：横滚豁免按 class 匹配，改类名会让豁免静默扩大；Min-Max 振幅带只给激活阶段画，多阶段对比时非激活阶段的波谷仍然看不见；手改源码与已 Apply 的现场只能二选一，评委粘自己的代码跑过 Apply 之后链接就装不下完整现场了。',
@@ -1439,6 +1476,35 @@ const DEVLOGS: DevlogEntry[] = [
       '全阶段振幅带：fib(10) 演进到 Stage 2 激活时，非激活的 Stage 0（354f · LAZY）仍绘出 256 点带（fill #f43f5e · opacity 0.09），激活阶段自身的 0.26 带与面积包络 0.18 / 0.07 层次可辨；1:1 阶段（21f）无带、芯片不出现，符合 #25b。',
       'code + stage 组合链接：手改 dbl(6)（17 帧）Apply 到 Stage 1 后导出 #preset=binary-search&stage=1&frame=0&code=Ly8gTTIw…（全长 294 字符），重载后落在 Stage 0 (17f) + Stage 1 (14f)、FRAME 1 / 14、源码区是合成产物而 Stage 0 胶囊仍是自定义起点——手改源码的多级现场第一次可整条转发。',
       '回归与纪律：7 个预设主路径全过（40 / 29 / 10 / 13 / 31 / 13 / 1334 帧，热点 L9 11x、L14 6x、L2 1x、L2 6x、L2 15x、L2 11x、L5 666x）；边界 dp[99][0] === 1 → ERROR；页签 Live Kernel Self-Check (26 Invariants) 实测 9/9 PASS（FAIL 0），逐项毫秒 4.6 / 0.7 / 0.3 / 0.1 / 0.0 / 1.5 / 0.0 / 0.5 / 0.4；npm run build 零报错、src emoji 0 命中、docs/devlogs 21 篇表格列数一致、26 条不变量 == KERNEL_INVARIANT_COUNT 26、footer 770/770、重载后控制台无新增 error/warn。',
+    ],
+  },
+  {
+    tag: 'M21',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M21-watch-fn-cache-and-longtask-autopsy.md',
+    title: 'Watch 求值函数编译缓存、285~294ms 长任务四段拆测、footer 零溢出断言与断点行界两阶段对齐',
+    why: 'M20 把「投递后跳幕 ~330ms」从「1334 根火焰条」这条错误归因里摘了出来，但只留下「未闭合」四个字——到底是哪一段在阻塞主线程完全没拆。同期还有两条 M19/M20 反复登记的口子：第 6 项只扫纵向滚动盒，flex 的 footer 溢出（曾是 4572/770）扫不到；`code + stage` 共存时断点行号按 Stage 0 起点裁剪，打在合成代码新增行上的断点会被静默丢弃。',
+    what: [
+      'App.tsx：evalWatchExpression 在三道闸门全部通过之后，把编译好的 Function 按 (表达式, 形参名序列) 存进 WATCH_FN_CACHE（Map，上限 512，超限整体清空）。闸门仍然每次都跑，缓存只在闸门之后读写，所以准入判定与逐次校验完全一致；缓存键必须含形参名序列，因为 new Function(...names, ...) 的签名由这一帧可见变量决定，只按表达式缓存会把 dp 的值塞进 n 的位置。编译失败不写缓存，运行期作用域缺变量照旧返回 ERROR 且**不剔除缓存**——剔除会让恒定越界的断言退回逐帧重编译，而那正是要消掉的开销。',
+      'App.tsx：自检第 6 项新增 chrome 断言——header / footer / 整页根容器三个 overflow: visible 的 flex 盒子逐个断言 scrollWidth <= clientWidth + 1，detail 改为 header 770/770 · footer 770/770 · N scroll boxes zero overflow；带 overflow-hidden 的容器明确排除在外，因为那是设计内裁剪，把它算进去等于把裁剪当 bug。',
+      'App.tsx：parseShareHash 在链接带 stage >= 1 时把 bp 的静态上界放宽到 Math.max(起点行数, SHARE_STAGE_BP_FLOOR = 64)，演进落地后再按 liveActionsRef.current.sourceCode 的真实行数二次裁剪；为此 liveActionsRef 增加 sourceCode 字段（沿用 #21a 的「只读最新渲染」口径，不新开闭包）。',
+      '文档：新建 M21 DevLog 记录四段占比拆测（含探针为临时插桩、提交前已全部移除）；INDEX 追加 #27，把 M20 的第 2 / 第 3 条遗留勾选闭合，并如实保留 analyzeMatrixWrites 短路这条被实测否掉的项。',
+    ],
+    conflicts: [
+      '拆测前我先怀疑的是 Worker 回传与结构化克隆，实测把它排除了：1334 帧那一跑的 instrumentCode 1.7~2.4ms、worker 往返（含回传克隆）26.4~35.8ms，都不足以解释 280~294ms。真正的大头在渲染期的 deriveRuntimeQuickWatches——同一段 1334 帧轨迹，最省的一次 1.3ms，最贵的一次 141ms，而那一趟 new Function 编译了 2872 次；整幕跳幕窗口内累计 6060 次编译。指令给出的「逐帧重新构造 Function」这条假设，在 Quick-Watch 这条路径上成立。',
+      '缓存之后同一场景实测投递后跳幕 129 / 134 / 134 / 139 / 140 / 141ms（六轮）、长任务 123 / 131ms，编译次数从 6060 降到个位数（暖身后各轮为 0）。但剩下约 130ms 并没有消失：那是对 1334 帧逐帧调用已编译函数 + Object.keys(vars) 的固有扫描成本，不是编译成本。因此本轮只承诺「消掉重复编译」，不承诺「长任务归零」，也不把 M20 那句「未闭合」改写成「已解决」。',
+      'analyzeMatrixWrites 的首末帧 O(1) 短路被实测否掉，没有实现。理由是它不成立而不是它慢：手写一段把二维表放在 if 块内的样本，FRAME 6 / 10 上 shipped 代码照样报出 WRITES: 2——因为 table 只在中间帧的作用域里存在，首帧（函数进入）和末帧（return 之后）都没有它。按「首末帧无二维变量就返回空」裁剪，这条证据会直接消失，而 #16a 恰恰用它决定是否提供一维滚动压缩。代价侧却几乎没有收益：该函数在 1334 帧标量轨迹上实测 0.5~2.3ms，占剩余 130ms 的 1~2%。宁可留着 2ms 也不动判据证据，这条按 #13a / #16a 处理并在文档明说。',
+      'footer 断言加完之后专门做了反证：往 footer 里塞一个 3800px 的假子元素，第 6 项 detail 变 chrome overflow: footer 4365>770 且整台降到 8/9 PASS，第 5 项与其余七项不受影响——说明这条断言真的有牙，不是把 M20 的数字重新抄一遍。反测时也踩到自己解析脚本的坑：按扁平文本序列配对徽章会把 FAIL 归到上一行，必须回到每行自己的 DOM 子树里读徽章才准。',
+      'bp 放宽是有对偶校验的，不是单纯抬高上界：bp=18 在 Stage 0 只有 12 行的情况下能随 #preset=fib-tree&stage=1&bp=18 完整还原（重载后 L18 徽章为 Remove breakpoint at L18），而 bp=18,63 里的 63 在演进落地后被按最终 20 行源码剔除。两半都实测过，缺任何一半这个契约都是假的。',
+      '临时插桩本身不进主干：本轮所有 performance.now() 拆测都靠 TEMP-M21-PROBE 标记的探针完成，提交前已全局确认零残留（grep 无命中）后才跑最终六轮数字。文档里的四段占比来自带探针的同版本实测，最终耗时表来自无探针版本，两者分别标注，不混为一张表。',
+    ],
+    impact: [
+      '长任务拆解（带探针版本实测，1334 帧路径）：instrumentCode 1.7~2.4ms；Worker 往返含回传克隆 26.4~35.8ms；deriveRuntimeQuickWatches 1.3ms（最好）/ 135.4 + 135.1ms（StrictMode 双跑）/ 141ms 单次，最差一趟编译 2872 个 Function、整窗累计 6060；runAIDiagnostics 在 skipDelay 通道仅 0.8~1.5ms；analyzeMatrixWrites 0.5~2.3ms。结论：285~294ms 长任务的主要构成是 Quick-Watch 的重复编译，而非火焰条 Commit（56ms）、也非诊断或克隆。',
+      'Watch 编译缓存效果：投递后跳幕六轮 129 / 134 / 134 / 139 / 140 / 141ms（M20 基线 324 / 332 / 361 / 365 / 370 / 372ms），长任务由 280~294ms 降到 123 / 131ms，均值降幅约 61%；暖身后每轮编译次数为 0。投递前场景五轮 16 / 17 / 18 / 19 / 21ms 无回归。',
+      'footer 断言：detail 实测 header 770/770 · footer 770/770 · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 670/670) · 6 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553，2.8ms；注入 3800px 假子元素后变 footer 4365/770 · chrome overflow: footer 4365>770 且 8/9 PASS。',
+      '断点行界两阶段对齐：#preset=fib-tree&stage=1&frame=0&bp=18（38 字符）重载后 Stage 0 (31f) + Stage 1 (41f)、FRAME 1 / 41、L18 徽章为 Remove breakpoint at L18；同链改 bp=18,63 后 63 被最终源码（20 行）剔除，只保留 L18。',
+      '判据与安全闸门零回归：dp[99][0] === 1 仍 ERROR（不谎报 FALSE）、alert(n) 与 process.exit() 仍 INVALID、Watch 四态与 →T 语义不变；7 个预设主路径与包络图、URL 各字段、火焰轨 160 根全部复测通过。',
+      '回归与纪律：页签 Live Kernel Self-Check (27 Invariants) 实测 9/9 PASS（FAIL 0）；npm run build 零报错、src emoji 0 命中、docs/devlogs 22 篇表格列数一致、27 条不变量 == KERNEL_INVARIANT_COUNT 27、探针零残留、重载后控制台无新增 error/warn。',
     ],
   },
 ];
@@ -1762,6 +1828,20 @@ export default function App() {
     await measure('viewport', '771px Viewport & Container Reachability', () => {
       const header = document.querySelector('header');
       const headerOk = !!header && header.scrollWidth === header.clientWidth;
+      // M21：flex 布局的 chrome 行（顶栏 / 底栏 / 整页根容器）都是 overflow: visible，
+      // 子项把 min-content 撑爆时 scrollWidth 一定大于 clientWidth——M20 之前 footer 4572/770
+      // 就是靠这个信号漏掉的（它不是 overflow-y 盒子，不在下面的枚举域里）。
+      // 带 overflow-hidden 的容器**不纳入**：那是设计内的裁剪，断言它等于把裁剪当 bug。
+      const chrome: { name: string; sw: number; cw: number }[] = [];
+      for (const [name, el] of [
+        ['header', header],
+        ['footer', document.querySelector('footer')],
+        ['root', document.querySelector('h-screen')],
+      ] as const) {
+        if (!el) continue;
+        chrome.push({ name, sw: el.scrollWidth, cw: el.clientWidth });
+      }
+      const chromeOff = chrome.filter((c) => c.sw > c.cw + 1);
       // 横向滚动责任只认显式 `data-scroll-x-owner="true"`（M20 起），不再按 class 猜——
       // class 改名会让豁免静默扩大到横滚容器之外，而 computed style 又分不出「谁被授权横滚」
       // （CSS 规定另一轴非 visible 时 visible 会算成 auto）。
@@ -1787,13 +1867,17 @@ export default function App() {
       // 未标记却真的横向溢出的容器，必须靠 legacy 规则也能豁免才说明标记没漏；
       // 两边数量不等 = 标记集合与旧审计口径已经分叉，视为契约回归
       const ownersMatch = legacyExemptCount === excludedBoxes.length;
+      const chromeText = chrome.map((c) => `${c.name} ${c.sw}/${c.cw}`).join(' · ');
+      const clean = headerOk && offenders.length === 0 && ownersMatch && chromeOff.length === 0;
       return {
-        pass: headerOk && offenders.length === 0 && ownersMatch,
-        detail: headerOk
-          ? ownersMatch
-            ? `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · ${verticalBoxes.length} scroll boxes zero overflow (${verticalBoxes.map((b) => `${b.sw}/${b.cw}`).join(' ')}) · ${excludedBoxes.length} explicit data-scroll-x-owner exempt == legacy #12b set · viewport ${window.innerWidth}x${window.innerHeight}`
-            : `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · owner drift: ${excludedBoxes.length} marked vs ${legacyExemptCount} per #12b class rule`
-          : `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · offenders ${offenders.map((o) => `${o.sw}>${o.cw} (${o.cls})`).join(' ')} of ${verticalBoxes.length} boxes`,
+        pass: clean,
+        detail: clean
+          ? `${chromeText} · ${verticalBoxes.length} scroll boxes zero overflow (${verticalBoxes.map((b) => `${b.sw}/${b.cw}`).join(' ')}) · ${excludedBoxes.length} explicit data-scroll-x-owner exempt == legacy #12b set · viewport ${window.innerWidth}x${window.innerHeight}`
+          : !ownersMatch
+            ? `${chromeText} · owner drift: ${excludedBoxes.length} marked vs ${legacyExemptCount} per #12b class rule`
+            : chromeOff.length
+              ? `${chromeText} · chrome overflow: ${chromeOff.map((c) => `${c.name} ${c.sw}>${c.cw}`).join(' ')}`
+              : `${chromeText} · offenders ${offenders.map((o) => `${o.sw}>${o.cw} (${o.cls})`).join(' ')} of ${verticalBoxes.length} boxes`,
       };
     });
 
@@ -2560,6 +2644,7 @@ export default function App() {
   // 导览必须驱动「最新一次渲染」的 handler，否则 stageHistory / aiReport 会停在过期闭包里
   const liveActionsRef = useRef({
     frames: [] as TraceFrame[],
+    sourceCode: '' as string,
     stageHistory: [] as StageSnapshot[],
     selfCheckResults: null as KernelSelfCheckResult[] | null,
     quickWatches: [] as string[],
@@ -2572,6 +2657,7 @@ export default function App() {
   });
   liveActionsRef.current = {
     frames,
+    sourceCode,
     stageHistory,
     selfCheckResults,
     quickWatches,
@@ -2607,6 +2693,13 @@ export default function App() {
       autoEvolveRef.current = false;
       pendingShareStageRef.current = null;
       const ready = liveActionsRef.current.frames;
+      // 演进落地后才按最终源码的真实行数二次裁剪：
+      // parseShareHash 那侧只知道 Stage 0 起点，合成代码新增行上的断点当时无法判定越界
+      const finalLines = liveActionsRef.current.sourceCode.split('\n').length;
+      setBreakpoints((prev) => {
+        const kept = [...prev].filter((l) => l >= 1 && l <= finalLines);
+        return kept.length === prev.size ? prev : new Set(kept);
+      });
       const pendingFrame = pendingShareFrameRef.current;
       if (pendingFrame !== null && ready.length > 0) {
         pendingShareFrameRef.current = null;
@@ -4805,6 +4898,39 @@ export default function App() {
                       horizontal-scroll exemption with an explicit data-scroll-x-owner contract, draws the
                       Min-Max band for inactive stages too, lets code and stage coexist in one permalink, and
                       closes v1.0 with a 9th self-check assertion.
+                      <br />• M21 opens the 285~294ms long task and finds the Quick-Watch scanner recompiling
+                      thousands of Functions per frame, so gate-passing evaluators are now cached per
+                      (expression, parameter-signature); adds footer and root to the overflow assertion that
+                      M20's flex blind spot let slip; and lets breakpoints survive a code + stage permalink
+                      by clamping them against the final evolved source instead of the Stage-0 baseline.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-emerald-400 font-semibold">
+                      21. Watch Compile Cache, Long-Task Autopsy &amp; Chrome Overflow Seal (M21)
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The residual skip latency is finally attributed by instrumenting four synchronous phases:
+                      instrumentCode measured 1.7-2.4ms and the worker round trip including structured-clone
+                      delivery 26.4-35.8ms, while deriveRuntimeQuickWatches cost 135.4 + 135.1ms (and 141ms in a
+                      single render) having compiled 2872 Functions in that pass, 6060 across the window. The fix
+                      caches gate-passed evaluators under (expression, joined parameter names) - the signature must
+                      be part of the key because new Function(...names) is shaped by each frame's visible bindings -
+                      while re-running all three gates every call, so acceptance is unchanged: dp[99][0] === 1 is
+                      still ERROR and alert(n) / process.exit() are still INVALID.
+                      <br />• Measured after the cache: skipping after delivery lands at 129 / 134 / 134 / 139 /
+                      140 / 141ms with the long task at 123 / 131ms, against M20's 324 / 332 / 361 / 365 / 370 /
+                      372ms - about -61%. The remaining ~130ms is the per-frame call plus Object.keys scan, not
+                      compilation, so this closes the recompiling claim and does not claim the long task is gone.
+                      <br />• The proposed O(1) guard for analyzeMatrixWrites was measured and rejected, not
+                      implemented: a matrix scoped inside an if-block is absent from the first and last frames yet
+                      the shipped code still reports WRITES: 2 at frame 6 / 10, so that guard would delete evidence
+                      #16a relies on - and the function only costs 0.5-2.3ms (1-2% of the task) anyway.
+                      <br />• Self-check 6 now asserts header, footer and the root box are overflow-free, and the
+                      claim was falsified forward: injecting a 3800px child made the detail read footer 4365&gt;770
+                      with the board at 8/9 PASS. Breakpoint bounds are clamped twice - widened to
+                      SHARE_STAGE_BP_FLOOR = 64 when a stage is requested, then filtered by the final evolved
+                      source - so bp=18 restores as Remove breakpoint at L18 while bp=63 is dropped.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

@@ -117,6 +117,11 @@ Key 仅驻留内存，不写入 localStorage。
   仍然**不得按 computed style 判定**（另一轴非 `visible` 时 `visible` 会被算成 `auto`，分不出谁被授权横滚）。
   注意该断言的枚举域是纵向滚动盒：**flex 容器的横向溢出不在扫描内**（M20 的 footer 溢出就是靠
   降子项数而非靠断言发现的），此类溢出必须由子项数量/宽度自律解决，不得靠给父层加 `overflow` 藏。
+  **M21 起补上这个盲区的一半**：第 6 项额外逐个断言 `header` / `footer` / 整页根容器
+  （三者皆 `overflow: visible`）满足 `scrollWidth <= clientWidth + 1`，detail 直接回显
+  `header 770/770 · footer 770/770`；带 `overflow-hidden` 的容器**明确排除**——那是设计内裁剪，
+  算进去等于把裁剪当 bug。新增这类断言必须做**注入反证**（塞一个超宽子元素确认该项转 FAIL），
+  否则「加了断言」与「断言有牙」是两件事。
   徽章行**不得再用 `overflow-x-auto + whitespace-nowrap` 把溢出藏进滚动条**，只能折行 + 芯片
   `max-w-full truncate`；不可断行的长标签（如 `[MEMO_INJECTION_TARGET]`）必须 `min-w-0` + `break-all`，
   而不是给同行按钮加 `shrink` 或让整行横滚——那只会把溢出换个地方藏起来。
@@ -147,9 +152,20 @@ Key 仅驻留内存，不写入 localStorage。
   Quick-Watch 芯片由**当前轨迹**派生（预设种子 + 运行时补位，逐条验证「至少一帧 TRUE」，
   取值帧从末尾回溯到仍持有目标容器的帧），因此重构后会从 `leftBranch` 自动切到 `dp[i]` / `i`，
   死变量不出现、`→T` 恒可命中；芯片点击只"加入断言"不产生位置副作用，跳转仍由用户显式点 `→T`。
+  **求值函数编译缓存（M21）**：`hasTrueFrame` 会让每条候选在整条轨迹上逐帧求值，
+  1334 帧的 `infinite-loop` 实测单趟编译 **2872 个** `new Function`、整窗 6060 次，占去 285ms 长任务的大头。
+  因此闸门全过之后按 `(expr, 形参名序列)` 缓存编译结果（`WATCH_FN_CACHE`，上限 512，超限整体清空）。
+  **三条纪律**：闸门必须每次重跑、只能站在闸门之后（否则等于给 URL 输入开一条绕过白名单的执行入口）；
+  键必须含形参名序列（`new Function(...names)` 的形参表由该帧可见变量决定，只按 `expr` 缓存会跨帧串参）；
+  编译失败不写缓存、**运行期抛错不剔除缓存**（否则恒定越界的断言恰好退回逐帧重编译）。
+  缓存后判据与安全语义零变化：`dp[99][0] === 1` 仍 `ERROR`，`alert(n)` / `process.exit()` 仍 `INVALID`。
 - 二维矩阵读写分离（`analyzeMatrixWrites`）：比较相邻帧每个单元格，`writeCount === 0` 为只读输入、
   `> 0` 为可变状态表；只有两类同时存在时才提供一维滚动压缩（`includes('grid')` 类源码门控已禁止），
   显微镜 2D 卡片据此显示 `READ-ONLY` / `WRITES: n` 徽章。
+  **不得为省毫秒加「首末帧无二维变量就返回空」的短路**（M21 实测否决）：
+  二维表可以只存在于中间帧——块内 `let table = [[1,2],[3,4]]` 的样本里首帧与末帧都没有它，
+  而 shipped 代码仍能在 `FRAME 6 / 10` 报出 `WRITES: 2`；那条短路会删掉 #16a 依赖的证据，
+  而它本省下的只有 `0.5~2.3ms`（占剩余长任务的 1~2%）。
 - 折半递归：进入事件的实参**按顶层逗号切分（忽略 `[]` `{}` `()` 内逗号）后逐槽收集**，
   任意槽位严格单调递减，每一步满足 `a[k+1] = floor(a[k]/2)` 或 `a[k]-a[k+1] <= 2`（-1/-2 小步微调），
   且首值 ≥8、总步数 ≥2、折半步占比 ≥50% 即判 `O(log n) Logarithmic Recursion`
@@ -203,10 +219,11 @@ Key 仅驻留内存，不写入 localStorage。
   **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
   `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
   `Draft` 临时阶段再切换（诊断走 `skipDelay=true`，实测 22.6ms），绝不静默丢弃。
-- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 26)**：9 项确定性微基准
+- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 27)**：9 项确定性微基准
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
-  矩阵读写分离 / 窄视口**全量纵向滚动盒**零横向溢出（豁免读显式 `data-scroll-x-owner`，
-  并断言标记集合 == legacy class 集合）/ 128 点保峰分桶 / Permalink 哈希解析与清洗
+  矩阵读写分离 / 窄视口**全量纵向滚动盒 + 具名 flex chrome（header / footer / 根容器）**零横向溢出
+  （豁免读显式 `data-scroll-x-owner`，并断言与 legacy 集合相等）/
+  128 点保峰分桶 / Permalink 哈希解析与清洗
   （含 `code` 无损往返、超长与损坏编码必须被拒、`code + stage` 可共存）/
   火焰轨 160 桶虚拟化（长度恒 160、平铺无隙无叠、断点 `repFrame` 精确命中、峰值与热点不丢）），
   每项显示 PASS/FAIL 与实测 ms，夹具纯浏览器执行，不使用 Worker、网络或 API Key。
@@ -226,6 +243,12 @@ Key 仅驻留内存，不写入 localStorage。
   M20 又证伪了「这一支是 1334 根火焰条的 Commit 成本」这条归因：竖条虚拟化到恒 160 根（-88.0%）之后
   该场景六轮实测 `324 / 332 / 361 / 365 / 370 / 372ms` 并无改善，而单独把 1334 帧落地只要 56ms 且零长任务，
   故该耗时**仍是未闭合敞口**，不得写成「已被性能优化解决」；
+  **M21 用四段 `performance.now()` 拆测定位到真凶并消掉主因**：`instrumentCode 1.7~2.4ms`、
+  `Worker 往返含克隆 26.4~35.8ms`、`runAIDiagnostics 0.8~1.5ms` 都不是大头，
+  而 `deriveRuntimeQuickWatches` 单趟 **141ms / 编译 2872 个 Function**（整窗 6060 次）——
+  即 `hasTrueFrame` 对每条候选在 1334 帧上重复 `new Function`。
+  闸门后置的编译缓存把它压到投递后六轮 `129 / 134 / 134 / 139 / 140 / 141ms`、长任务 `123 / 131ms`；
+  **剩余 ~130ms 是逐帧调用 + `Object.keys(vars)` 的固有扫描成本，缓存无法消除，仍不得写成长任务已归零**；
   且导览期间诊断走 `skipDelay=true`，判据与轨迹实测 12~56ms 内齐备（导览外手动切预设仍有 380ms 差异）；
   `Skip Act →` 是**幕级**取消：一次点击让本幕剩下的驻留、条件等待与 Apply 全部让位（实测 ACT 2 内点一次
   即进 ACT 3，不再需要连点 3 次），幕开始前与暂停/Dismiss 都必须复位该标识；
@@ -239,6 +262,13 @@ Key 仅驻留内存，不写入 localStorage。
   `code` 只在**链接里的源码不等于预设原文**时写入；M20 起 `code` 与 `stage` 可共存，
   且带 `stage` 时源码必须取 `stageHistory[0].sourceCode`（演进序列的起点）而不是屏幕上当前的合成产物——
   后者会让首屏把合成产物当 Stage 0 再多演进两级，跑出根本不存在的 Stage 3。
+  **`bp` 的行界是两阶段裁剪（M21）**：静态解析时若链接带 `stage >= 1`，上界放宽到
+  `Math.max(起点行数, SHARE_STAGE_BP_FLOOR = 64)`——合成代码比 Stage 0 起点长，
+  按起点行数裁剪会把打在合成代码新增行上的断点静默删掉；
+  演进落地后再按**最终 `sourceCode` 的真实行数**二次过滤（经 `liveActionsRef` 取最新渲染，#21a）。
+  两侧都必须实测才算契约成立：`#preset=fib-tree&stage=1&bp=18`（Stage 0 仅 12 行）重载后
+  L18 徽章为 `Remove breakpoint at L18`，而同链的 `bp=63` 被最终 20 行源码剔除；
+  只有放宽没有二次过滤就是无界放行，只有过滤没有放宽则断点早在解析阶段就没了。
   超长时按钮显示 `Link without code` 而不是悄悄退回预设原文冒充同一个现场；
   解码失败 / 非法 UTF-8 / 超长一律整体丢弃该字段。
   `code` 只是源码文本、不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，绝不进页面上下文。
@@ -258,7 +288,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M20 各一篇，共 26 条不变量）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M21 各一篇，共 27 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 
