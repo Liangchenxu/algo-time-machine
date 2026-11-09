@@ -91,7 +91,7 @@ M9 的三条遗留共享同一个病根：**引擎还在依赖"预设知识"，�
 | Quick-Watch 进化 | fib：Stage-0/1 为 `n === 2` / `leftBranch === 2` → Stage-2 自动变为 `dp[5] === 5` / `i === 5`；点选后 `→T` 从 FRAME 1 命中 FRAME 10（TRUE） |
 | 二维读写分离 | DP 第 10 帧：`grid [3×4] READ-ONLY`（暗灰）、`dp [3×4] WRITES: 6`（天蓝），`Cursor [1][2]` 正常；`includes('grid')` 全仓 0 处 |
 | 折半递归 | `halve(32)`：`O(log n) Logarithmic Recursion` / `O(log n) Call Stack Depth 7`，实参链 `32 → 16 → 8 → 4 → 2 → 1`，标签 `LOGARITHMIC_DESCENT` + `TAIL_UNROLL_CANDIDATE` |
-| 折半消栈 | Apply 后生成 `while (curr > 1)`，18 帧，横幅 `STACK REDUCTION: -85.7% Call Frames | PEAK STACK: 7 → 1 | TRACE STEPS: 7 → 18 (Unrolled Loop)`，终端 `halving steps = 5`，判据 `O(log n) Iterative Halving` / `O(1) Scalar Accumulator`，芯片 `curr === 4` / `steps === 3` |
+| 折半消栈 | Apply 后生成 `while (curr > 1)`，18 帧，横幅 `STACK REDUCTION: -85.7% Call Frames \| PEAK STACK: 7 → 1 \| TRACE STEPS: 7 → 18 (Unrolled Loop)`，终端 `halving steps = 5`，判据 `O(log n) Iterative Halving` / `O(1) Scalar Accumulator`，芯片 `curr === 4` / `steps === 3` |
 | 回归 | Rain 40 帧 Two-Pointer、DP 29 帧 Matrix DP、Binary 10 帧 `O(log n)`、fib 31 帧 `O(2^n)` / `DUP 9`、死循环 1334 帧 `O(∞)` 均与 M9 基线一致 |
 | 纪律 | `npm run build` 零 TS 报错；`src/**` emoji 扫描无命中；11 篇 DevLog 表格列数一致 |
 

@@ -36,6 +36,12 @@ Vite + React 18 + TypeScript + Tailwind CSS + `@babel/standalone` + `lucide-reac
 | 递归熔断 | `__enterFn` / `__exitFn` | 调用栈 150 层 | `[FUSE_STACK_OVERFLOW]` | 抛出栈溢出告警；`finally` 退栈保证栈深真实 |
 | 硬件熔断 | `sandboxRunner` | 3000ms | `[FUSE_WATCHDOG_TIMEOUT]` | `worker.terminate()` 强制终止 |
 
+`runInSandbox(sourceCode, onCancel?)` 另把「终止这一跑」的能力交回调用方：被取消的一跑回
+`{ cancelled: true }` 且永远不会 `postMessage`，主线程因此不用为 1334 帧这类重轨迹付结构化克隆的钱。
+**取消只与世代号成对出现才安全**——`executeCode` 开跑前取消上一跑、记 `runGenRef`，
+过期或取消的结果一律不回写 `frames / aiReport`，`handleApplyOptimized` 见 `stale` 即放弃冻结阶段；
+取消权落地后只交还一次，否则会误杀后继那一跑。
+
 `src/**` 运行时代码零 emoji：异常文案统一使用上表前缀，**不得改动 `aiDiagnostics` 中与
 `[FUSE_STEP_LIMIT]` 耦合的诊断谓词**（文案与前缀必须同步修改）。
 复现扫描命令与「DevLog 引述历史文案除外」的范围说明见 `docs/devlogs/INDEX.md`。
@@ -95,6 +101,12 @@ Key 仅驻留内存，不写入 localStorage。
   横向滚动责任在外层容器，滚动条外观由 `src/index.css` 全局统一为 5px 暗色。
   顶栏加入 `Tour` 按钮后仍须零溢出：唯一允许的让步是导览运行时临时隐藏装饰性 `AST-IR v2.4` 徽章，
   可压缩区依旧只有预设切换器。
+  **M19 起该契约的范围是全量纵向滚动盒，不止顶栏**：自检第 6 项枚举所有 `clientWidth > 0` 且
+  `overflowY` 为 `auto|scroll` 的容器并逐个断言零横向溢出，只有 `#12b` 指定的横滚责任人可豁免，
+  且豁免必须按 `class` 判定（computed style 分不出谁被授权横滚）。
+  徽章行**不得再用 `overflow-x-auto + whitespace-nowrap` 把溢出藏进滚动条**，只能折行 + 芯片
+  `max-w-full truncate`；不可断行的长标签（如 `[MEMO_INJECTION_TARGET]`）必须 `min-w-0` + `break-all`，
+  而不是给同行按钮加 `shrink` 或让整行横滚——那只会把溢出换个地方藏起来。
 - 基准对比语义：基线若被 `[FUSE_*]` 截断而重跑完整，横幅只显示
   `STATUS: FUSE_ABORTED → COMPLETED` 与栈深收益，不得计算帧数百分比；
   两侧均未熔断但属于「递归转迭代的栈空间降维」（`base 栈深 >= 4`、`curr <= 2` 且帧数上升）时，
@@ -151,11 +163,17 @@ Key 仅驻留内存，不写入 localStorage。
   ≤250 帧且 ≤180KB 仍 0ms 同步切换。
   **跨阶段栈深包络遥测图**：快照自带 `depthCurve`（重水化时刷新），
   `evictBackgroundFrames` 只清 `frames` 不动曲线，因此 `LAZY` 阶段的曲线依然完整；
-  曲线做**保峰分桶**：`MAX_CURVE_SAMPLES = 128`，≤128 帧逐帧 1:1，超过则「首帧 + 126 个桶内最大栈深 + 末帧」，
-  分桶无缝覆盖 `1..n-2`，故 `max(depthCurve)` 恒等于该阶段 `metrics.maxStackDepth`（实测 467 帧阶段绘 128 点、峰值 13）。
+  曲线做**保峰保谷分桶**：`MAX_CURVE_SAMPLES = 128`，≤128 帧逐帧 1:1，超过则「首帧 + 126 个桶 + 末帧」，
+  每桶**同时**取最大与最小栈深（`buildDepthBands → { peaks, floors }`），
+  分桶无缝覆盖 `1..n-2`，故 `max(depthCurve)` 恒等于该阶段 `metrics.maxStackDepth`（实测 467 帧阶段绘 128 点、峰值 13）；
+  `floors` 仅在 `> 128` 帧时以 `depthFloorCurve` 落进快照，重水化时与 `frames / frameCount / approxBytes` 同源刷新。
   曲线索引与帧号是两套坐标系，必须经 `curveIndexOf` 换算。
   单个 SVG 坐标系叠加各阶段折线 + 半透明面积包络（Stage 0 玫红 `#f43f5e` 虚线、Stage 1 天蓝 `#38bdf8`、
-  Stage 2 翠绿 `#10b981`，激活阶段加粗），高 64px；**横轴双口径** `X: Abs Frames ⇄ Norm %`
+  Stage 2 翠绿 `#10b981`，激活阶段加粗），高 64px；**激活阶段另绘一条 Min-Max 退栈振幅带**
+  （256 点多边形：上沿顺 + 下沿逆，`opacity 0.26`），只在 `bandBuckets > 0` 时出现并回显
+  `min-max band N/128 buckets`——实测 354 帧 `LAZY` 阶段 126/128 个桶真的折叠过，且带由快照绘出、不触发重水化；
+  1:1 曲线不存下沿，因此激活阶段是短轨迹时整条带不出现属正确行为，不得为凑形状造假数据。
+  **横轴双口径** `X: Abs Frames ⇄ Norm %`
   （absolute 按 `frameCount / maxStageFrames` 占宽，实测 467f / 75f / 25f 阶段占 `100% / 16% / 5%`；
   normalized 铺满同宽只比波形）、**纵轴双口径** `Y: Linear ⇄ Sqrt`（sqrt 只压缩绘制高度，不改任何数值）；
   激活曲线当前帧**分两层指示**：实心圆点取该帧真实 `callStack.length`，抽样桶峰值只以 dash 空心环 +
@@ -171,9 +189,10 @@ Key 仅驻留内存，不写入 localStorage。
   **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
   `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
   `Draft` 临时阶段再切换（诊断走 `skipDelay=true`，实测 22.6ms），绝不静默丢弃。
-- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 24)**：8 项确定性微基准
+- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 25)**：8 项确定性微基准
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
-  矩阵读写分离 / 窄视口 `scrollWidth == clientWidth` / 128 点保峰分桶 / Permalink 哈希解析与清洗），
+  矩阵读写分离 / 窄视口**全量纵向滚动盒**零横向溢出（`#12b` 指定的横滚责任人按 class 豁免）/
+  128 点保峰分桶 / Permalink 哈希解析与清洗（含 `code` 的无损往返、超长与损坏编码必须被拒）），
   每项显示 PASS/FAIL 与实测 ms，夹具纯浏览器执行，不使用 Worker、网络或 API Key。
   页签条可横滚，三个页签在 770px 下均可达。
 - 评委七幕自动导览（顶栏 `Tour`，覆盖全部 7 个内置预设）：`tourTokenRef` 驱动的真实内核编排，逐幕 =
@@ -182,8 +201,12 @@ Key 仅驻留内存，不写入 localStorage。
   `rainwater` 双指针水柱 + `binary-search` 区间折半 → Spec 自检台点亮。
   幕间只等**真实运行条件**（帧数 / `isAnalyzing` / `stageHistory.length` / 自检结果对象变化），
   等待本身是**事件驱动**的：每次 React 提交与 `Skip Act` / `Stop Tour` / 幕外 `pointerdown` 都直接唤醒等待者
-  （`tourWakeRef`），定时器只作兜底——轻提交场景一次跳幕实测 19ms（M17 的 60ms 轮询在本环境是 977ms），
-  与 1334 帧重提交同批的 ACT 1 仍要 ~304ms，残余来源未隔离，不得写成全场景 <20ms；
+  （`tourWakeRef` 是唤醒器**集合**，`waitUntil` 与 `raceAbort` 都挂在上面，单槽会互相覆盖），
+  定时器只作兜底——轻提交场景一次跳幕实测 19ms（M17 的 60ms 轮询在本环境是 977ms）；
+  ACT 1 的 304ms 残余 M19 已隔离：被取代的那一跑用 `runInSandbox(…, onCancel)` 直接 `worker.terminate`
+  并以 `runGenRef` 世代号作废回写，Skip 落在 1334 帧投递**之前**实测 `18 / 18 / 22 / 26 / 27ms`
+  且重轨迹一次都没上屏，落在投递**之后**仍是 `361 / 370ms`（那笔提交已在渲染队列里，取消救不了）——
+  **必须分情形报，不得写成「ACT 1 也 <30ms」**；
   且导览期间诊断走 `skipDelay=true`，判据与轨迹实测 12~56ms 内齐备（导览外手动切预设仍有 380ms 差异）；
   `Skip Act →` 是**幕级**取消：一次点击让本幕剩下的驻留、条件等待与 Apply 全部让位（实测 ACT 2 内点一次
   即进 ACT 3，不再需要连点 3 次），幕开始前与暂停/Dismiss 都必须复位该标识；
@@ -191,11 +214,17 @@ Key 仅驻留内存，不写入 localStorage。
   字幕条给出 `Resume Act k/N` / `Restart` / `Dismiss ×`；handler 一律经 `liveActionsRef` 取最新渲染，
   避免异步串联里的过期闭包把错误源码冻结成 Stage 0。幕数、按钮与字幕文案全部由 `TOUR_ACTS.length` 驱动。
 - 现场分享（WATCH 行 `Share`）：把 `preset` + `stage`（只承诺可用确定性 Apply 复现的 1..2 级）+
-  `frame`（0 基帧号）+ `bp`（升序正整数、去重、最多 16 个且不超过预设行数）+ `watch` 断言写进
+  `frame`（0 基帧号）+ `bp`（升序正整数、去重、最多 16 个且不超过**真正会跑的那份源码**行数）+ `watch` 断言
+  + `code`（UTF-8 安全 Base64URL 的源码原文，上限 1600 字符）写进
   `window.location.hash`（用 `history.replaceState`，直接改 `location.hash` 会触发锚点滚动），并复制链接；
+  `code` 只在源码既不等于预设原文、又不能靠 `preset + stage` 重建（Draft / 手改）时写入，
+  超长时按钮显示 `Link without code` 而不是悄悄退回预设原文冒充同一个现场；
+  解码失败 / 非法 UTF-8 / 超长一律整体丢弃该字段。
+  `code` 只是源码文本、不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，绝不进页面上下文。
   剪贴板被拒时按钮显示 `Link in URL` 而不是谎报 `Copied!`。首屏解析到合法 `preset` 才改初始状态，
   非法即整体忽略回默认预设；带 `stage` 的链接会**自动按序真实 Apply** 演进到目标阶段
   （`autoEvolveRef` 走零延迟通道，某级不涨级即停止、不伪造阶段），实测重载后 484ms 到 Stage 2、500ms 定位帧号；
+  带 `code` 的链接实测 318 字符哈希重载后手改 `walk(6)` 现场原样回到 `FRAME 4 / 15` 并给出自己的判据；
   帧号必须等演进结束再按当时真实帧数 clamp。分享回来的表达式仍只经 `evalWatchExpression`
   三道闸门求值（#13d / #14d 不因 URL 输入放宽）。控件放在可折行的 WATCH 行，不占顶栏预算（#21c 不变）。
 
@@ -208,7 +237,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M18 各一篇，共 24 条不变量）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M19 各一篇，共 25 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

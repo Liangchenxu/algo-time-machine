@@ -25,7 +25,8 @@
 | M15 | `588709b` | [M15-automated-judge-tour-and-whitepaper.md](./M15-automated-judge-tour-and-whitepaper.md) | 评委五幕自动路演导览（可中断真实内核驱动）、WebCrypto 非确定性守卫与工程白皮书 |
 | M16 | `db5004a` | [M16-telemetry-curve-and-resumable-tour.md](./M16-telemetry-curve-and-resumable-tour.md) | 跨阶段 SVG 栈深包络遥测图（depthCurve 随快照持久化）、导览零延迟同步与六幕断点续播 |
 | M17 | `7a3b96a` | [M17-dual-axis-envelope-and-act-skip.md](./M17-dual-axis-envelope-and-act-skip.md) | 包络图双轴（绝对帧刻度 ⇄ 归一化 / 线性 ⇄ sqrt）、128 点保峰抽样、一键整幕跳过、七幕全预设与 URL 现场分享 |
-| M18 | 本次提交 | [M18-exact-cursor-and-full-permalink.md](./M18-exact-cursor-and-full-permalink.md) | 游标真实帧栈深与桶峰值双指示、全状态 URL 自动演进、事件驱动零延迟跳幕与 8 项内核自检（v1.0 收官） |
+| M18 | `3c95084` | [M18-exact-cursor-and-full-permalink.md](./M18-exact-cursor-and-full-permalink.md) | 游标真实帧栈深与桶峰值双指示、全状态 URL 自动演进、事件驱动零延迟跳幕与 8 项内核自检（v1.0 收官） |
+| M19 | 本次提交 | [M19-zero-overflow-and-minmax-band.md](./M19-zero-overflow-and-minmax-band.md) | 全容器零横向溢出治理、128 桶保峰保谷 Min-Max 振幅带、跳幕短路取消在跑批次与自定义源码 `&code=` 分享 |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -266,6 +267,8 @@
     绘 128 个点、峰值 13 与冻结报告的 `Stack Depth 13` 一致），且快照仍只存整数数组、不存帧对象。
     曲线索引与帧号是两套坐标系，必须经 `curveIndexOf(curve, frameIdx)` 显式换算；
     任何把曲线索引直接当帧号用的写法（游标、点击、多边形收口）都算回归。
+    （M19 起同一分桶额外保留下沿 `depthFloorCurve`，见 #25b；「保峰」与「只存整数数组」两条约束原样继续生效，
+    存下沿只是把每阶段最多 128 个整数再存一遍，不引入帧对象。）
     （c）**Skip 是幕级取消，不是驻留级**：`tourActSkipRef` 记下被跳过的幕号，`skipTourAct` 同时释放当前驻留；
     `tourHold` / `tourWaitFor` / 幕内每一步都必须把「本幕已被跳过」当作与令牌失效同级的让位条件，
     因此**无论本幕含几段 Apply 或几段驻留，一次点击必须进入下一幕**（实测 ACT 2 内 1 次点击 → ACT 3）。
@@ -298,21 +301,59 @@
     还原侧按序真实调用 `handleApplyOptimized`（走 `skipDelay=true` 零延迟通道），
     **某一级 Apply 不涨级就地停止**，不得伪造阶段、不得重放动画；帧号定位必须等演进结束再按当时帧数 clamp。
     StrictMode 会把首屏 effect 跑两遍，因此演进必须由一次性启动闸门守护，不得靠 cleanup 反向取消。
+    （M19 起字段扩到六元、新增不可重建时的 `code` 源码入链，见 #25d；本条对
+    `preset / stage / frame / bp / watch` 的约束原样继续生效。）
     （c）**幕间等待只能是事件驱动，禁止靠轮询节拍承诺时延**：`waitUntil` 的唤醒源是
     每次 React 提交后的 `wakeTourWaiters()` 与 `skipTourAct` / `pauseJudgeTour` / `dismissJudgeTour` 的直接唤醒，
     定时器只作兜底；判定条件本身仍必须取真实运行信号（#21b 不变）。
     实测轻提交场景一次跳幕 19ms（M17 的 60ms 轮询在本环境被拉到 977ms）；
     与 1334 帧重提交同批的场景为 304ms，**残余来源尚未隔离，不得写成「全场景 <20ms」**。
+    （M19 已隔离出该残余并给出分情形口径，见 #25c；本条「事件驱动、禁止轮询节拍」的约束原样继续生效。）
     （d）**自检台条数与不变量登记数同源**：`Live Kernel Self-Check` 现跑 8 项确定性微基准，
-    页签条数取 `KERNEL_INVARIANT_COUNT`（当前 24）且必须等于本文件登记条数（#21d 的延续）；
+    页签条数取 `KERNEL_INVARIANT_COUNT`（当前 25）且必须等于本文件登记条数（#21d 的延续）；
     新增第 7 项只能断言抽样后的**长度恒 128、首尾帧保留、峰值不被吞**（注入 42 必须读出 42），
-    第 8 项只能断言哈希解析的五个字段与非法预设返回 `null`；
+    第 8 项只能断言哈希解析的字段（M19 起含 `code` 的无损往返、超长与损坏编码必须被拒）与非法预设返回 `null`；
     两项都必须是纯内存夹具，不经 Worker、不发网络、不需要 API Key，任何 FAIL 都要显式展示（#20e 的延伸）。
 
-## 当前实测基线（M18 复测，视口 770×553，`npm run build` 零 TS 报错）
+25. **全容器零横向溢出、Min-Max 双包络、世代取消与源码入链契约**（M19 确立）：
+    （a）**「零横向溢出」的断言范围是全量纵向滚动盒，不是顶栏一处**：自检第 6 项
+    （`771px Viewport & Container Reachability`）枚举 `document` 下所有 `clientWidth > 0` 且
+    `overflowY` 为 `auto|scroll` 的容器，逐个断言 `scrollWidth <= clientWidth + 1`。
+    豁免只能按 **#12b 指定的横向滚动责任**判定，且必须读 `class` 而非 computed style——
+    CSS 规定另一轴非 `visible` 时 `visible` 会被算成 `auto`，计算值分不出「谁被授权横滚」；
+    责任人是 `PRE` / `overflow-x-auto` / `overflow-auto`。
+    被检查的徽章行**不得再用 `overflow-x-auto + whitespace-nowrap` 把溢出藏进滚动条**，
+    只能 `flex-wrap` 折行 + 每枚芯片 `max-w-full truncate`（AI 面板容器实测 266/251 → 251/251）。
+    **不可断行的长标签同样算溢出源**：瓶颈跳转行的 `[MEMO_INJECTION_TARGET]` 曾把 `Jump #353` 顶出右沿 5px，
+    文本块必须 `min-w-0`、标签必须 `break-all`，不得靠给按钮加横滚来藏。
+    （b）**抽样必须同时保留桶的上沿与下沿**：`buildDepthBands` 一次返回 `{peaks, floors}`，
+    `peaks` 即 `depthCurve`，继续受 #23b 保峰约束（`max(curve) === metrics.maxStackDepth`）；
+    `floors` 只在轨迹 `> MAX_CURVE_SAMPLES` 时以 `depthFloorCurve` 落进快照（1:1 曲线的上下沿是同一个数组，不重复存）。
+    Min-Max 振幅带**只给激活阶段绘制**（256 点多边形：上沿顺 + 下沿逆，`opacity 0.26`），
+    且仅在 `bandBuckets > 0`（本桶真的 `peak > floor`）时出现，控制行回显 `min-max band N/128 buckets`；
+    激活阶段是 `<= 128` 帧的 1:1 曲线时**整条带不出现属正确行为**（实测 Stage 1 · 83f 无带），不得为凑形状造假数据。
+    重水化时上沿、下沿与 `frames / frameCount / approxBytes` **必须同源刷新**，不得让带与帧数脱节（#22a 的延伸）。
+    （c）**被取代的一跑只能「终止 + 判世代」，二者缺一不可**：`runInSandbox(source, onCancel)` 交出
+    `worker.terminate` 能力并回 `cancelled: true`；`executeCode` 开跑前终止上一跑、
+    以 `runGenRef` 世代号作废过期结果，过期或取消时只回指标、**绝不 `setFrames / setAiReport`**，
+    `handleApplyOptimized` 见到 `after.stale` 必须放弃冻结阶段（不得把半截现场写进全息栈）。
+    取消权只交还一次：落地后 `if (runGenRef.current === gen) runCancelRef.current = null`，否则会误杀后继那一跑。
+    `skipTourAct` 必须同时取消在跑批次；幕内异步动作只能经 `raceAbort(token, work)` 与取消信号赛跑，
+    每一步之后补 `halted()` 检查。**度量必须分情形报**：Skip 落在重轨迹投递之前实测 18 / 18 / 22 / 26 / 27ms
+    （五轮 fresh-page，熔断横幅在点击时刻与推进之后都未出现，1334 帧一次都没上屏），
+    落在投递之后（延迟 80 / 90ms 才点）仍是 361 / 370ms——那一笔已在渲染队列里，取消救不了，
+    不得写成「ACT 1 也 <30ms」，也不得把 terminate / 世代号 / `startTransition` 三条改动的功劳混算成一条。
+    （d）**源码本身是现场的一部分，但只有不可重建时才入链**：哈希字段扩为
+    `preset / stage / frame / bp / watch / code`。`code` 只在 `sourceCode !== presetSource && !stageReproducible`
+    （Draft 与手改）时写入，用 UTF-8 安全的 Base64URL 编码、上限 `SHARE_CODE_LIMIT = 1600`；
+    超长按 `partial` 处理并显示 `Link without code`，**不得悄悄退回预设原文冒充同一个现场**。
+    解码失败、非法 UTF-8 或超长一律 `null` 即整体丢弃该字段；带 `code` 时 `bp` 的行号上界必须用这份真实源码的行数算。
+    `code` 只是源码文本、不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，**绝不在页面上下文求值**（#14d 不放宽）。
 
-> M18 轮在 770×553 同源 iframe 测试台复测了游标真实深度 ⇄ 桶峰值双指示、五字段 URL 与首屏自动演进、
-> 事件驱动跳幕与 8 项内核自检，并把 7 个内置预设的主路径 + 一条越界断言边界重跑一遍（见下表）；
+## 当前实测基线（M19 复测，视口 770×553，`npm run build` 零 TS 报错）
+
+> M19 轮在 770×553 同源 iframe 测试台重跑了 7 个内置预设的主路径 + 一条越界断言边界，
+> 并逐项验证全容器零横向溢出、Min-Max 振幅带、跳幕取消隔离与 `&code=` 自定义源码链接（见下表与小节）；
 > 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`、`crypto.*` 变体）沿用 M12–M15 实测值。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
@@ -439,6 +480,13 @@
 | 8 项内核自检（M18） | 页签 `Live Kernel Self-Check (24 Invariants)`，实测 **8/8 PASS**（FAIL 0），逐项毫秒 `TDZ 9.2 / Fuse 0.8 / Recursion 0.6 / Halving 0.6 / Matrix 0.0 / Viewport 0.8 / Downsampler 0.1 / Permalink 0.1`（TDZ 冷启动首轮 16.0ms）；新增 `Peak-Preserving 128-Bucket Downsampler` detail `500 frames -> 128 points · peak 42 (injected 42 @ #333) · first 2 · last 2`，`Permalink Hash Parser & Sanitizer` detail `preset pascal-comb · stage 2 · frame 6 · bp 5,9 · watch 1` |
 | 预设主路径与边界（M18） | DP 29 帧 `O(M * N) Matrix DP`（Apply 可见）、Binary 10 帧 `O(log n) Logarithmic Halving`（Apply 隐藏）、Fast Power 13 帧（Apply 可见）、Rain 40 帧 Two-Pointer（Apply 隐藏）、fib 31 帧 `O(2^n)`（Apply 可见）、infinite-loop 1334 帧 `[FUSE_STEP_LIMIT]`；越界断言 `dp[99][0] === 1` → `ERROR` |
 | 窄视口零溢出（M18） | 游标环 + 深度芯片 + 演进逻辑全部上线后实测：`header 44px / 770 == 770`、`footer 52px / 770 == 770`、`h-9` 子标题栏 `321 == 321` 与 `448 == 448`、`body 770 == 770`；另记一项既有现象：AI 面板遥测条内容 `537px` 大于其容器 `251px`，靠外层 `overflow-y-auto` 吸收横向溢出（该 JSX 自 M17 起未改动，本轮枚举审计时才发现） |
+| 全容器零横向溢出（M19） | 自检第 6 项 detail 实测 `header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 8 code/x-axis owners exempt by #12b · viewport 770x553`，耗时 2.3ms；AI 面板容器 `266/251 → 251/251`。**首次运行曾 FAIL**：`[MEMO_INJECTION_TARGET]` 是不可断行的长标签，把 `Jump #353` 顶出容器右沿 5px（同行在 `Jump #6 / #9` 时 `225/225` 正常），补 `min-w-0` + `break-all` 后转 PASS |
+| Min-Max 振幅带（M19） | `fib(10)` 的 Stage 0（354 帧，此刻为 `LAZY`）绘出 **256 点**多边形（上沿 128 + 下沿 128，`opacity 0.26`），控制行 `min-max band 126/128 buckets`——128 个桶里 126 个真的发生过退栈折叠；带完全由快照 `depthFloorCurve` 绘出，未触发重水化。激活阶段切到 Stage 1（83 帧，1:1 曲线）时带整条不出现，符合 #25b |
+| 跳幕取消隔离（M19） | Skip 落在 1334 帧熔断轨迹投递**之前**：五轮 fresh-page `18 / 18 / 22 / 26 / 27ms` 进 `ACT 2/7`，熔断横幅在点击时刻与推进之后均未出现（重轨迹一次都没上屏）；落在投递**之后**（延迟 80 / 90ms 点击）两轮仍 `361 / 370ms`，与 M18 的 `304~330ms` 同量级——该情形是已在渲染队列里的那一笔，`terminate` 救不了（#25c） |
+| 自定义源码链接（M19） | 手改 `walk(6)`（15 帧）点 `Share` → `#preset=dp-matrix&frame=3&code=Ly8gTTE5…`（含 `watch` 全长 **318 字符**），按钮显示 `Link in URL`（无手势剪贴板被拒）；带哈希重载 → `FRAME 4 / 15`、代码区首行可见 `// M19 自定义分享现场：手写 walk(6) 线性扫描`、判据 `O(n) Linear Iterative Scan` / `O(1) Scalar Accumulator`、热点 L4（6x）、峰值栈深 2 |
+| 纯 bp 链接（M19） | `#preset=pascal-comb&frame=0&bp=7&watch=dp%5B4%5D%5B2%5D%3D%3D%3D6` 重载后 L7 按钮标题为 `Remove breakpoint at L7`、`FRAME 1 / 13`、断言原样回显；非法哈希 `#preset=not-a-preset&stage=9&frame=-3&bp=0,-2&watch=x` 整体忽略，回落默认 Rain（`FRAME 1 / 40`）、断点集合为空 |
+| 8 项内核自检（M19） | 页签 `Live Kernel Self-Check (25 Invariants)`，实测 **8/8 PASS**（FAIL 0），逐项毫秒 `TDZ 10.1 / Fuse 0.6 / Recursion 0.2 / Halving 0.2 / Matrix 0.1 / Viewport 2.3 / Downsampler 0.2 / Permalink 0.7`；第 8 项 detail `preset pascal-comb · stage 2 · frame 6 · bp 5,9 · watch 1 · code 41ch round-trip OK, oversize+corrupt rejected` |
+| 预设主路径与边界（M19） | Rain 40 帧 Two-Pointer（L9 11x）、DP 29 帧 Matrix DP（L14 6x）、Binary 10 帧 Logarithmic Halving、Fast Power 13 帧（栈深 7、L2 6x）、fib 31 帧 `O(2^n)`（栈深 6、L2 15x）、comb 13 帧 `O(2^n)`（栈深 5、L2 11x）、infinite-loop 1334 帧 `[FUSE_STEP_LIMIT]`（L5 666x）；越界断言 `dp[99][0] === 1` → `ERROR` |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -521,10 +569,13 @@
 - [x] 导览只覆盖 5 个预设，Rain 双指针与 Binary 区间折半未纳入（M15/M16 报备 → **M17 闭合**：七幕 `TOUR_ACTS.length = 7`，激活预设集合实测 7/7 全覆盖，自检固定在末幕）
 - [ ] 导览时长仍测不到「可见浏览器」口径：本轮所有测试页面 `document.hidden === true`，`setTimeout(40ms)` 实测间隔 `790 / 1000 / 1000 / 1001 / 1000 / 1001ms`，整轮只能给限频环境值（M16 遗留延续，M17 补充了限频证据）
 - [x] URL 分享只承载 `preset / frame / watch`，不含 `stageHistory`、断点集合（M17 报备 → **M18 闭合**：哈希扩到 `stage` 与 `bp`，首屏按序真实 Apply 自动演进；实测 `#preset=pascal-comb&stage=2&frame=6&bp=7&watch=…` 重载后 484ms 到 Stage 2、500ms 定位 `FRAME 7 / 17`，胶囊 13f / 37f / 17f、`dp [5×3]`、`Cursor [3][1]`、L7 断点与断言全部就位；`API Key` 与 `> 2` 级 / Draft 历史仍有意不写入链接）
-- [ ] `stage` 只承诺 1..2 级：Draft 阶段与更深的历史无法靠确定性 Apply 序列复现，故不写进链接，打开后仍需手工分叉（M18 新遗留）
-- [ ] 事件驱动跳幕在轻提交场景实测 19ms，但 ACT 1 这类「等待与 1334 帧重提交同批」的场景仍要 304ms（同 iframe 内 MessageChannel / rAF / setTimeout(0) 均为 0ms，可排除调度器限频）；残余来源尚未隔离（M18 新遗留）
+- [x] `stage` 只承诺 1..2 级：Draft 阶段与更深的历史无法靠确定性 Apply 序列复现，故不写进链接，打开后仍需手工分叉（M18 报备 → **M19 闭合**：新增第六个字段 `code`，用 UTF-8 安全 Base64URL 带上源码本身（上限 1600 字符），首屏解码成功即作为初始 `sourceCode` 进沙箱；实测手改 `walk(6)` 现场（含 `watch` 全长 318 字符）链接重载后 `FRAME 4 / 15`、代码区可见「M19 自定义分享现场：手写 walk(6) 线性扫描」注释、判据 `O(n) Linear Iterative Scan / O(1) Scalar Accumulator`。仍有意不承诺 `> 2` 级的 Apply 序列本身）
+- [x] 事件驱动跳幕在轻提交场景实测 19ms，但 ACT 1 这类「等待与 1334 帧重提交同批」的场景仍要 304ms（同 iframe 内 MessageChannel / rAF / setTimeout(0) 均为 0ms，可排除调度器限频）；残余来源尚未隔离（M18 报备 → **M19 隔离并分情形闭合**：残余是「那一跑的 1334 帧已经 postMessage 并进了渲染队列」，不是等待节拍。加 `runInSandbox` 的 `onCancel` + `worker.terminate` 与世代号作废后，Skip 落在投递**之前**五轮 fresh-page 实测 `18 / 18 / 22 / 26 / 27ms` 且重轨迹一次都没上屏（熔断横幅在点击时刻与推进之后均未出现）；落在投递**之后**（延迟 80 / 90ms 才点）两轮仍是 `361 / 370ms`——取消救不了已在队列里的提交，作为边界保留，不得写成「ACT 1 也 <30ms」）
 - [ ] 剪贴板成功分支未实测：自动化环境无用户手势，`navigator.clipboard.writeText` 被拒，界面按 `Link in URL` 诚实降级；`Copied!` 分支需在真实点击下复测（M17 新遗留）
-- [ ] AI 面板遥测条（`Time / Space / Hotspot / Peak stack`）在 770 下内容 `537px` 大于其容器 `251px`，靠外层 `overflow-y-auto` 吸收横向溢出；该 JSX 自 M17 起未改动，是 M18 把 `overflow-y-auto` 容器全量枚举时才发现的既有现象（其余容器实测 `160/160`、`159/159`、`438/438`、`660/660` 均零溢出），登记待后续窄视口精修而不是在本里程碑顺手改（M18 新发现）
+- [x] AI 面板遥测条（`Time / Space / Hotspot / Peak stack`）在 770 下内容 `537px` 大于其容器 `251px`，靠外层 `overflow-y-auto` 吸收横向溢出；该 JSX 自 M17 起未改动，是 M18 把 `overflow-y-auto` 容器全量枚举时才发现的既有现象（其余容器实测 `160/160`、`159/159`、`438/438`、`660/660` 均零溢出），登记待后续窄视口精修而不是在本里程碑顺手改（M18 新发现 → **M19 闭合**：该行改 `flex flex-wrap` + 每枚芯片 `max-w-full truncate`，弃用 `overflow-x-auto whitespace-nowrap`——徽章折行而不是撑破容器，实测该容器 `266/251` → `251/251`；同时自检第 6 项升级为全量纵向滚动盒枚举，`#12b` 指定的 `PRE / overflow-x-auto / overflow-auto` 按 class 豁免，实测 `5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 8 code/x-axis owners exempt by #12b`。改完已知的那一条并不等于全容器干净——首轮 FAIL 的元凶是瓶颈跳转行里不可断行的 `[MEMO_INJECTION_TARGET]` 把 `Jump #353` 顶出右沿 5px，另加 `min-w-0` + `break-all` 才转 PASS）
+- [ ] Min-Max 振幅带只给**激活阶段**绘制：三个阶段各画一条带会糊成实心，反而看不清波形；代价是多阶段对比时非激活阶段仍只有保峰上沿，其退栈波谷不可见（M19 新遗留）
+- [ ] 跳幕残余的第二种情形（Skip 落在 1334 帧投递之后，实测 `361 / 370ms`）仍未消除：那一笔提交已在渲染队列里，terminate 与世代号都救不了；`startTransition` 对这段延迟的单独贡献未再拆开测量（M19 新遗留）
+- [ ] 带 `code` 的链接只承诺源码可复现，不承诺 `stageHistory`：手改源码 + 已 Apply 过的多级现场仍只能带 `code` 或带 `stage` 二选一（`needsCode = sourceCode !== presetSource && !stageReproducible`），两者同时存在时优先走 `stage`（M19 新遗留）
 - [x] 抽样后游标圆点画在「所在桶的最大栈深」上，可能高于该帧真实栈深（M17 报备 → **M18 闭合**：实心点改取 `frames[markerFrame].callStack.length`，桶峰值降级为 dash 空心环 + 竖向细线，只在折叠时出现，芯片回显 `frame depth X (bucket peak Y)`；实测 467 帧抽样阶段三点 7/10、9/10、10/10 与火焰轨 54%/69%/77% × 峰值 13 逐一对上。128 点折线本身的下降沿仍是抹平的，只是不再冒充当前帧真相）
 - [x] 条件等待期间的 `Skip Act →` 让位粒度等于 `tourWaitFor` 的 60ms 轮询周期（M17 报备 → **M18 闭合**：`waitUntil` 改事件驱动，React 提交与 Skip/Stop/外部 pointerdown 都直接唤醒等待者，定时器仅作兜底；ACT 2 等待期实测 19ms，M17 同路径 977ms；ACT 1 重提交同批场景仍 304ms，见上条未隔离项）
 

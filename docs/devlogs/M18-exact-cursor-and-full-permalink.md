@@ -1,6 +1,6 @@
 # M18 · 抽样游标真实栈深对齐、全状态 URL 自动演进、零延迟跳幕与 8 项内核自检（v1.0 收官）
 
-Commit：本次提交（`git log -1`）— feat(permalink): 完成 Milestone 18 抽样游标真实栈深对齐、全状态URL自动演进、零延迟跳幕与8项内核自检
+Commit：`3c95084` — feat(permalink): 完成 Milestone 18 抽样游标真实栈深对齐、全状态URL自动演进、零延迟跳幕与8项内核自检
 
 ## Why · 背景动机
 

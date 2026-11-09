@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, startTransition } from 'react';
 import {
   Play,
   Pause,
@@ -57,6 +57,17 @@ interface BaselineMetrics {
   expansiveRedundantCount: number;
 }
 
+/** executeCode 被更新世代覆盖时的返回值：没有 report，调用方必须放弃冻结阶段 */
+interface StaleRunOutcome {
+  stale: true;
+  framesCount: number;
+  maxStackDepth: number;
+  expansive: number;
+  frames: TraceFrame[];
+  execTimeMs: number;
+  error?: string;
+}
+
 /** 多阶段全息快照：一份可在零延迟下完整还原的「源码 + 帧 + 报告 + 指标」胶囊 */
 interface StageSnapshot {
   stageIndex: number;
@@ -68,8 +79,10 @@ interface StageSnapshot {
   frameCount: number;
   /** O(1) 抽样估算的帧负载字节数（中段帧 + 末帧变量 JSON 长度 × 帧数） */
   approxBytes: number;
-  /** 每帧调用栈深度的轻量曲线（1 帧 = 1 个整数），frames 被惰性释放后仍可完整绘图 */
+  /** 每帧调用栈深度的轻量曲线（最多 128 个整数），frames 被惰性释放后仍可完整绘图 */
   depthCurve: number[];
+  /** 抽样时同段的桶内最小栈深；只有超过 128 帧才有意义，用于 Min-Max 退栈振幅带 */
+  depthFloorCurve?: number[];
   kind: 'normal' | 'draft';
   execTimeMs: number;
   sandboxError?: string;
@@ -110,24 +123,62 @@ const estimateSnapshotBytes = (trace: TraceFrame[]): number => {
 const MAX_CURVE_SAMPLES = 128;
 
 /**
- * 快照栈深曲线：<=128 帧逐帧 1:1；更长轨迹取「首帧 + 126 个中间桶 + 末帧」，每桶取桶内最大栈深。
- * 桶内取 max 且分桶无缝覆盖 1..n-2，因此 Math.max(...curve) 恒等于 metrics.maxStackDepth——抽样不吞峰。
+ * 快照栈深曲线：<=128 帧逐帧 1:1；更长轨迹取「首帧 + 126 个中间桶 + 末帧」，每桶同时保留最大与最小栈深。
+ * 桶内取 max 且分桶无缝覆盖 1..n-2，因此 Math.max(...curve) 恒等于 metrics.maxStackDepth——抽样不吞峰；
+ * 同一段轨迹的 min 让 128 点之外「递归退栈的波谷」也不再被抹平（M19 的 Min-Max 振幅带）。
  */
-const buildDepthCurve = (trace: TraceFrame[]): number[] => {
+const buildDepthBands = (trace: TraceFrame[]): { peaks: number[]; floors: number[] } => {
   const n = trace.length;
-  if (n <= MAX_CURVE_SAMPLES) return trace.map((f) => f.callStack.length);
+  if (n <= MAX_CURVE_SAMPLES) {
+    const one = trace.map((f) => f.callStack.length);
+    return { peaks: one, floors: one };
+  }
   const buckets = MAX_CURVE_SAMPLES - 2;
   const span = (n - 2) / buckets;
-  const depths: number[] = [trace[0].callStack.length];
+  const first = trace[0].callStack.length;
+  const last = trace[n - 1].callStack.length;
+  const peaks: number[] = [first];
+  const floors: number[] = [first];
   for (let b = 0; b < buckets; b++) {
     const from = 1 + Math.floor(b * span);
     const to = 1 + Math.ceil((b + 1) * span);
     let peak = 0;
-    for (let i = from; i < to; i++) peak = Math.max(peak, trace[i].callStack.length);
-    depths.push(peak);
+    let floor = Infinity;
+    for (let i = from; i < to; i++) {
+      const d = trace[i].callStack.length;
+      if (d > peak) peak = d;
+      if (d < floor) floor = d;
+    }
+    peaks.push(peak);
+    floors.push(floor);
   }
-  depths.push(trace[n - 1].callStack.length);
-  return depths;
+  peaks.push(last);
+  floors.push(last);
+  return { peaks, floors };
+};
+
+/** 只取上沿（保峰折线），供快照曲线与自检使用 */
+const buildDepthCurve = (trace: TraceFrame[]): number[] => buildDepthBands(trace).peaks;
+
+/** UTF-8 安全的 Base64URL：分享链接要能无损带上手改源码（含中文注释） */
+const encodeShareCode = (code: string): string => {
+  const bytes = new TextEncoder().encode(code);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+
+/** 解码失败、非法 UTF-8 或超过上限都返回 null，由调用方整体忽略，绝不半途采信 */
+const decodeShareCode = (raw: string): string | null => {
+  try {
+    const b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return text.length <= SHARE_CODE_LIMIT ? text : null;
+  } catch {
+    return null;
+  }
 };
 
 /** 跨阶段曲线的稳定配色：Stage 0 玫红虚线、Stage 1 天蓝、Stage 2 翠绿，后续阶段循环取色 */
@@ -159,7 +210,7 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 24;
+const KERNEL_INVARIANT_COUNT = 25;
 
 /** 评委导览的七幕脚本：每一幕都驱动真实内核，不做假动画，note 里点名本幕负责的预设 */
 const TOUR_ACTS: { title: string; note: string }[] = [
@@ -349,30 +400,41 @@ console.log("Unreachable:", anomalySum);`,
   },
 ];
 
-/** `#preset=<id>&stage=<1|2>&frame=<frameIndex>&bp=<L1,L2>&watch=<expr|expr>` 还原出的可复现现场 */
+/**
+ * `#preset=<id>&stage=<1|2>&frame=<frameIndex>&bp=<L1,L2>&watch=<expr|expr>[&code=<base64url>]`
+ * 还原出的可复现现场
+ */
 interface ShareState {
   preset: PresetItem;
   stage: number | null;
   frame: number | null;
   bp: number[];
   watch: string[];
+  code: string | null;
 }
 
 /** 分享链接里最多带 16 个断点，避免把手工堆出来的行号列表整份塞进 URL */
 const SHARE_BP_LIMIT = 16;
 
+/** 手改源码最多带 1600 字符：再长就该走文件而不是地址栏 */
+const SHARE_CODE_LIMIT = 1600;
+
 /**
  * 解析分享哈希。预设名不合法就整体忽略（回到默认预设），其余字段各自独立校验：
  * stage 只认 1..2（能靠确定性 Apply 复现的级数）、bp 只取正整数行号并截到 16 个、
- * watch 最多 4 条且仍只在 evalWatchExpression 的闸门内求值。
+ * watch 最多 4 条且仍只在 evalWatchExpression 的闸门内求值、
+ * code 必须是可无损解码的 UTF-8 Base64URL 且 ≤1600 字符（解码失败即整体丢弃该字段）。
+ * 注意 code 只是源码文本——它仍然只经 Worker 沙箱与三层熔断执行，不在页面上下文求值。
  */
 const parseShareHash = (raw: string): ShareState | null => {
   const params = new URLSearchParams(raw.replace(/^#/, ''));
   const preset = PRESETS.find((p) => p.id === params.get('preset'));
   if (!preset) return null;
+  const code = params.get('code') ? decodeShareCode(params.get('code') as string) : null;
   const stage = Number.parseInt(params.get('stage') ?? '', 10);
   const frame = Number.parseInt(params.get('frame') ?? '', 10);
-  const lineCount = preset.code.split('\n').length;
+  // 行号上界要用「真正会跑的那份源码」算，带 code 的现场不能拿预设行数当界
+  const lineCount = (code ?? preset.code).split('\n').length;
   const bp = [
     ...new Set(
       (params.get('bp') ?? '')
@@ -389,6 +451,7 @@ const parseShareHash = (raw: string): ShareState | null => {
     frame: Number.isInteger(frame) && frame >= 0 ? frame : null,
     bp,
     watch: (params.get('watch') ?? '').split('|').filter(Boolean).slice(0, 4),
+    code,
   };
 };
 
@@ -1208,7 +1271,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M18',
-    commit: '本次提交',
+    commit: '3c95084',
     doc: 'docs/devlogs/M18-exact-cursor-and-full-permalink.md',
     title: '抽样游标真实栈深对齐、全状态 URL 自动演进、零延迟跳幕与 8 项内核自检',
     why: 'M17 的三条技术遗留都来自同一个动作——为了让长轨迹便宜而只保峰值，代价是游标、链接与等待节拍三处都开始与真相差一点：游标画在桶峰值上（第 140 帧真实深度 7 却显示 10）、链接只能带 preset/frame/watch（复现 Stage 2 必须手点两次 Apply）、条件等待期跳幕要等一个轮询周期（限频环境实测 977ms）。而自检台停在 6 项，也让抽样保峰与哈希解析这两条新契约没有活体证据。',
@@ -1237,6 +1300,38 @@ const DEVLOGS: DevlogEntry[] = [
       '回归与纪律：DP 29 帧 O(M*N) Matrix DP（Apply 可见）、Binary 10 帧 O(log n) Logarithmic Halving（Apply 隐藏）、Fast Power 13 帧（Apply 可见）、Rain 40 帧 Two-Pointer（Apply 隐藏）、fib 31 帧 O(2^n)（Apply 可见）、infinite-loop 1334 帧 [FUSE_STEP_LIMIT]；边界 dp[99][0] === 1 → ERROR。header 44px / 770 == 770、footer 52px / 770 == 770、h-9 行 321 == 321 与 448 == 448、body 770 == 770；npm run build 零报错、src emoji 0 命中、19 篇文档表格列数一致、24 条不变量、控制台无 error/warn。',
     ],
   },
+  {
+    tag: 'M19',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M19-zero-overflow-and-minmax-band.md',
+    title: '全容器零横向溢出治理、保峰保谷双包络带、跳幕短路隔离与自定义代码 URL 分享',
+    why: 'M18 的收尾审计留下三个真问题：遥测条 537px 把 251px 的容器撑出横向滚动（当时只登记没改）；ACT 1 跳幕要等 304ms 却说不清等的是谁；128 点抽样把长轨迹的退栈波谷全抹平了，图上看不到「递归塌陷」这件事真正发生的位置。另外 Draft 与手改源码仍无法用链接复现——评委拿到链接只看到预设原文。',
+    what: [
+      'App.tsx + sandboxRunner：AI 面板遥测条由 overflow-x-auto whitespace-nowrap 改为 flex flex-wrap + 每枚芯片 max-w-full truncate；自检第 6 项改名 771px Viewport & Container Reachability，枚举全部 overflow-y auto/scroll 容器并断言 scrollWidth <= clientWidth，PRE / overflow-x-auto / overflow-auto 作为 #12b 指定的横向滚动责任人豁免；瓶颈跳转行补 min-w-0 + break-all，让 [MEMO_INJECTION_TARGET] 这类不可断词换行而不是把 Jump #353 顶出容器。',
+      'App.tsx + sandboxRunner：runInSandbox 增加 onCancel，被取消的一跑直接 worker.terminate 并带 cancelled 标记；executeCode 记世代号 runGenRef，新一跑开始时终止上一跑，过期或被取消的结果一律不回写 frames / aiReport；skipTourAct 除了记幕号与释放驻留，还立刻取消在跑的那一批。',
+      'App.tsx：导览幕内的 Apply 改为 raceAbort(token, apply())——Promise.race 让「本幕已被跳过 / 令牌已失效」在动作还没跑完时就能让位，幕内每一步之后补 halted() 检查；过期 Apply 由 stale 标记放弃冻结阶段，避免把半截现场写进全息栈。',
+      'App.tsx：buildDepthBands 一次算出同一分桶的 peaks 与 floors，depthCurve 仍是保峰上沿，StageSnapshot 新增 depthFloorCurve（仅 >128 帧时存在）；包络图为激活阶段绘制 Min-Max 半透明振幅带（256 点多边形：上沿顺 + 下沿逆），控制行回显 min-max band N/128 buckets，重水化时上下沿同源刷新。',
+      'App.tsx：分享扩到第六个字段 code——当前源码既不等于预设原文、又不能靠 preset+stage 复现（Draft / 手改）时，用 UTF-8 安全的 Base64URL 带上源码（上限 SHARE_CODE_LIMIT = 1600），超长时按钮诚实显示 Link without code；首屏 parseShareHash 解码成功才作为初始 sourceCode 送进沙箱，bp 的行号上界也改用这份真实源码的行数。',
+      'KERNEL_INVARIANT_COUNT 升至 25；INDEX 追加 #25（全容器零横向溢出、Min-Max 双包络、世代取消与 code 字段契约）并勾选 M18 三条遗留。',
+    ],
+    conflicts: [
+      '304ms 的残余不是等待循环，而是一步一步试出来的：只丢弃过期回写（世代号）时延迟没变；给沙箱加 terminate 并在 skipTourAct 里取消后，「点击早于熔断轨迹投递」的场景降到二十多毫秒且 1334 帧一次都没上屏；而「点击晚于投递」仍是三百多毫秒——那一笔已经在渲染队列里，取消救不了。把 frames 标成 startTransition 是让紧急更新不必排在重提交之后，它对这段延迟的单独贡献没有再拆开测（不能把三条改动混算成一条的功劳）。',
+      '因此正确的度量是分情形报：Skip 落在投递前实测 18 / 18 / 22 / 26 / 27ms（五轮 fresh-page，熔断横幅在点击时刻与推进之后都未出现），落在投递后（延迟 80 / 90ms 点击）仍是 361 / 370ms；M18 那句「残余未隔离」现在有了答案，但绝不能把它写成「ACT 1 也 <30ms」。',
+      '「所有 overflow-y-auto 容器零横向溢出」这条断言一开始写得太满：预设切换器、代码外层、AST 轨道条本来就是 #12b 指定的横向滚动责任人，把它们也算进去会让自检永远红。豁免按 class 判定而不是 computed style——因为 CSS 规定另一轴非 visible 时 visible 会算成 auto，计算值分不出「谁被授权横滚」。',
+      '新断言第一次真跑就 FAIL 过一次：AI 面板容器 266 > 251，元凶不是遥测徽章而是瓶颈跳转行——`[MEMO_INJECTION_TARGET]` 是不可断行的长标签，把 Jump #353 顶出容器右沿 5px（同一行在 Jump #6 / #9 时是 225/225，因为按钮窄 12px）。教训是「改了已知的 537px 不等于全容器干净」，最终解法给文本块 min-w-0、标签 break-all，而不是给按钮加 shrink 或让整行横滚。',
+      'Min-Max 带只给激活阶段画：三个阶段各画一条振幅带会糊成一团实心，反而看不清波形；代价是多阶段对比时非激活阶段仍只有上沿，已记进遗留。另外 1:1 曲线（<=128 帧）不存下沿，所以激活阶段是短轨迹时振幅带整条不出现——实测 Stage 1（83 帧）就没有带，这不是回归。',
+      'code 字段是源码文本，不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，绝不进页面上下文；上限 1600 字符、解码失败或非法 UTF-8 一律整体丢弃该字段（自检第 8 项覆盖超长与损坏编码）。',
+      'StrictMode 双跑首屏时，第二次 executeCode 会终止第一次的 Worker：这是「新的赢」的正确语义，但也说明取消必须与世代号成对出现——只 terminate 不判世代会让旧回调写回脏 state。',
+    ],
+    impact: [
+      '零溢出：AI 面板容器从 266/251 变 251/251；自检第 6 项 detail 实测 header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 8 code/x-axis owners exempt by #12b · viewport 770x553，耗时 2.3ms，整台 8/8 PASS 且 FAIL 0（其余七项 10.1 / 0.6 / 0.2 / 0.2 / 0.1 / 0.2 / 0.7ms）。',
+      'Min-Max 带：fib(10) 的 Stage 0（354 帧）绘出 256 点振幅多边形（上沿 128 + 下沿 128，opacity 0.26），控制行 min-max band 126/128 buckets——128 个桶里 126 个真的发生过退栈折叠，这部分形状 M17/M18 是被抹掉的；该阶段此刻是 LAZY（图例 Stage 0 peak 11 · 354f · LAZY），带完全由快照的 depthFloorCurve 画出，没有触发重水化。',
+      '跳幕隔离（五轮 fresh-page 复测，Skip 落在熔断轨迹投递之前）：18 / 18 / 22 / 26 / 27ms 进入 ACT 2/7，且 1334 帧轨迹一次都没有上屏；两轮落在投递之后（80 / 90ms 才点）仍是 361 / 370ms——与 M18 的 304~330ms 同量级，这条边界如实记录。',
+      '自定义源码链接：手改 walk(6) 现场（15 帧）导出 #preset=dp-matrix&frame=3&code=Ly8gTTE5IOiHquWumuS5iS…（含 watch 全长 318 字符），带哈希重载后 FRAME 4 / 15、代码区可见「M19 自定义分享现场：手写 walk(6) 线性扫描」、判据 O(n) Linear Iterative Scan / O(1) Scalar Accumulator、热点 L4（6x）——手改代码跨链接 100% 复现。',
+      '纯 bp 链接：#preset=pascal-comb&frame=0&bp=7&watch=… 重载后 L7 按钮标题为 Remove breakpoint at L7、FRAME 1 / 13 就位；无手势环境剪贴板仍被拒，按钮显示 Link in URL（Copied! 分支仍未实测）。',
+      '回归与纪律：DP 29 帧 Matrix DP（热点 L14 6x）/ Binary 10 帧 Logarithmic Halving / Fast Power 13 帧（栈深 7）/ Rain 40 帧 Two-Pointer（L9 11x）/ fib 31 帧 O(2^n)（栈深 6、L2 15x）/ comb 13 帧 O(2^n)（栈深 5、L2 11x）/ infinite-loop 1334 帧 [FUSE_STEP_LIMIT]（L5 666x）主路径全过；边界 dp[99][0] === 1 → ERROR；npm run build 零报错、src emoji 0 命中、docs/devlogs 20 篇表格列数一致、25 条不变量 == KERNEL_INVARIANT_COUNT 25、重载后控制台无新增 error/warn。',
+    ],
+  },
 ];
 
 export default function App() {
@@ -1245,7 +1340,10 @@ export default function App() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>(
     () => shareBoot?.preset.id ?? 'rainwater'
   );
-  const [sourceCode, setSourceCode] = useState<string>(() => shareBoot?.preset.code ?? PRESETS[0].code);
+  // 链接里带了 code（手改/Draft 现场）时以它启动，否则用预设原文
+  const [sourceCode, setSourceCode] = useState<string>(
+    () => shareBoot?.code ?? shareBoot?.preset.code ?? PRESETS[0].code
+  );
   const [codeTab, setCodeTab] = useState<'source' | 'ast'>('source');
   const [editMode, setEditMode] = useState<boolean>(false);
 
@@ -1275,12 +1373,16 @@ export default function App() {
   const tourSkipRef = useRef<(() => void) | null>(null);
   // 幕级取消：记录「第 k 幕已被一键跳过」，该幕剩余子步骤与条件等待全部立即让位
   const tourActSkipRef = useRef<number>(0);
-  // 事件驱动等待的唤醒器：Skip / Stop / 外部暂停以及每次 React 提交都要立即唤醒它
-  const tourWakeRef = useRef<(() => void) | null>(null);
+  // 事件驱动等待的唤醒器：Skip / Stop / 外部暂停以及每次 React 提交都要立即唤醒全部等待者
+  const tourWakeRef = useRef<Set<() => void>>(new Set());
+  // 沙箱跑批的世代号：跳幕 / 切预设会让上一批结果作废，作废结果不回写 state 也不冻结阶段
+  const runGenRef = useRef(0);
+  // 在跑那一批的取消句柄：跳幕时直接 terminate，重轨迹连 postMessage 都不用发生
+  const runCancelRef = useRef<(() => void) | null>(null);
   const wakeTourWaiters = () => {
-    const wake = tourWakeRef.current;
-    tourWakeRef.current = null;
-    wake?.();
+    const waiters = [...tourWakeRef.current];
+    tourWakeRef.current.clear();
+    for (const wake of waiters) wake();
   };
   // 导览与首屏自动演进读的都是渲染后的 state，因此提交本身就是最准确的唤醒时机
   useEffect(() => {
@@ -1313,7 +1415,7 @@ export default function App() {
   const pendingShareFrameRef = useRef<number | null>(shareBoot?.frame ?? null);
   // 首屏自动演进期间同样走零延迟诊断通道，不叠加 380ms 人工思考延迟
   const autoEvolveRef = useRef<boolean>(shareBoot?.stage != null);
-  const [shareState, setShareState] = useState<'idle' | 'copied' | 'blocked'>('idle');
+  const [shareState, setShareState] = useState<'idle' | 'copied' | 'blocked' | 'partial'>('idle');
   const shareResetRef = useRef<number>(0);
   const [watchDraft, setWatchDraft] = useState<string>('');
   const [seekState, setSeekState] = useState<{
@@ -1325,19 +1427,53 @@ export default function App() {
 
   const activeLineRef = useRef<HTMLDivElement | null>(null);
 
+  /** 被更新世代覆盖的跑：只回指标、不回写任何 state，也不冻结阶段 */
+  const staleRunResult = (res: {
+    frames?: TraceFrame[];
+    executionTimeMs: number;
+    error?: string;
+  }): StaleRunOutcome => {
+    const m = analyzeTraceMetrics(res.frames || []);
+    return {
+      stale: true as const,
+      framesCount: (res.frames || []).length,
+      maxStackDepth: m.maxStackDepth,
+      expansive: m.expansiveRedundantCount,
+      frames: res.frames || [],
+      execTimeMs: res.executionTimeMs,
+      error: res.error,
+    };
+  };
+
   const executeCode = async (codeToRun: string) => {
     setIsPlaying(false);
-    const res = await runInSandbox(codeToRun);
+    // 新一跑开始就终止上一跑：被终止的那跑永远不会 postMessage，主线程不用为 1334 帧付克隆的钱
+    runCancelRef.current?.();
+    runCancelRef.current = null;
+    // 每一跑都有世代号：被更新的跑（切预设 / 跳幕后的下一幕）覆盖时，旧结果一律不回写 state，
+    // 否则 1334 帧这种重轨迹会在评委已经跳幕之后仍然把 DOM 重画一遍
+    const gen = ++runGenRef.current;
+    const res = await runInSandbox(codeToRun, (cancel) => {
+      runCancelRef.current = cancel;
+    });
+    // 只有「仍在跑的才是当前这一跑」，落地后才交还取消权，避免误杀后继那一跑
+    if (runGenRef.current === gen) runCancelRef.current = null;
+    // 已经过期或被取消：算完指标直接返回，绝不 setFrames / setAiReport，让新幕的提交独占这一帧
+    if (res.cancelled || runGenRef.current !== gen) return staleRunResult(res);
     setExecTimeMs(res.executionTimeMs);
     setSandboxError(res.error);
 
-    if (res.frames && res.frames.length > 0) {
-      setFrames(res.frames);
-      setCurrentFrameIdx(0);
-    } else {
-      setFrames([]);
-      setCurrentFrameIdx(0);
-    }
+    // 帧数组是最重的那一笔（1334 帧要画热力图、火焰轨、调用树）：标成 transition，
+    // 让导览的幕标签这类紧急更新不必排队等它渲染完就能先上屏
+    startTransition(() => {
+      if (res.frames && res.frames.length > 0) {
+        setFrames(res.frames);
+        setCurrentFrameIdx(0);
+      } else {
+        setFrames([]);
+        setCurrentFrameIdx(0);
+      }
+    });
 
     setIsAnalyzing(true);
     // 导览与首屏自动演进期间跳过 380ms 人工思考延迟：判据只等诊断本身，不与新轨迹之间留下秒级空档
@@ -1348,6 +1484,7 @@ export default function App() {
       apiKey,
       tourRunningRef.current || autoEvolveRef.current
     );
+    if (runGenRef.current !== gen) return staleRunResult(res);
     setAiReport(report);
     setIsAnalyzing(false);
 
@@ -1360,6 +1497,7 @@ export default function App() {
       execTimeMs: res.executionTimeMs,
       error: res.error,
       report,
+      stale: false,
     };
   };
 
@@ -1512,12 +1650,35 @@ export default function App() {
       };
     });
 
-    await measure('viewport', '771px Viewport Reachability', () => {
+    await measure('viewport', '771px Viewport & Container Reachability', () => {
       const header = document.querySelector('header');
-      const equal = !!header && header.scrollWidth === header.clientWidth;
+      const headerOk = !!header && header.scrollWidth === header.clientWidth;
+      // 全量枚举纵向滚动盒：凡「不是被指定负责横向滚动的容器」都不得出现横向溢出（M18 的漏检就在这里）。
+      // #12b 把横向滚动责任明确交给代码外层容器与轨道条，所以 PRE / overflow-x-auto / overflow-auto 属于设计如此。
+      const isDesignatedXScroller = (el: Element) =>
+        el.tagName === 'PRE' ||
+        /overflow-x-auto|overflow-auto/.test(
+          (el.getAttribute('class') ?? '').toString()
+        );
+      const verticalBoxes: { sw: number; cw: number; cls: string }[] = [];
+      const excludedBoxes: { sw: number; cw: number; cls: string }[] = [];
+      for (const el of [...document.querySelectorAll<HTMLElement>('*')]) {
+        if (el.clientWidth <= 0) continue;
+        const s = getComputedStyle(el);
+        if (!/auto|scroll/.test(s.overflowY)) continue;
+        const box = {
+          sw: el.scrollWidth,
+          cw: el.clientWidth,
+          cls: (el.getAttribute('class') ?? '').split(' ').slice(0, 2).join(' '),
+        };
+        (isDesignatedXScroller(el) ? excludedBoxes : verticalBoxes).push(box);
+      }
+      const offenders = verticalBoxes.filter((b) => b.sw > b.cw + 1);
       return {
-        pass: equal,
-        detail: `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · viewport ${window.innerWidth}x${window.innerHeight}`,
+        pass: headerOk && offenders.length === 0,
+        detail: headerOk
+          ? `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · ${verticalBoxes.length} scroll boxes zero overflow (${verticalBoxes.map((b) => `${b.sw}/${b.cw}`).join(' ')}) · ${excludedBoxes.length} code/x-axis owners exempt by #12b · viewport ${window.innerWidth}x${window.innerHeight}`
+          : `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · offenders ${offenders.map((o) => `${o.sw}>${o.cw} (${o.cls})`).join(' ')} of ${verticalBoxes.length} boxes`,
       };
     });
 
@@ -1541,6 +1702,13 @@ export default function App() {
         '#preset=pascal-comb&stage=2&frame=6&bp=5,9&watch=dp[4][2]%3D%3D%3D6'
       );
       const hostile = parseShareHash('#preset=not-a-preset&stage=9&frame=-3&bp=0,-2,9999&watch=');
+      // 自定义源码必须无损往返（含中文注释），超长与损坏编码必须被拦下
+      const custom = 'function f(n) { return n; } // 中文注释\nf(3);';
+      const encoded = encodeShareCode(custom);
+      const roundTrip = decodeShareCode(encoded) === custom;
+      const withCode = parseShareHash(`#preset=fib-tree&code=${encoded}`);
+      const oversize = decodeShareCode(encodeShareCode('x'.repeat(1601)));
+      const corrupt = decodeShareCode('%%%not-base64%%%');
       const pass =
         !!full &&
         full.preset.id === 'pascal-comb' &&
@@ -1550,12 +1718,16 @@ export default function App() {
         full.bp[0] === 5 &&
         full.bp[1] === 9 &&
         full.watch.length === 1 &&
-        hostile === null;
+        hostile === null &&
+        roundTrip &&
+        withCode?.code === custom &&
+        oversize === null &&
+        corrupt === null;
       return {
         pass,
         detail: pass
-          ? `preset ${full?.preset.id} · stage ${full?.stage} · frame ${full?.frame} · bp ${full?.bp.join(',')} · watch ${full?.watch.length}`
-          : `expected a clean parse of preset/stage/frame/bp/watch, got ${JSON.stringify(full)} / hostile ${JSON.stringify(hostile)}`,
+          ? `preset ${full?.preset.id} · stage ${full?.stage} · frame ${full?.frame} · bp ${full?.bp.join(',')} · watch ${full?.watch.length} · code ${custom.length}ch round-trip OK, oversize+corrupt rejected`
+          : `expected clean parse + lossless code round trip, got ${JSON.stringify({ full: !!full, hostile: !!hostile, roundTrip, code: !!withCode?.code, oversize, corrupt })}`,
       };
     });
 
@@ -1582,24 +1754,33 @@ export default function App() {
   const handleShareSnapshot = async () => {
     const parts = [`preset=${selectedPresetId}`];
     // 只有能靠确定性 Apply 复现的 1..2 级才写进 URL；Draft 分支与更深的历史不在承诺范围内
-    if (stageHistory.length > 1 && activeStage >= 1 && activeStage <= 2) {
-      parts.push(`stage=${activeStage}`);
-    }
+    const stageReproducible =
+      stageHistory.length > 1 && activeStage >= 1 && activeStage <= 2 && !dirtyEdit;
+    if (stageReproducible) parts.push(`stage=${activeStage}`);
     parts.push(`frame=${currentFrameIdx}`);
     if (breakpoints.size > 0) {
       parts.push(`bp=${[...breakpoints].sort((a, b) => a - b).slice(0, SHARE_BP_LIMIT).join(',')}`);
     }
     if (watchExprs.length > 0) parts.push(`watch=${encodeURIComponent(watchExprs.join('|'))}`);
+    // 手改源码 / Draft 现场无法靠 preset+stage 重建，就用 Base64URL 把源码本身带上
+    const presetSource = PRESETS.find((p) => p.id === selectedPresetId)?.code ?? '';
+    const needsCode = sourceCode !== presetSource && !stageReproducible;
+    let codeOmitted = false;
+    if (needsCode) {
+      if (sourceCode.length <= SHARE_CODE_LIMIT) parts.push(`code=${encodeShareCode(sourceCode)}`);
+      // 超长就不写：链接会明确标注「没带上源码」，而不是悄悄退回预设原文冒充同一个现场
+      else codeOmitted = true;
+    }
     const hash = `#${parts.join('&')}`;
     // replaceState 而不是 location.hash 赋值：后者会触发锚点滚动，把当前视图顶走
     window.history.replaceState(null, '', hash);
     const link = `${window.location.origin}${window.location.pathname}${hash}`;
     try {
       await navigator.clipboard.writeText(link);
-      setShareState('copied');
+      setShareState(codeOmitted ? 'partial' : 'copied');
     } catch {
       // 剪贴板被拒也必须可见：地址栏里哈希已经写好，评委仍能手抄
-      setShareState('blocked');
+      setShareState(codeOmitted ? 'partial' : 'blocked');
     }
     window.clearTimeout(shareResetRef.current);
     shareResetRef.current = window.setTimeout(() => setShareState('idle'), 1800);
@@ -1793,6 +1974,7 @@ export default function App() {
     kind: 'normal' | 'draft' = 'normal'
   ): StageSnapshot => {
     const m = analyzeTraceMetrics(trace);
+    const bands = buildDepthBands(trace);
     return {
       stageIndex: index,
       label,
@@ -1800,7 +1982,9 @@ export default function App() {
       frames: trace,
       frameCount: trace.length,
       approxBytes: estimateSnapshotBytes(trace),
-      depthCurve: buildDepthCurve(trace),
+      depthCurve: bands.peaks,
+      // 只有真的分过桶才带下沿，1:1 曲线的 floor 与 peak 同一个数组，没必要重复存
+      depthFloorCurve: trace.length > MAX_CURVE_SAMPLES ? bands.floors : undefined,
       kind,
       execTimeMs: latency,
       sandboxError: err,
@@ -1850,6 +2034,8 @@ export default function App() {
     setSourceCode(optimizedCode);
     setEditMode(false);
     const after = await executeCode(optimizedCode);
+    // 这一跑已经被更新的一跑（例如导览跳幕后的下一幕）覆盖：不冻结阶段，避免写入过期现场
+    if (after.stale) return;
 
     const nextIndex = history.length;
     const snapshot = snapshotOf(
@@ -1885,6 +2071,7 @@ export default function App() {
       const res = await runInSandbox(snap.sourceCode);
       if (hydrateTokenRef.current !== token) return;
       const restored = res.frames || [];
+      const restoredBands = buildDepthBands(restored);
       setFrames(restored);
       setHydratingStage(null);
       setDriftStage(
@@ -1900,7 +2087,10 @@ export default function App() {
                 frames: restored,
                 frameCount: restored.length,
                 approxBytes: estimateSnapshotBytes(restored),
-                depthCurve: buildDepthCurve(restored),
+                depthCurve: restoredBands.peaks,
+                // 重水化后帧数可能漂移（非确定性），上下沿必须与恢复出来的帧同源
+                depthFloorCurve:
+                  restored.length > MAX_CURVE_SAMPLES ? restoredBands.floors : undefined,
               }
             : s
         )
@@ -2298,15 +2488,47 @@ export default function App() {
       await new Promise<void>((resolve) => {
         let fallback = 0;
         const finish = () => {
-          tourWakeRef.current = null;
+          tourWakeRef.current.delete(finish);
           window.clearTimeout(fallback);
           resolve();
         };
-        tourWakeRef.current = finish;
+        tourWakeRef.current.add(finish);
         fallback = window.setTimeout(finish, 500);
       });
     }
   };
+
+  /**
+   * 幕内异步动作与取消信号赛跑：Skip / Stop 之后不再等这一步跑完就推进下一幕。
+   * 过期那一跑由 runGenRef 世代号丢弃回写，因此这里让位不会留下半截现场。
+   */
+  const raceAbort = <T,>(token: number, work: Promise<T>): Promise<T | undefined> =>
+    new Promise<T | undefined>((resolve, reject) => {
+      let settled = false;
+      const wake = () => {
+        if (settled) return;
+        if (tourTokenRef.current !== token || tourActHalted()) {
+          settled = true;
+          tourWakeRef.current.delete(wake);
+          resolve(undefined);
+        }
+      };
+      tourWakeRef.current.add(wake);
+      work.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          tourWakeRef.current.delete(wake);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          tourWakeRef.current.delete(wake);
+          reject(error);
+        }
+      );
+    });
 
   const tourWaitFor = async (token: number, cond: () => boolean, timeoutMs: number) => {
     await waitUntil(cond, timeoutMs, () => tourTokenRef.current !== token || tourActHalted());
@@ -2347,6 +2569,8 @@ export default function App() {
   const skipTourAct = () => {
     if (!tourRunningRef.current) return;
     tourActSkipRef.current = tourActRef.current >= 1 ? tourActRef.current : 1;
+    // 被放弃这一幕的那一跑直接 terminate：1334 帧永远不会 postMessage，跳幕不用等它把主线程占满
+    runCancelRef.current?.();
     tourSkipRef.current?.();
     wakeTourWaiters();
   };
@@ -2395,11 +2619,13 @@ export default function App() {
         await selectAndTrace('fib-tree');
         await tourHold(token, 1400);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
+        if (halted()) return;
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1600);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
+        if (halted()) return;
         await tourWaitFor(token, () => staged(3), 8000);
         await tourHold(token, 1400);
       },
@@ -2408,10 +2634,10 @@ export default function App() {
         await selectAndTrace('pascal-comb');
         await tourHold(token, 800);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
         await tourWaitFor(token, () => staged(2), 8000);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
         await tourWaitFor(token, () => staged(3), 8000);
         if (halted()) return;
         setCurrentFrameIdx(6);
@@ -2435,14 +2661,14 @@ export default function App() {
         await selectAndTrace('dp-matrix');
         await tourHold(token, 700);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1500);
         if (halted()) return;
         await selectAndTrace('fast-power');
         await tourHold(token, 700);
         if (halted()) return;
-        await liveActionsRef.current.apply();
+        await raceAbort(token, liveActionsRef.current.apply());
         await tourWaitFor(token, () => staged(2), 8000);
         await tourHold(token, 1700);
       },
@@ -2537,6 +2763,7 @@ export default function App() {
         kind: s.kind,
         label: s.label,
         depths: s.depthCurve,
+        floors: s.depthFloorCurve ?? [],
         peak: s.depthCurve.reduce((acc, d) => Math.max(acc, d), 1),
         frames: s.frameCount,
         verdict: s.metrics.timeComplexity,
@@ -2586,6 +2813,25 @@ export default function App() {
   const markerY = telemetryY(markerExactDepth);
   const markerPeakY = telemetryY(markerBucketDepth);
   const markerFolded = !!activeCurve && markerBucketDepth > markerExactDepth;
+  /** Min-Max 退栈振幅带：只给激活阶段画，桶内 max > min 的那些段就是被抽样藏起来的波谷 */
+  const bandBuckets =
+    activeCurve && activeCurve.floors.length === activeCurve.depths.length
+      ? activeCurve.depths.reduce((acc, d, i) => acc + (d > activeCurve.floors[i] ? 1 : 0), 0)
+      : 0;
+  const bandVisible = bandBuckets > 0;
+  const bandPoints = !activeCurve || !bandVisible
+    ? ''
+    : [
+        ...activeCurve.depths.map(
+          (d, i) => `${telemetryX(activeCurve, i).toFixed(1)},${telemetryY(d).toFixed(1)}`
+        ),
+        ...activeCurve.depths
+          .map((_, i) => activeCurve.depths.length - 1 - i)
+          .map(
+            (i) =>
+              `${telemetryX(activeCurve, i).toFixed(1)},${telemetryY(activeCurve.floors[i] ?? 1).toFixed(1)}`
+          ),
+      ].join(' ');
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -3078,7 +3324,13 @@ export default function App() {
                 }`}
               >
                 {shareState === 'copied' ? <Check className="w-2.5 h-2.5" /> : <Share2 className="w-2.5 h-2.5" />}
-                {shareState === 'copied' ? 'Copied!' : shareState === 'blocked' ? 'Link in URL' : 'Share'}
+                {shareState === 'copied'
+                  ? 'Copied!'
+                  : shareState === 'blocked'
+                    ? 'Link in URL'
+                    : shareState === 'partial'
+                      ? 'Link without code'
+                      : 'Share'}
               </button>
               {quickWatches
                 .filter((q) => !watchExprs.includes(q) && watchExprs.length < 4)
@@ -3152,6 +3404,13 @@ export default function App() {
                       <text x={2} y={TELEMETRY_TOP + 3} fill="#71717a" fontSize={8} fontFamily="monospace">
                         {telemetryMaxDepth}
                       </text>
+                      {bandVisible && (
+                        <polygon
+                          points={bandPoints}
+                          fill={activeCurve?.color ?? '#10b981'}
+                          opacity={0.26}
+                        />
+                      )}
                       {stageCurves.map((c) => {
                         const pts = c.depths
                           .map((d, i) => `${telemetryX(c, i).toFixed(1)},${telemetryY(d).toFixed(1)}`)
@@ -3271,6 +3530,14 @@ export default function App() {
                     >
                       Y: {telemetryYMode === 'sqrt' ? 'Sqrt' : 'Linear'} ⇄
                     </button>
+                    {bandVisible && (
+                      <span
+                        title="Min-Max envelope band: each shaded bucket spans its real peak-to-trough stack swing, restored from depthFloorCurve instead of being flattened by sampling"
+                        className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400 whitespace-nowrap"
+                      >
+                        min-max band {bandBuckets}/128 buckets
+                      </span>
+                    )}
                     {markerFolded && (
                       <span
                         title="The filled dot sits at this frame's real callStack.length; the dashed ring stays at the bucket peak because 128-point sampling only preserves peaks"
@@ -3944,29 +4211,29 @@ export default function App() {
             <div className="flex-1 min-h-0 grid grid-cols-12 divide-x divide-zinc-800/80 overflow-hidden">
               {/* Left 7 cols: Summary & Bottleneck Frame Jumpers */}
               <div className="col-span-7 p-3 overflow-y-auto space-y-2.5">
-                {/* Telemetry Strip — 复杂度徽章从 h-9 标题栏迁出，771px 下不再折行 */}
+                {/* Telemetry Strip — 徽章折行而不是撑破容器：M18 全量枚举发现本行 537px > 容器 251px */}
                 {aiReport && (
-                  <div className="flex items-center gap-1.5 font-mono text-[10px] overflow-x-auto no-scrollbar whitespace-nowrap">
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full font-mono text-[10px]">
+                    <span className="max-w-full truncate px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
                       Time: {aiReport.timeComplexity}
                     </span>
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                    <span className="max-w-full truncate px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
                       Space: {aiReport.spaceComplexity}
                     </span>
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                    <span className="max-w-full truncate px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
                       Hotspot: L{aiReport.hotspotLine} ({aiReport.maxHitCount}x)
                     </span>
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-800/90 text-zinc-400 border border-zinc-700/70">
+                    <span className="max-w-full truncate px-1.5 py-0.5 rounded bg-zinc-800/90 text-zinc-400 border border-zinc-700/70">
                       Peak stack: {traceMetrics.maxStackDepth}
                     </span>
                     {aiReport.combinePattern && (
-                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      <span className="max-w-full truncate px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                         Operator: {aiReport.combinePattern}
                       </span>
                     )}
                     {benchmarkDelta?.inspectingBaseline && (
                       <span
-                        className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                        className="max-w-full truncate px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
                         title="Stage 0 snapshot restored in full: source, frames, sandbox error and its own AI report"
                       >
                         INSPECTING STAGE 0 BASELINE (Full Report Restored)
@@ -3974,7 +4241,7 @@ export default function App() {
                     )}
                     {driftStage !== null && (
                       <span
-                        className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                        className="max-w-full truncate px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
                         title={`Stage ${driftStage} was re-hydrated from a non-deterministic source; frameCount is refreshed while the frozen AI report is preserved.`}
                       >
                         NON-DETERMINISTIC RE-HYDRATION (Frame values may vary)
@@ -3999,10 +4266,12 @@ export default function App() {
                           key={idx}
                           className="p-2 rounded bg-[#0E1117] border border-zinc-800/90 flex items-center justify-between gap-2"
                         >
-                          <div className="space-y-0.5">
+                          <div className="space-y-0.5 min-w-0">
                             <div className="flex items-center gap-2 font-mono text-[10px]">
-                              <span className="text-amber-400 font-semibold">[{ins.tag}]</span>
-                              <span className="text-zinc-500">Line {ins.line}</span>
+                              <span className="text-amber-400 font-semibold break-all">
+                                [{ins.tag}]
+                              </span>
+                              <span className="text-zinc-500 shrink-0">Line {ins.line}</span>
                             </div>
                             <div className="text-[11px] text-zinc-300">{ins.issue}</div>
                           </div>
@@ -4318,6 +4587,40 @@ export default function App() {
                       <br />• M18 splits the envelope cursor into an exact-depth dot plus a bucket-peak ring,
                       extends permalinks to stage + breakpoints with automatic first-paint evolution, replaces
                       the 60ms tour poll with event-driven wakeups, and grows the self-check to 8 assertions.
+                      <br />• M19 clears the last horizontal overflow inside the AI panel and audits every
+                      scroll container in the self-check, turns the 128-bucket sample into a peak-and-trough
+                      Min-Max band, cancels superseded sandbox runs so an abandoned act stops in about 30ms,
+                      and carries hand-edited or Draft source through the permalink as Base64URL code.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-cyan-400 font-semibold">
+                      19. Zero Overflow, Min-Max Band, Run Cancellation &amp; Code Permalink (M19)
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The AI telemetry strip no longer forces a horizontal scrollbar: the chips wrap instead
+                      of sitting on one nowrap line, and self-check 6 became 771px Viewport &amp; Container
+                      Reachability - it enumerates every vertical scroll box and asserts scrollWidth &lt;=
+                      clientWidth, exempting only the elements #12b designates as horizontal scrollers
+                      (measured: header 770/770 · 5 scroll boxes zero overflow 160/160 159/159 438/438 251/251
+                      660/660 · 8 code/x-axis owners exempt · 8/8 PASS in 2.3ms). The assertion earned its keep:
+                      its first run FAILED at 266/251 because an unbreakable [MEMO_INJECTION_TARGET] label pushed
+                      Jump #353 past the panel edge, which is why the jumper row now carries min-w-0 + break-all.
+                      <br />• Sampling now keeps both edges of every bucket: buildDepthBands returns peaks and
+                      floors, the snapshot stores depthFloorCurve when a stage exceeds 128 frames, and the active
+                      stage draws a Min-Max envelope band - measured on the 354-frame Stage 0 as a 256-point
+                      polygon with min-max band 126/128 buckets, i.e. 126 of 128 buckets really did unwind, and
+                      drawn straight from the snapshot while that stage sits in LAZY (no re-hydration).
+                      <br />• A superseded sandbox run is terminated instead of merely ignored. Clicking Skip Act
+                      before the 1334-frame fuse trace is delivered now stops ACT 1 in 18 / 18 / 22 / 26 / 27ms
+                      across five fresh-page trials with the heavy trace never painted; clicking after delivery
+                      still costs 361 / 370ms because that commit is already queued - reported as a boundary, not
+                      smoothed into a single number.
+                      <br />• Permalinks carry the scene&apos;s source itself: hand-edited or Draft code travels as
+                      &amp;code=&lt;base64url&gt; (UTF-8 safe, capped at 1600 characters, over-capacity links say
+                      Link without code instead of pretending), and reloading reproduces the custom run exactly -
+                      measured a 318-character hash bringing back the 15-frame walk(6) scene at FRAME 4 / 15 with
+                      its own verdict, while a hostile hash still falls back to the default preset untouched.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
