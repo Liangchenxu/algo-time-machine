@@ -90,6 +90,13 @@ Key 仅驻留内存，不写入 localStorage。
 
 - 行号可点击设断点（`breakpoints: Set<number>`），火焰条顶部渲染断点标记，
   `Continue to Breakpoint` 与 `F8` / `b` 向后扫描第一个命中帧；切换预设即清空断点。
+  **火焰轨的 DOM 竖条数恒 `<= MAX_FLAME_BARS = 160`**（M20）：`buildFlameBuckets` 在 `<= 160` 帧时逐帧 1:1，
+  超过时切成恒 160 个无缝桶（`floor(b*n/160)`，相邻桶首尾相接、桶宽 `>= 1` 故永不为空），
+  每桶保留**真实证据**而非新真相——`maxDepth` 取桶内实际最大栈深，`hasBreakpoint` / `hasHotspot`
+  取「任一帧命中」，`repFrame` **优先取命中断点的帧**、否则取最深帧；点击跳 `repFrame` 而非桶左沿，
+  竖条 `title` 把聚合口径（`Frames a-b · peak depth d → #rep`）对用户显式回显。
+  这条同时是可达性修复：1334 根 1:1 竖条会把火焰行撑到 4009px（footer 4572/770），
+  约第 190 帧之后的竖条根本不在视口内、点不到。
 - `Call-Tree Topology` 面板仅在 `maxStackDepth >= 2` 且存在多个激活节点时出现，提供
   `2D SVG Tree`（默认，后序槽位 + 父节点 x 取子节点均值 + 三次贝塞尔连线）与 `Compact List` 两种视图；
   三态着色（active 电光蓝 / DUP 玫红 / retired 暗灰，未来节点 opacity-40），点击节点跳到其进入帧；
@@ -102,8 +109,14 @@ Key 仅驻留内存，不写入 localStorage。
   顶栏加入 `Tour` 按钮后仍须零溢出：唯一允许的让步是导览运行时临时隐藏装饰性 `AST-IR v2.4` 徽章，
   可压缩区依旧只有预设切换器。
   **M19 起该契约的范围是全量纵向滚动盒，不止顶栏**：自检第 6 项枚举所有 `clientWidth > 0` 且
-  `overflowY` 为 `auto|scroll` 的容器并逐个断言零横向溢出，只有 `#12b` 指定的横滚责任人可豁免，
-  且豁免必须按 `class` 判定（computed style 分不出谁被授权横滚）。
+  `overflowY` 为 `auto|scroll` 的容器并逐个断言零横向溢出，只有 `#12b` 指定的横滚责任人可豁免。
+  **M20 起豁免只认显式属性**：这些容器必须标注 `data-scroll-x-owner="true"`，断言按
+  `el.hasAttribute('data-scroll-x-owner')` 豁免，并**同时**按 legacy class 规则（`PRE` /
+  `overflow-x-auto` / `overflow-auto`）算一遍对照集合，两者数量不等即 FAIL——
+  这样改类名既不能让豁免静默扩大，也不能让标记静默漂离审计口径。
+  仍然**不得按 computed style 判定**（另一轴非 `visible` 时 `visible` 会被算成 `auto`，分不出谁被授权横滚）。
+  注意该断言的枚举域是纵向滚动盒：**flex 容器的横向溢出不在扫描内**（M20 的 footer 溢出就是靠
+  降子项数而非靠断言发现的），此类溢出必须由子项数量/宽度自律解决，不得靠给父层加 `overflow` 藏。
   徽章行**不得再用 `overflow-x-auto + whitespace-nowrap` 把溢出藏进滚动条**，只能折行 + 芯片
   `max-w-full truncate`；不可断行的长标签（如 `[MEMO_INJECTION_TARGET]`）必须 `min-w-0` + `break-all`，
   而不是给同行按钮加 `shrink` 或让整行横滚——那只会把溢出换个地方藏起来。
@@ -169,10 +182,11 @@ Key 仅驻留内存，不写入 localStorage。
   `floors` 仅在 `> 128` 帧时以 `depthFloorCurve` 落进快照，重水化时与 `frames / frameCount / approxBytes` 同源刷新。
   曲线索引与帧号是两套坐标系，必须经 `curveIndexOf` 换算。
   单个 SVG 坐标系叠加各阶段折线 + 半透明面积包络（Stage 0 玫红 `#f43f5e` 虚线、Stage 1 天蓝 `#38bdf8`、
-  Stage 2 翠绿 `#10b981`，激活阶段加粗），高 64px；**激活阶段另绘一条 Min-Max 退栈振幅带**
-  （256 点多边形：上沿顺 + 下沿逆，`opacity 0.26`），只在 `bandBuckets > 0` 时出现并回显
+  Stage 2 翠绿 `#10b981`，激活阶段加粗），高 64px；**Min-Max 退栈振幅带对全部阶段绘制**（M20）
+  （256 点多边形：上沿顺 + 下沿逆；激活阶段 `opacity 0.26`、非激活阶段 `0.09`），
+  只在 `floors.length === depths.length` 且本阶段真的有 `peak > floor` 时出现，控制行仍只回显激活阶段的
   `min-max band N/128 buckets`——实测 354 帧 `LAZY` 阶段 126/128 个桶真的折叠过，且带由快照绘出、不触发重水化；
-  1:1 曲线不存下沿，因此激活阶段是短轨迹时整条带不出现属正确行为，不得为凑形状造假数据。
+  1:1 曲线不存下沿，因此短轨迹阶段整条带不出现属正确行为，不得为凑形状造假数据。
   **横轴双口径** `X: Abs Frames ⇄ Norm %`
   （absolute 按 `frameCount / maxStageFrames` 占宽，实测 467f / 75f / 25f 阶段占 `100% / 16% / 5%`；
   normalized 铺满同宽只比波形）、**纵轴双口径** `Y: Linear ⇄ Sqrt`（sqrt 只压缩绘制高度，不改任何数值）；
@@ -189,10 +203,12 @@ Key 仅驻留内存，不写入 localStorage。
   **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
   `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
   `Draft` 临时阶段再切换（诊断走 `skipDelay=true`，实测 22.6ms），绝不静默丢弃。
-- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 25)**：8 项确定性微基准
+- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 26)**：9 项确定性微基准
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
-  矩阵读写分离 / 窄视口**全量纵向滚动盒**零横向溢出（`#12b` 指定的横滚责任人按 class 豁免）/
-  128 点保峰分桶 / Permalink 哈希解析与清洗（含 `code` 的无损往返、超长与损坏编码必须被拒）），
+  矩阵读写分离 / 窄视口**全量纵向滚动盒**零横向溢出（豁免读显式 `data-scroll-x-owner`，
+  并断言标记集合 == legacy class 集合）/ 128 点保峰分桶 / Permalink 哈希解析与清洗
+  （含 `code` 无损往返、超长与损坏编码必须被拒、`code + stage` 可共存）/
+  火焰轨 160 桶虚拟化（长度恒 160、平铺无隙无叠、断点 `repFrame` 精确命中、峰值与热点不丢）），
   每项显示 PASS/FAIL 与实测 ms，夹具纯浏览器执行，不使用 Worker、网络或 API Key。
   页签条可横滚，三个页签在 770px 下均可达。
 - 评委七幕自动导览（顶栏 `Tour`，覆盖全部 7 个内置预设）：`tourTokenRef` 驱动的真实内核编排，逐幕 =
@@ -207,6 +223,9 @@ Key 仅驻留内存，不写入 localStorage。
   并以 `runGenRef` 世代号作废回写，Skip 落在 1334 帧投递**之前**实测 `18 / 18 / 22 / 26 / 27ms`
   且重轨迹一次都没上屏，落在投递**之后**仍是 `361 / 370ms`（那笔提交已在渲染队列里，取消救不了）——
   **必须分情形报，不得写成「ACT 1 也 <30ms」**；
+  M20 又证伪了「这一支是 1334 根火焰条的 Commit 成本」这条归因：竖条虚拟化到恒 160 根（-88.0%）之后
+  该场景六轮实测 `324 / 332 / 361 / 365 / 370 / 372ms` 并无改善，而单独把 1334 帧落地只要 56ms 且零长任务，
+  故该耗时**仍是未闭合敞口**，不得写成「已被性能优化解决」；
   且导览期间诊断走 `skipDelay=true`，判据与轨迹实测 12~56ms 内齐备（导览外手动切预设仍有 380ms 差异）；
   `Skip Act →` 是**幕级**取消：一次点击让本幕剩下的驻留、条件等待与 Apply 全部让位（实测 ACT 2 内点一次
   即进 ACT 3，不再需要连点 3 次），幕开始前与暂停/Dismiss 都必须复位该标识；
@@ -217,7 +236,9 @@ Key 仅驻留内存，不写入 localStorage。
   `frame`（0 基帧号）+ `bp`（升序正整数、去重、最多 16 个且不超过**真正会跑的那份源码**行数）+ `watch` 断言
   + `code`（UTF-8 安全 Base64URL 的源码原文，上限 1600 字符）写进
   `window.location.hash`（用 `history.replaceState`，直接改 `location.hash` 会触发锚点滚动），并复制链接；
-  `code` 只在源码既不等于预设原文、又不能靠 `preset + stage` 重建（Draft / 手改）时写入，
+  `code` 只在**链接里的源码不等于预设原文**时写入；M20 起 `code` 与 `stage` 可共存，
+  且带 `stage` 时源码必须取 `stageHistory[0].sourceCode`（演进序列的起点）而不是屏幕上当前的合成产物——
+  后者会让首屏把合成产物当 Stage 0 再多演进两级，跑出根本不存在的 Stage 3。
   超长时按钮显示 `Link without code` 而不是悄悄退回预设原文冒充同一个现场；
   解码失败 / 非法 UTF-8 / 超长一律整体丢弃该字段。
   `code` 只是源码文本、不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，绝不进页面上下文。
@@ -237,7 +258,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M19 各一篇，共 25 条不变量）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M20 各一篇，共 26 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

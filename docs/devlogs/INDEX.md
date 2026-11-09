@@ -26,7 +26,8 @@
 | M16 | `db5004a` | [M16-telemetry-curve-and-resumable-tour.md](./M16-telemetry-curve-and-resumable-tour.md) | 跨阶段 SVG 栈深包络遥测图（depthCurve 随快照持久化）、导览零延迟同步与六幕断点续播 |
 | M17 | `7a3b96a` | [M17-dual-axis-envelope-and-act-skip.md](./M17-dual-axis-envelope-and-act-skip.md) | 包络图双轴（绝对帧刻度 ⇄ 归一化 / 线性 ⇄ sqrt）、128 点保峰抽样、一键整幕跳过、七幕全预设与 URL 现场分享 |
 | M18 | `3c95084` | [M18-exact-cursor-and-full-permalink.md](./M18-exact-cursor-and-full-permalink.md) | 游标真实帧栈深与桶峰值双指示、全状态 URL 自动演进、事件驱动零延迟跳幕与 8 项内核自检（v1.0 收官） |
-| M19 | 本次提交 | [M19-zero-overflow-and-minmax-band.md](./M19-zero-overflow-and-minmax-band.md) | 全容器零横向溢出治理、128 桶保峰保谷 Min-Max 振幅带、跳幕短路取消在跑批次与自定义源码 `&code=` 分享 |
+| M19 | `9e0c81d` | [M19-zero-overflow-and-minmax-band.md](./M19-zero-overflow-and-minmax-band.md) | 全容器零横向溢出治理、128 桶保峰保谷 Min-Max 振幅带、跳幕短路取消在跑批次与自定义源码 `&code=` 分享 |
+| M20 | 本次提交 | [M20-flame-virtualization-and-v1-seal.md](./M20-flame-virtualization-and-v1-seal.md) | 火焰轨 160 桶 DOM 虚拟化、`data-scroll-x-owner` 显式横滚契约、全阶段振幅带、`code+stage` 组合演进与 9 项自检（v1.0 封盘） |
 
 ## 系统不变量（改任何一处都要三思并同步 DevLog）
 
@@ -326,6 +327,8 @@
     只能 `flex-wrap` 折行 + 每枚芯片 `max-w-full truncate`（AI 面板容器实测 266/251 → 251/251）。
     **不可断行的长标签同样算溢出源**：瓶颈跳转行的 `[MEMO_INJECTION_TARGET]` 曾把 `Jump #353` 顶出右沿 5px，
     文本块必须 `min-w-0`、标签必须 `break-all`，不得靠给按钮加横滚来藏。
+    （M20 起豁免改读显式 `data-scroll-x-owner` 属性并加「与 legacy class 集合相等」的同源断言，见 #26a；
+    「不得用横滚藏溢出」与「不可断行词必须可折」两条约束原样继续生效。）
     （b）**抽样必须同时保留桶的上沿与下沿**：`buildDepthBands` 一次返回 `{peaks, floors}`，
     `peaks` 即 `depthCurve`，继续受 #23b 保峰约束（`max(curve) === metrics.maxStackDepth`）；
     `floors` 只在轨迹 `> MAX_CURVE_SAMPLES` 时以 `depthFloorCurve` 落进快照（1:1 曲线的上下沿是同一个数组，不重复存）。
@@ -333,6 +336,7 @@
     且仅在 `bandBuckets > 0`（本桶真的 `peak > floor`）时出现，控制行回显 `min-max band N/128 buckets`；
     激活阶段是 `<= 128` 帧的 1:1 曲线时**整条带不出现属正确行为**（实测 Stage 1 · 83f 无带），不得为凑形状造假数据。
     重水化时上沿、下沿与 `frames / frameCount / approxBytes` **必须同源刷新**，不得让带与帧数脱节（#22a 的延伸）。
+    （M20 起非激活阶段也绘带、`opacity 0.09`，见 #26c；「只画有下沿证据的阶段」与「同源刷新」继续生效。）
     （c）**被取代的一跑只能「终止 + 判世代」，二者缺一不可**：`runInSandbox(source, onCancel)` 交出
     `worker.terminate` 能力并回 `cancelled: true`；`executeCode` 开跑前终止上一跑、
     以 `runGenRef` 世代号作废过期结果，过期或取消时只回指标、**绝不 `setFrames / setAiReport`**，
@@ -343,17 +347,48 @@
     （五轮 fresh-page，熔断横幅在点击时刻与推进之后都未出现，1334 帧一次都没上屏），
     落在投递之后（延迟 80 / 90ms 才点）仍是 361 / 370ms——那一笔已在渲染队列里，取消救不了，
     不得写成「ACT 1 也 <30ms」，也不得把 terminate / 世代号 / `startTransition` 三条改动的功劳混算成一条。
+    （M20 进一步证伪了「这一支是 1334 根火焰条的 Commit 成本」这一归因，见 #26e；分情形报数的纪律原样继续生效。）
     （d）**源码本身是现场的一部分，但只有不可重建时才入链**：哈希字段扩为
     `preset / stage / frame / bp / watch / code`。`code` 只在 `sourceCode !== presetSource && !stageReproducible`
     （Draft 与手改）时写入，用 UTF-8 安全的 Base64URL 编码、上限 `SHARE_CODE_LIMIT = 1600`；
     超长按 `partial` 处理并显示 `Link without code`，**不得悄悄退回预设原文冒充同一个现场**。
     解码失败、非法 UTF-8 或超长一律 `null` 即整体丢弃该字段；带 `code` 时 `bp` 的行号上界必须用这份真实源码的行数算。
     `code` 只是源码文本、不是可执行权限：它仍然只经 Worker 沙箱与三层熔断执行，**绝不在页面上下文求值**（#14d 不放宽）。
+    （M20 起 `code` 与 `stage` 可共存、豁免口径改读显式属性，见 #26a / #26c；本条对「上限 1600、解码失败即整体丢弃、
+    `bp` 按真正会跑的那份源码算行界」的约束原样继续生效。）
 
-## 当前实测基线（M19 复测，视口 770×553，`npm run build` 零 TS 报错）
+26. **火焰轨 160 桶虚拟化、显式横滚契约、全阶段振幅带与 v1.0 封盘契约**（M20 确立）：
+    （a）**横滚责任只认显式属性，不认类名也不认 computed style**：`#12b` 授权的横向滚动容器必须标注
+    `data-scroll-x-owner="true"`，自检第 6 项按 `el.hasAttribute('data-scroll-x-owner')` 豁免，
+    并**同时**按 legacy class 规则（`PRE` / `overflow-x-auto` / `overflow-auto`）算一遍，
+    两者数量不等即 FAIL 并回显两侧计数——这样改类名既不能让豁免静默扩大，也不能让标记静默漂离审计口径。
+    该断言的枚举范围仍是纵向滚动盒；**flex 容器不是豁免对象也不是盲区**：
+    它的横向溢出必须由子项数量/宽度自律解决（见 #26b），不得靠给父层加 `overflow` 藏起来。
+    （b）**火焰轨的 DOM 竖条数恒 `<= MAX_FLAME_BARS = 160`**：`buildFlameBuckets(frames, breakpoints, hotspotLine, currentFrameIdx?)`
+    在 `<= 160` 帧时逐帧 1:1，超过时均匀切成**恒 160 个桶**，桶边界 `floor(b*n/160)` 保证无缝平铺 `0..n-1`、
+    相邻桶首尾相接且桶宽 `>= 1`（永不为空）。每桶必须保留**真实证据**而不是新真相：
+    `maxDepth` 是桶内实际最大栈深、`hasBreakpoint` / `hasHotspot` 取「桶内任一帧命中」、
+    `repFrame` **优先取命中断点的帧**（点击即 Continue 的落点最有信息量）否则取栈深最大的帧，
+    `active` 由 `currentFrameIdx` 落在 `[startFrame, endFrame]` 判定。点击竖条跳 `repFrame`，不是跳桶左沿。
+    自检第 9 项只能用纯内存夹具断言这四件事（长度恒 160、平铺无隙无叠、断点 `repFrame` 精确命中、峰值与热点不丢）。
+    （c）**Min-Max 振幅带从「只给激活阶段」扩到全阶段，但层次必须可辨**：激活阶段保持 `opacity 0.26`，
+    非激活阶段用 `0.09`，两者都仍只在 `floors.length === depths.length` 且本阶段真的有 `peak > floor` 时绘制；
+    `<= 128` 帧的 1:1 阶段不存下沿，因此没有带、芯片也不出现，仍属正确行为（#25b 的「没有证据就不画」不变）。
+    （d）**`code` 与 `stage` 可以共存，且 `code` 必须是演进序列的起点**：带 `stage` 时链接里的源码取
+    `stageHistory[0].sourceCode`（不是屏幕上当前的合成产物——带进去会让首屏把它当 Stage 0 再多演进一级，
+    跑出根本不存在的 Stage 3）；不带 `stage` 时取当前 `sourceCode`。只要这份源码不等于预设原文就写 `code`。
+    还原侧不改语义：`sourceCode` 初值取 `code ?? preset.code` 先跑出自定义 Stage 0，
+    再由既有演进 effect 按序真实 Apply 到目标级（#24b 的「不涨级即停止、不伪造阶段」继续生效）。
+    （e）**度量不得为迎合假设而软化**：M19 把「投递后跳幕 ~361ms」归因于 1334 根火焰条的 Commit，
+    M20 虚拟化后竖条确实降到 160（-88.0%）并顺带消除一个真实的 4009px 溢出，
+    但该场景实测 324 / 332 / 361 / 365 / 370 / 372ms **没有改善**，
+    而单独落地 1334 帧只花 56ms 且零长任务、在已就位的 1334 帧上逐帧步进也是零长任务——
+    因此必须报「归因被推翻、此项仍未闭合」，不得写成「虚拟化已解决投递后延迟」。
 
-> M19 轮在 770×553 同源 iframe 测试台重跑了 7 个内置预设的主路径 + 一条越界断言边界，
-> 并逐项验证全容器零横向溢出、Min-Max 振幅带、跳幕取消隔离与 `&code=` 自定义源码链接（见下表与小节）；
+## 当前实测基线（M20 复测，视口 770×553，`npm run build` 零 TS 报错）
+
+> M20 轮在 770×553 同源 iframe 测试台重跑了 7 个内置预设的主路径 + 一条越界断言边界，
+> 并逐项验证火焰轨 160 桶虚拟化、显式横滚契约、全阶段振幅带与 `code + stage` 组合链接（见下表与小节）；
 > 手写边界样本（`depth(400)`、`fact(6)`、`powerAlt`、`bsearchCoupled`、`crypto.*` 变体）沿用 M12–M15 实测值。
 
 | 预设 | 帧数 | 峰值栈深 | 引擎判据结果 | 取证备注 |
@@ -487,6 +522,14 @@
 | 纯 bp 链接（M19） | `#preset=pascal-comb&frame=0&bp=7&watch=dp%5B4%5D%5B2%5D%3D%3D%3D6` 重载后 L7 按钮标题为 `Remove breakpoint at L7`、`FRAME 1 / 13`、断言原样回显；非法哈希 `#preset=not-a-preset&stage=9&frame=-3&bp=0,-2&watch=x` 整体忽略，回落默认 Rain（`FRAME 1 / 40`）、断点集合为空 |
 | 8 项内核自检（M19） | 页签 `Live Kernel Self-Check (25 Invariants)`，实测 **8/8 PASS**（FAIL 0），逐项毫秒 `TDZ 10.1 / Fuse 0.6 / Recursion 0.2 / Halving 0.2 / Matrix 0.1 / Viewport 2.3 / Downsampler 0.2 / Permalink 0.7`；第 8 项 detail `preset pascal-comb · stage 2 · frame 6 · bp 5,9 · watch 1 · code 41ch round-trip OK, oversize+corrupt rejected` |
 | 预设主路径与边界（M19） | Rain 40 帧 Two-Pointer（L9 11x）、DP 29 帧 Matrix DP（L14 6x）、Binary 10 帧 Logarithmic Halving、Fast Power 13 帧（栈深 7、L2 6x）、fib 31 帧 `O(2^n)`（栈深 6、L2 15x）、comb 13 帧 `O(2^n)`（栈深 5、L2 11x）、infinite-loop 1334 帧 `[FUSE_STEP_LIMIT]`（L5 666x）；越界断言 `dp[99][0] === 1` → `ERROR` |
+| 火焰轨 DOM 虚拟化（M20） | `infinite-loop` 1334 帧：竖条 **1334 → 160（-88.0%）**、该行盒子 `4009px → 197px`、`footer scrollWidth/clientWidth 4572/770 → 770/770`、整页元素数 451；桶 title 逐根可核（首根 `Frames 1-8 · peak depth 1 → #0`、末根 `Frames 1326-1334 → #1325`）。短轨迹仍 1:1：Rain 40/40、DP 29/29、Binary 10/10、Fast Power 13/13、fib 31/31、comb 13/13 |
+| 投递后跳幕归因复算（M20） | 虚拟化后 Skip 落在 1334 帧投递**之后**六轮实测 `324 / 332 / 361 / 365 / 370 / 372ms`——与 M19 的 `361 / 370ms` 同量级，**没有改善**；对照实验：单独把 1334 帧那一跑落到 `FRAME 1 / 1334` 实测 `56ms` 且 `longtask` 为 0 条，在已就位的 1334 帧轨迹上按 `ArrowRight` 逐帧步进也是 0 条长任务，而点击 Skip 后确实出现一个 `285~294ms` 的阻塞任务。结论：M19 的「1334 根竖条压垮 Commit」归因过窄，该支耗时仍未闭合 |
+| 投递前跳幕（M20 复测） | 五轮 fresh-page `16 / 17 / 18 / 19 / 21ms` 进 `ACT 2/7`，熔断横幅在点击时刻与推进之后均未出现（无回归） |
+| 显式横滚契约（M20） | 自检第 6 项 detail `header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 7 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553`，耗时 1.5ms；标记数与 legacy class 命中数相等才 PASS，不等即回显 `owner drift: N marked vs M per #12b class rule` |
+| 全阶段振幅带（M20） | `fib(10)` 演到 Stage 2 激活时，非激活的 `Stage 0 peak 11 · 354f · LAZY` 仍绘出 256 点多边形（`fill #f43f5e`、`opacity 0.09`），激活阶段保持 `0.26`；面积包络仍 `0.18 / 0.07` 层次可辨。激活阶段为 21 帧 1:1 曲线时无带、`min-max band` 芯片不出现 |
+| `code + stage` 组合链接（M20） | 手改 `dbl(6)`（17 帧）Apply 到 Stage 1 后导出 `#preset=binary-search&stage=1&frame=0&code=Ly8gTTIw…`（全长 **294 字符**，两个字段共存）；重载后胶囊 `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14`、源码区是合成产物而 Stage 0 仍是自定义起点——链接带的是**演进起点**而非当前产物 |
+| 9 项内核自检（M20） | 页签 `Live Kernel Self-Check (26 Invariants)`，实测 **9/9 PASS**（FAIL 0），逐项毫秒 `TDZ 4.6 / Fuse 0.7 / Recursion 0.3 / Halving 0.1 / Matrix 0.0 / Viewport 1.5 / Downsampler 0.0 / Permalink 0.5 / Flame 0.4`；第 9 项 detail `1334 frames -> 160 bars (cap 160) · tiled 0..1333 with no gap or overlap · breakpoint @#777 kept in 1 bucket(s) and repFrame lands exactly on it · peak depth 10 (real 10) · hotspot L42 kept`；第 8 项 detail 追加 `code+stage=2 coexist OK` |
+| 预设主路径与边界（M20） | 7/7 主路径全过（40 / 29 / 10 / 13 / 31 / 13 / 1334 帧，热点 `L9 11x / L14 6x / L2 1x / L2 6x / L2 15x / L2 11x / L5 666x`，火焰竖条依次为 40 / 29 / 10 / 13 / 31 / 13 / **160**）；越界断言 `dp[99][0] === 1` → `ERROR`；非法哈希仍整体忽略回默认预设 |
 
 ## 已修复问题清单（回归核对表，逐条验证过）
 
@@ -573,9 +616,14 @@
 - [x] 事件驱动跳幕在轻提交场景实测 19ms，但 ACT 1 这类「等待与 1334 帧重提交同批」的场景仍要 304ms（同 iframe 内 MessageChannel / rAF / setTimeout(0) 均为 0ms，可排除调度器限频）；残余来源尚未隔离（M18 报备 → **M19 隔离并分情形闭合**：残余是「那一跑的 1334 帧已经 postMessage 并进了渲染队列」，不是等待节拍。加 `runInSandbox` 的 `onCancel` + `worker.terminate` 与世代号作废后，Skip 落在投递**之前**五轮 fresh-page 实测 `18 / 18 / 22 / 26 / 27ms` 且重轨迹一次都没上屏（熔断横幅在点击时刻与推进之后均未出现）；落在投递**之后**（延迟 80 / 90ms 才点）两轮仍是 `361 / 370ms`——取消救不了已在队列里的提交，作为边界保留，不得写成「ACT 1 也 <30ms」）
 - [ ] 剪贴板成功分支未实测：自动化环境无用户手势，`navigator.clipboard.writeText` 被拒，界面按 `Link in URL` 诚实降级；`Copied!` 分支需在真实点击下复测（M17 新遗留）
 - [x] AI 面板遥测条（`Time / Space / Hotspot / Peak stack`）在 770 下内容 `537px` 大于其容器 `251px`，靠外层 `overflow-y-auto` 吸收横向溢出；该 JSX 自 M17 起未改动，是 M18 把 `overflow-y-auto` 容器全量枚举时才发现的既有现象（其余容器实测 `160/160`、`159/159`、`438/438`、`660/660` 均零溢出），登记待后续窄视口精修而不是在本里程碑顺手改（M18 新发现 → **M19 闭合**：该行改 `flex flex-wrap` + 每枚芯片 `max-w-full truncate`，弃用 `overflow-x-auto whitespace-nowrap`——徽章折行而不是撑破容器，实测该容器 `266/251` → `251/251`；同时自检第 6 项升级为全量纵向滚动盒枚举，`#12b` 指定的 `PRE / overflow-x-auto / overflow-auto` 按 class 豁免，实测 `5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 8 code/x-axis owners exempt by #12b`。改完已知的那一条并不等于全容器干净——首轮 FAIL 的元凶是瓶颈跳转行里不可断行的 `[MEMO_INJECTION_TARGET]` 把 `Jump #353` 顶出右沿 5px，另加 `min-w-0` + `break-all` 才转 PASS）
-- [ ] Min-Max 振幅带只给**激活阶段**绘制：三个阶段各画一条带会糊成实心，反而看不清波形；代价是多阶段对比时非激活阶段仍只有保峰上沿，其退栈波谷不可见（M19 新遗留）
-- [ ] 跳幕残余的第二种情形（Skip 落在 1334 帧投递之后，实测 `361 / 370ms`）仍未消除：那一笔提交已在渲染队列里，terminate 与世代号都救不了；`startTransition` 对这段延迟的单独贡献未再拆开测量（M19 新遗留）
-- [ ] 带 `code` 的链接只承诺源码可复现，不承诺 `stageHistory`：手改源码 + 已 Apply 过的多级现场仍只能带 `code` 或带 `stage` 二选一（`needsCode = sourceCode !== presetSource && !stageReproducible`），两者同时存在时优先走 `stage`（M19 新遗留）
+- [x] Min-Max 振幅带只给**激活阶段**绘制：三个阶段各画一条带会糊成实心，反而看不清波形；代价是多阶段对比时非激活阶段仍只有保峰上沿，其退栈波谷不可见（M19 报备 → **M20 闭合**：非激活阶段改以 `opacity 0.09` 绘带、激活阶段保持 `0.26`，仍只在真的有下沿（`floors.length === depths.length` 且 `peak > floor`）时出现；实测 Stage 2 激活时非激活的 `Stage 0 · 354f · LAZY` 绘出 256 点带 `fill #f43f5e / opacity 0.09`，与面积包络 `0.18 / 0.07` 层次可辨）
+- [x] 带 `code` 的链接只承诺源码可复现，不承诺 `stageHistory`：手改源码 + 已 Apply 过的多级现场仍只能带 `code` 或带 `stage` 二选一（`needsCode = sourceCode !== presetSource && !stageReproducible`），两者同时存在时优先走 `stage`（M19 报备 → **M20 闭合**：解除互斥，带 `stage` 时 `code` 取 `stageHistory[0].sourceCode` 即演进起点，还原侧既有 effect 先跑自定义 Stage 0 再按序真实 Apply；实测手改 `dbl(6)` + Apply 导出 294 字符 `#preset=binary-search&stage=1&frame=0&code=…`，重载后 `Stage 0 (17f)` + `Stage 1 (14f)`、`FRAME 1 / 14`。注意当初若直接带「当前源码」会把合成产物当 Stage 0 再多演进一级，跑出根本不存在的 Stage 3）
+- [x] 自检第 6 项的横滚豁免按 class 正则匹配，`PRE` / `overflow-x-auto` 一旦改名豁免会静默扩大（M19 报备 → **M20 闭合**：#12b 授权的容器全部显式标注 `data-scroll-x-owner="true"`，断言改读该属性，并额外要求「标记集合 == legacy class 规则集合」，不等即 FAIL 并回显两侧计数；实测 `7 explicit data-scroll-x-owner exempt == legacy #12b set`）
+- [x] 「投递后跳幕 361ms 是因为 1334 根火焰条的 DOM 提交」这条归因需要验证（M19 的推断 → **M20 证伪**：竖条确实从 1334 降到 160（-88.0%）、顺带消除一个真实的 `4009px` 横向溢出（footer 4572/770 → 770/770、整页 451 个元素），但该场景六轮实测 `324 / 332 / 361 / 365 / 370 / 372ms` 没有改善；对照：1334 帧那一跑单独落地只花 56ms 且零长任务、已就位时逐帧步进也零长任务。耗时项仍未闭合，见下条）
+- [ ] 投递后跳幕的 ~330ms 阻塞任务尚未定位到具体消费者：已知它不是火焰条 Commit（56ms / 0 长任务），`longtask` 只给出「点击后 6ms 起、持续 285~294ms」这一条信息，未拆出沙箱回传 / 诊断 / 下一幕首绘各自占比（M20 新遗留）
+- [ ] 自检第 6 项的枚举范围是纵向滚动盒（`overflowY auto|scroll`），**flex 容器的横向溢出不在扫描内**：M20 的 footer 溢出（4572/770）就是靠虚拟化而非靠断言发现的。是否把「所有 `clientWidth > 0` 且非横滚责任人的盒子」纳入断言尚未决定，扩大范围可能把设计内的 `overflow-hidden` 裁剪误判成溢出（M20 新遗留）
+- [ ] `code + stage` 共存时 `bp` 的行号上界仍按 Stage 0 起点源码计算（#25d 未放宽）：断点若落在 Apply 合成代码新增的行上会被判越界丢弃，此类链接需人工补断点（M20 新遗留）
+- [ ] 桶聚合让细粒度交互退化：`> 160` 帧时一次点击最多只能定位到 8 帧的粒度（1334 / 160），精确逐帧仍需方向键或包络图横轴点击；桶内 `repFrame` 只保证「断点优先、否则最深」，不保证等于用户想去的帧（M20 新遗留）
 - [x] 抽样后游标圆点画在「所在桶的最大栈深」上，可能高于该帧真实栈深（M17 报备 → **M18 闭合**：实心点改取 `frames[markerFrame].callStack.length`，桶峰值降级为 dash 空心环 + 竖向细线，只在折叠时出现，芯片回显 `frame depth X (bucket peak Y)`；实测 467 帧抽样阶段三点 7/10、9/10、10/10 与火焰轨 54%/69%/77% × 峰值 13 逐一对上。128 点折线本身的下降沿仍是抹平的，只是不再冒充当前帧真相）
 - [x] 条件等待期间的 `Skip Act →` 让位粒度等于 `tourWaitFor` 的 60ms 轮询周期（M17 报备 → **M18 闭合**：`waitUntil` 改事件驱动，React 提交与 Skip/Stop/外部 pointerdown 都直接唤醒等待者，定时器仅作兜底；ACT 2 等待期实测 19ms，M17 同路径 977ms；ACT 1 重提交同批场景仍 304ms，见上条未隔离项）
 

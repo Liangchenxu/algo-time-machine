@@ -1,6 +1,6 @@
 # M19 · 全容器零横向溢出治理、保峰保谷 Min-Max 振幅带、跳幕短路取消与自定义源码 URL 分享
 
-Commit：本次提交（`git log -1`）— feat(overflow): 完成 Milestone 19 全容器零横向溢出治理、Min-Max双包络带、跳幕取消短路与自定义源码URL分享
+Commit：`9e0c81d` — feat(overflow): 完成 Milestone 19 全容器零横向溢出治理、Min-Max双包络带、跳幕取消短路与自定义源码URL分享
 
 ## Why · 背景动机
 

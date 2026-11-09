@@ -160,6 +160,82 @@ const buildDepthBands = (trace: TraceFrame[]): { peaks: number[]; floors: number
 /** 只取上沿（保峰折线），供快照曲线与自检使用 */
 const buildDepthCurve = (trace: TraceFrame[]): number[] => buildDepthBands(trace).peaks;
 
+/**
+ * 火焰轨最多画 160 根竖条：1334 帧 1:1 会挂 1334 个 DOM 节点，
+ * 实测该行自身撑到 4009px（footer 4572 / 770），投递后那一笔提交正是 M19 跳幕残余 361~370ms 的来源。
+ */
+const MAX_FLAME_BARS = 160;
+
+/** 火焰轨的一根竖条 = 一段连续帧；repFrame 是点击它真正跳去的帧 */
+interface FlameBucket {
+  startFrame: number;
+  endFrame: number;
+  repFrame: number;
+  maxDepth: number;
+  hasBreakpoint: boolean;
+  hasHotspot: boolean;
+  active: boolean;
+}
+
+/**
+ * <=160 帧逐帧 1:1；更长轨迹均匀切成恒 160 桶，桶区间无缝平铺 0..n-1 且永不为空。
+ * 断点与热点按「桶内任一帧命中」聚合，所以抽样不会让一个断点标记凭空消失；
+ * repFrame 优先取桶内命中断点的帧（点击即 Continue 的落点最有信息量），否则取栈深最大的帧。
+ */
+const buildFlameBuckets = (
+  frames: TraceFrame[],
+  breakpoints: Set<number>,
+  hotspotLine: number,
+  currentFrameIdx = -1
+): FlameBucket[] => {
+  const n = frames.length;
+  if (n === 0) return [];
+  if (n <= MAX_FLAME_BARS) {
+    return frames.map((f, idx) => ({
+      startFrame: idx,
+      endFrame: idx,
+      repFrame: idx,
+      maxDepth: f.callStack.length,
+      hasBreakpoint: breakpoints.has(f.line),
+      hasHotspot: f.line === hotspotLine,
+      active: idx === currentFrameIdx,
+    }));
+  }
+  const out: FlameBucket[] = [];
+  for (let b = 0; b < MAX_FLAME_BARS; b++) {
+    const startFrame = Math.floor((b * n) / MAX_FLAME_BARS);
+    const endFrame = Math.floor(((b + 1) * n) / MAX_FLAME_BARS) - 1;
+    let maxDepth = 0;
+    let repFrame = startFrame;
+    let bpFrame = -1;
+    let hasBreakpoint = false;
+    let hasHotspot = false;
+    for (let i = startFrame; i <= endFrame; i++) {
+      const f = frames[i];
+      const d = f.callStack.length;
+      if (d > maxDepth) {
+        maxDepth = d;
+        repFrame = i;
+      }
+      if (breakpoints.has(f.line)) {
+        hasBreakpoint = true;
+        if (bpFrame < 0) bpFrame = i;
+      }
+      if (f.line === hotspotLine) hasHotspot = true;
+    }
+    out.push({
+      startFrame,
+      endFrame,
+      repFrame: bpFrame >= 0 ? bpFrame : repFrame,
+      maxDepth,
+      hasBreakpoint,
+      hasHotspot,
+      active: currentFrameIdx >= startFrame && currentFrameIdx <= endFrame,
+    });
+  }
+  return out;
+};
+
 /** UTF-8 安全的 Base64URL：分享链接要能无损带上手改源码（含中文注释） */
 const encodeShareCode = (code: string): string => {
   const bytes = new TextEncoder().encode(code);
@@ -210,7 +286,7 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 25;
+const KERNEL_INVARIANT_COUNT = 26;
 
 /** 评委导览的七幕脚本：每一幕都驱动真实内核，不做假动画，note 里点名本幕负责的预设 */
 const TOUR_ACTS: { title: string; note: string }[] = [
@@ -1302,7 +1378,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M19',
-    commit: '本次提交',
+    commit: '9e0c81d',
     doc: 'docs/devlogs/M19-zero-overflow-and-minmax-band.md',
     title: '全容器零横向溢出治理、保峰保谷双包络带、跳幕短路隔离与自定义代码 URL 分享',
     why: 'M18 的收尾审计留下三个真问题：遥测条 537px 把 251px 的容器撑出横向滚动（当时只登记没改）；ACT 1 跳幕要等 304ms 却说不清等的是谁；128 点抽样把长轨迹的退栈波谷全抹平了，图上看不到「递归塌陷」这件事真正发生的位置。另外 Draft 与手改源码仍无法用链接复现——评委拿到链接只看到预设原文。',
@@ -1330,6 +1406,39 @@ const DEVLOGS: DevlogEntry[] = [
       '自定义源码链接：手改 walk(6) 现场（15 帧）导出 #preset=dp-matrix&frame=3&code=Ly8gTTE5IOiHquWumuS5iS…（含 watch 全长 318 字符），带哈希重载后 FRAME 4 / 15、代码区可见「M19 自定义分享现场：手写 walk(6) 线性扫描」、判据 O(n) Linear Iterative Scan / O(1) Scalar Accumulator、热点 L4（6x）——手改代码跨链接 100% 复现。',
       '纯 bp 链接：#preset=pascal-comb&frame=0&bp=7&watch=… 重载后 L7 按钮标题为 Remove breakpoint at L7、FRAME 1 / 13 就位；无手势环境剪贴板仍被拒，按钮显示 Link in URL（Copied! 分支仍未实测）。',
       '回归与纪律：DP 29 帧 Matrix DP（热点 L14 6x）/ Binary 10 帧 Logarithmic Halving / Fast Power 13 帧（栈深 7）/ Rain 40 帧 Two-Pointer（L9 11x）/ fib 31 帧 O(2^n)（栈深 6、L2 15x）/ comb 13 帧 O(2^n)（栈深 5、L2 11x）/ infinite-loop 1334 帧 [FUSE_STEP_LIMIT]（L5 666x）主路径全过；边界 dp[99][0] === 1 → ERROR；npm run build 零报错、src emoji 0 命中、docs/devlogs 20 篇表格列数一致、25 条不变量 == KERNEL_INVARIANT_COUNT 25、重载后控制台无新增 error/warn。',
+    ],
+  },
+  {
+    tag: 'M20',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M20-flame-virtualization-and-v1-seal.md',
+    title: '火焰图 160 桶 DOM 虚拟化、显式横滚契约、code+stage 组合演进与 9 项自检收官',
+    why: 'M19 把跳幕残余拆成两支，但只解释了投递前那一支；投递之后仍要 361~370ms，当时的假设是「1334 帧 1:1 渲染的火焰条把 Layout/Commit 压垮了」。同时 M19 留下三条没闭合的口子：横滚豁免按 class 匹配，改类名会让豁免静默扩大；Min-Max 振幅带只给激活阶段画，多阶段对比时非激活阶段的波谷仍然看不见；手改源码与已 Apply 的现场只能二选一，评委粘自己的代码跑过 Apply 之后链接就装不下完整现场了。',
+    what: [
+      'App.tsx：新增 MAX_FLAME_BARS = 160 与纯函数 buildFlameBuckets(frames, breakpoints, hotspotLine, currentFrameIdx?)，<=160 帧保持 1:1，更长轨迹均匀切成恒 160 桶（floor(b*n/160) 平铺，相邻桶首尾相接、桶宽恒 >=1 因此永不为空），每桶记 startFrame / endFrame / repFrame / maxDepth / hasBreakpoint / hasHotspot / active；repFrame 优先取桶内命中断点的帧，否则取栈深最大的帧。火焰轨 JSX 改为渲染 flameBuckets，点击跳 repFrame，竖条 title 回显「Frames a-b · peak depth d → #rep」。',
+      'App.tsx：#12b 指定的横向滚动责任人（预设切换器、横幅行、代码外层、调用树图例、AST 轨道条、曲线芯片行、h-9 子标题栏、终端 PRE、Spec 页签栏）全部显式标注 data-scroll-x-owner="true"；自检第 6 项改按 el.hasAttribute 精确豁免，并新增「标记集合必须等于 legacy #12b class 规则集合」的同源性断言，漂移时 detail 直接给出两侧计数。',
+      'App.tsx：振幅带从「只给激活阶段」扩到全阶段——bandOf(curve) 对每个有下沿的阶段生成 256 点多边形，激活阶段保持 opacity 0.26，非激活阶段用 0.09；仍然只在 floors.length === depths.length 且本阶段真的折叠过（peak > floor）时才画，1:1 阶段不存下沿也就没有带。',
+      'App.tsx：handleShareSnapshot 解除 code 与 stage 的互斥——带 stage 时源码取 stageHistory[0].sourceCode（演进序列的起点），不带 stage 时取当前 sourceCode；只要这份源码不等于预设原文就写 code=，于是手改代码 + Apply 过的多级现场可以第一次同时进一条链接。首屏侧无需新代码：sourceCode 初值已是 code ?? preset.code，演进 effect 先等这一跑落地再按序 Apply。',
+      'App.tsx：自检台新增第 9 项 Flamegraph 160-Bar DOM Virtualizer——1334 帧合成夹具、栈深 1..10 反复折叠、第 777 帧落在热点行 42 并注入断点，断言输出恒 160 根、桶平铺 0..1333 无隙无叠、断点桶的 repFrame 正好是 777、峰值 10 与热点行不丢失；第 8 项同时补 code+stage 共存解析。KERNEL_INVARIANT_COUNT 升至 26。',
+      '文档：新建 M20 DevLog，INDEX 追加 #26 并给 #25a / #25b / #25d 打 M20 修订指针、勾选 M19 三条遗留（非激活带、投递后耗时已定位、code/stage 互斥、横滚豁免口径），AGENT_GUIDE 与 README 同步 [M1-M20] / 26 条 / 9 项自检。',
+    ],
+    conflicts: [
+      '「1334 根火焰条导致投递后 361ms」这条根因假设被自己的实测推翻了。虚拟化确实生效：竖条 1334 → 160、该行宽度 4009px → 197px、footer 由 4572/770 变 770/770、整页 DOM 降到 451 个元素。但跳幕耗时几乎没动——六轮复测 324 / 332 / 361 / 365 / 370 / 372ms。长任务探针给出的解释是：点击 Skip 后确实有一个 285~294ms 的阻塞任务，但它不是火焰条的提交——单独把 1334 帧那一跑落地只花 56ms 且零长任务，在已就位的 1334 帧轨迹上按方向键也是零长任务。所以 361ms 的来源是「Skip 之后到 ACT 2 上屏」这一整段（含下一幕自己的沙箱跑与首绘），M19 把它记成渲染瓶颈是归因过窄。',
+      '因此本里程碑的正确交付口径是：火焰轨 DOM 从 1334 降到 160（-88.0%）是实打实的收益，并且顺手消除了一个真实的 4009px 横向溢出（M19 的全量枚举没抓到它，因为 footer 不是 overflow-y auto/scroll 的盒子）；但「投递后跳幕」不得写成已被虚拟化解决，它仍是 ~330~370ms 的未闭合边界。',
+      'footer 的 4009px 溢出暴露了自检第 6 项的枚举盲区：M19 只扫 overflowY auto|scroll 的盒子，而 footer 是 flex 容器（overflow visible），它的 1334 个 flex-1 子项把 min-content 撑到 4009px、越出视口 3572px 却不在扫描范围内。修法不是给 footer 加扫描特例，而是把子项数降到 160 让它本来就不溢出——虚拟化同时是性能项与可达性项。',
+      '横滚豁免从 class 改成属性时，最省事的写法是「属性 or class 都算豁免」，但那样旧风险一分没减。最终选择把两个口径同时算出来并要求它们相等：属性标记数 != legacy class 命中数就 FAIL。实测 7 == 7 通过，这也顺带证明属性迁移没有改变豁免集合的边界。',
+      '非激活阶段画带会互相遮挡的担心是对的，但结论要靠看不是靠想：Stage 0 带降到 0.09 后与自身 0.07 的面积包络、其余阶段的折线仍可区分；实测 Stage 2 激活时 Stage 0 的 256 点带照常绘出（fill #f43f5e，opacity 0.09），而激活阶段是 1:1 短轨迹时芯片整条不出现——这是 #25b 的既有语义，不是回归。',
+      'code 与 stage 共存后有个必须想清楚的陷阱：链接里的源码必须是「演进序列的起点」而不是「当前屏幕上的源码」。带 stage 时当前源码已经是 Apply 合成产物，直接带上它会让首屏把它当 Stage 0 再演进一次，跑出 Stage 3 这种不存在的现场。因此 shareSource 取 stageHistory[0].sourceCode，实测自定义 dbl(6) + Apply 的 294 字符链接重载后落在 Stage 0 (17f) / Stage 1 (14f)。',
+      'bp 的行号上界仍按还原后真正会跑的 Stage 0 源码算（#25d 不变），所以「自定义源码 + Apply 到 Stage 2」且断点落在合成代码新增行上时，该断点会被判越界丢弃。这条限制没有暗中放宽，已写进遗留。',
+      '自检第 9 项第一次写的时候用了夹具里 mk(i, callStack, variables) 的第三个参数当行号——buildSelfCheckFrame 的 line 是写死的 1，断点与热点都按行判定，那样测不出任何聚合语义。改为自建带 line 的 TraceFrame 后断言才有意义，这也是 #20e「FAIL 必须显式展示」的反面教训：夹具自身失真会比缺测更危险。',
+    ],
+    impact: [
+      'DOM 虚拟化：1334 帧 infinite-loop 现场下火焰轨竖条 1334 → 160（-88.0%），该行盒子宽度 4009px → 197px，footer 由 scrollWidth 4572 / clientWidth 770 变 770 / 770，整页元素数 451；短轨迹仍 1:1（实测 Rain 40/40、DP 29/29、Binary 10/10、Fast Power 13/13、fib 31/31、comb 13/13）。自检第 9 项实测 1334 → 160 bars、tiled 0..1333 无隙无叠、断点 @#777 的 repFrame 恰为 777、峰值 10 与热点 L42 全保留，耗时 0.4ms。',
+      '跳幕耗时（必须分两支报）：Skip 落在投递之前五轮 16 / 17 / 18 / 19 / 21ms（熔断横幅一次都没出现）；落在投递之后六轮 324 / 332 / 361 / 365 / 370 / 372ms——与 M19 的 361 / 370ms 同量级，虚拟化没有改变它，longtask 探针显示 285~294ms 阻塞任务但火焰条提交单独只需 56ms 且零长任务，故 M19 的「1334 根竖条压垮 Commit」归因被推翻，仍未闭合。',
+      '显式横滚契约：自检第 6 项 detail 实测 header 770px / 770px · 5 scroll boxes zero overflow (160/160 159/159 438/438 251/251 660/660) · 7 explicit data-scroll-x-owner exempt == legacy #12b set · viewport 770x553，耗时 1.5ms；改口径后整台 9/9 PASS。',
+      '全阶段振幅带：fib(10) 演进到 Stage 2 激活时，非激活的 Stage 0（354f · LAZY）仍绘出 256 点带（fill #f43f5e · opacity 0.09），激活阶段自身的 0.26 带与面积包络 0.18 / 0.07 层次可辨；1:1 阶段（21f）无带、芯片不出现，符合 #25b。',
+      'code + stage 组合链接：手改 dbl(6)（17 帧）Apply 到 Stage 1 后导出 #preset=binary-search&stage=1&frame=0&code=Ly8gTTIw…（全长 294 字符），重载后落在 Stage 0 (17f) + Stage 1 (14f)、FRAME 1 / 14、源码区是合成产物而 Stage 0 胶囊仍是自定义起点——手改源码的多级现场第一次可整条转发。',
+      '回归与纪律：7 个预设主路径全过（40 / 29 / 10 / 13 / 31 / 13 / 1334 帧，热点 L9 11x、L14 6x、L2 1x、L2 6x、L2 15x、L2 11x、L5 666x）；边界 dp[99][0] === 1 → ERROR；页签 Live Kernel Self-Check (26 Invariants) 实测 9/9 PASS（FAIL 0），逐项毫秒 4.6 / 0.7 / 0.3 / 0.1 / 0.0 / 1.5 / 0.0 / 0.5 / 0.4；npm run build 零报错、src emoji 0 命中、docs/devlogs 21 篇表格列数一致、26 条不变量 == KERNEL_INVARIANT_COUNT 26、footer 770/770、重载后控制台无新增 error/warn。',
     ],
   },
 ];
@@ -1653,15 +1762,14 @@ export default function App() {
     await measure('viewport', '771px Viewport & Container Reachability', () => {
       const header = document.querySelector('header');
       const headerOk = !!header && header.scrollWidth === header.clientWidth;
-      // 全量枚举纵向滚动盒：凡「不是被指定负责横向滚动的容器」都不得出现横向溢出（M18 的漏检就在这里）。
-      // #12b 把横向滚动责任明确交给代码外层容器与轨道条，所以 PRE / overflow-x-auto / overflow-auto 属于设计如此。
-      const isDesignatedXScroller = (el: Element) =>
-        el.tagName === 'PRE' ||
-        /overflow-x-auto|overflow-auto/.test(
-          (el.getAttribute('class') ?? '').toString()
-        );
+      // 横向滚动责任只认显式 `data-scroll-x-owner="true"`（M20 起），不再按 class 猜——
+      // class 改名会让豁免静默扩大到横滚容器之外，而 computed style 又分不出「谁被授权横滚」
+      // （CSS 规定另一轴非 visible 时 visible 会算成 auto）。
+      const legacyRule = (el: Element) =>
+        el.tagName === 'PRE' || /overflow-x-auto|overflow-auto/.test((el.getAttribute('class') ?? '').toString());
       const verticalBoxes: { sw: number; cw: number; cls: string }[] = [];
       const excludedBoxes: { sw: number; cw: number; cls: string }[] = [];
+      let legacyExemptCount = 0;
       for (const el of [...document.querySelectorAll<HTMLElement>('*')]) {
         if (el.clientWidth <= 0) continue;
         const s = getComputedStyle(el);
@@ -1671,13 +1779,20 @@ export default function App() {
           cw: el.clientWidth,
           cls: (el.getAttribute('class') ?? '').split(' ').slice(0, 2).join(' '),
         };
-        (isDesignatedXScroller(el) ? excludedBoxes : verticalBoxes).push(box);
+        if (el.hasAttribute('data-scroll-x-owner')) excludedBoxes.push(box);
+        else verticalBoxes.push(box);
+        if (legacyRule(el)) legacyExemptCount++;
       }
       const offenders = verticalBoxes.filter((b) => b.sw > b.cw + 1);
+      // 未标记却真的横向溢出的容器，必须靠 legacy 规则也能豁免才说明标记没漏；
+      // 两边数量不等 = 标记集合与旧审计口径已经分叉，视为契约回归
+      const ownersMatch = legacyExemptCount === excludedBoxes.length;
       return {
-        pass: headerOk && offenders.length === 0,
+        pass: headerOk && offenders.length === 0 && ownersMatch,
         detail: headerOk
-          ? `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · ${verticalBoxes.length} scroll boxes zero overflow (${verticalBoxes.map((b) => `${b.sw}/${b.cw}`).join(' ')}) · ${excludedBoxes.length} code/x-axis owners exempt by #12b · viewport ${window.innerWidth}x${window.innerHeight}`
+          ? ownersMatch
+            ? `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · ${verticalBoxes.length} scroll boxes zero overflow (${verticalBoxes.map((b) => `${b.sw}/${b.cw}`).join(' ')}) · ${excludedBoxes.length} explicit data-scroll-x-owner exempt == legacy #12b set · viewport ${window.innerWidth}x${window.innerHeight}`
+            : `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · owner drift: ${excludedBoxes.length} marked vs ${legacyExemptCount} per #12b class rule`
           : `header ${header?.scrollWidth ?? 0}px / ${header?.clientWidth ?? 0}px · offenders ${offenders.map((o) => `${o.sw}>${o.cw} (${o.cls})`).join(' ')} of ${verticalBoxes.length} boxes`,
       };
     });
@@ -1707,6 +1822,8 @@ export default function App() {
       const encoded = encodeShareCode(custom);
       const roundTrip = decodeShareCode(encoded) === custom;
       const withCode = parseShareHash(`#preset=fib-tree&code=${encoded}`);
+      // M20 起 code 与 stage 可以共存：还原侧要同时读到「起点源码」和「演进级数」
+      const combined = parseShareHash(`#preset=fib-tree&stage=2&code=${encoded}`);
       const oversize = decodeShareCode(encodeShareCode('x'.repeat(1601)));
       const corrupt = decodeShareCode('%%%not-base64%%%');
       const pass =
@@ -1721,13 +1838,59 @@ export default function App() {
         hostile === null &&
         roundTrip &&
         withCode?.code === custom &&
+        combined?.code === custom &&
+        combined?.stage === 2 &&
         oversize === null &&
         corrupt === null;
       return {
         pass,
         detail: pass
-          ? `preset ${full?.preset.id} · stage ${full?.stage} · frame ${full?.frame} · bp ${full?.bp.join(',')} · watch ${full?.watch.length} · code ${custom.length}ch round-trip OK, oversize+corrupt rejected`
-          : `expected clean parse + lossless code round trip, got ${JSON.stringify({ full: !!full, hostile: !!hostile, roundTrip, code: !!withCode?.code, oversize, corrupt })}`,
+          ? `preset ${full?.preset.id} · stage ${full?.stage} · frame ${full?.frame} · bp ${full?.bp.join(',')} · watch ${full?.watch.length} · code ${custom.length}ch round-trip OK · code+stage=${combined?.stage} coexist OK · oversize+corrupt rejected`
+          : `expected clean parse + lossless code round trip + code&stage coexist, got ${JSON.stringify({ full: !!full, hostile: !!hostile, roundTrip, code: !!withCode?.code, combined: !!combined?.code && combined?.stage, oversize, corrupt })}`,
+      };
+    });
+
+    await measure('flame', 'Flamegraph 160-Bar DOM Virtualizer', () => {
+      // buildSelfCheckFrame 把 line 写死成 1，断点与热点都要按行判定，所以这里自建带行号的夹具帧
+      const frameAt = (i: number, depth: number, line: number): TraceFrame => ({
+        frameIndex: i,
+        line,
+        event: '函数进入: kernel()',
+        variables: {},
+        callStack: new Array(depth).fill('f()'),
+        stdout: [],
+        lineHits: { [line]: i + 1 },
+      });
+      const trace: TraceFrame[] = [];
+      for (let i = 0; i < 1334; i++) {
+        // 栈深在 1..10 之间反复压栈退栈（777 帧恰好落在峰值 10），并把第 777 帧放在热点行 42 上
+        const depth = 1 + ((i * 7) % 10);
+        trace.push(frameAt(i, depth, i === 777 ? 42 : 5));
+      }
+      const bpOnly = buildFlameBuckets(trace, new Set<number>(), 42);
+      const withBp = buildFlameBuckets(trace, new Set<number>([42]), 42);
+      // 桶必须无缝平铺整条轨迹：首桶从 0 起、末桶到 n-1 止、相邻桶首尾相接
+      let tiled = withBp[0]?.startFrame === 0 && withBp[withBp.length - 1]?.endFrame === trace.length - 1;
+      for (let b = 1; b < withBp.length && tiled; b++) {
+        if (withBp[b].startFrame !== withBp[b - 1].endFrame + 1) tiled = false;
+      }
+      const bpBuckets = withBp.filter((b) => b.hasBreakpoint);
+      const bpRepIsExact = bpBuckets.length === 1 && bpBuckets[0].repFrame === 777;
+      const peakKept = Math.max(...withBp.map((b) => b.maxDepth)) === 10;
+      const hotspotKept = withBp.some((b) => b.hasHotspot);
+      const pass =
+        withBp.length === MAX_FLAME_BARS &&
+        bpOnly.length === MAX_FLAME_BARS &&
+        tiled &&
+        bpBuckets.length > 0 &&
+        bpRepIsExact &&
+        peakKept &&
+        hotspotKept;
+      return {
+        pass,
+        detail: pass
+          ? `1334 frames -> ${withBp.length} bars (cap ${MAX_FLAME_BARS}) · tiled 0..${trace.length - 1} with no gap or overlap · breakpoint @#777 kept in ${bpBuckets.length} bucket(s) and repFrame lands exactly on it · peak depth ${Math.max(...withBp.map((b) => b.maxDepth))} (real 10) · hotspot L42 kept`
+          : `expected 160 seamless bars keeping breakpoint + peak + hotspot, got ${JSON.stringify({ n: withBp.length, tiled, bpBuckets: bpBuckets.length, bpRepIsExact, peak: Math.max(...withBp.map((b) => b.maxDepth)), hotspotKept })}`,
       };
     });
 
@@ -1762,12 +1925,16 @@ export default function App() {
       parts.push(`bp=${[...breakpoints].sort((a, b) => a - b).slice(0, SHARE_BP_LIMIT).join(',')}`);
     }
     if (watchExprs.length > 0) parts.push(`watch=${encodeURIComponent(watchExprs.join('|'))}`);
-    // 手改源码 / Draft 现场无法靠 preset+stage 重建，就用 Base64URL 把源码本身带上
+    // M20 起 code 与 stage 不再互斥：`stage=N` 的语义是「从链接里的起点源码连点 N 次 Apply」，
+    // 所以带上 stage 时源码要取 Stage 0 的基线源码，而不是当前（已经是合成产物）的那份。
     const presetSource = PRESETS.find((p) => p.id === selectedPresetId)?.code ?? '';
-    const needsCode = sourceCode !== presetSource && !stageReproducible;
+    const shareSource = stageReproducible
+      ? stageHistory[0]?.sourceCode ?? sourceCode
+      : sourceCode;
+    const needsCode = shareSource !== presetSource;
     let codeOmitted = false;
     if (needsCode) {
-      if (sourceCode.length <= SHARE_CODE_LIMIT) parts.push(`code=${encodeShareCode(sourceCode)}`);
+      if (shareSource.length <= SHARE_CODE_LIMIT) parts.push(`code=${encodeShareCode(shareSource)}`);
       // 超长就不写：链接会明确标注「没带上源码」，而不是悄悄退回预设原文冒充同一个现场
       else codeOmitted = true;
     }
@@ -2813,25 +2980,39 @@ export default function App() {
   const markerY = telemetryY(markerExactDepth);
   const markerPeakY = telemetryY(markerBucketDepth);
   const markerFolded = !!activeCurve && markerBucketDepth > markerExactDepth;
-  /** Min-Max 退栈振幅带：只给激活阶段画，桶内 max > min 的那些段就是被抽样藏起来的波谷 */
+  /**
+   * Min-Max 退栈振幅带：桶内 max > min 的那些段就是被抽样藏起来的波谷。
+   * M20 起激活阶段（0.26）与非激活阶段（0.09）都画——多阶段同图对比时各阶段的波谷均可见；
+   * 只保留 `floors.length === depths.length` 的真实证据，1:1 阶段没有下沿就仍然不带。
+   */
+  const bandOf = (c: (typeof stageCurves)[number]) =>
+    c.floors.length === c.depths.length && c.depths.some((d, i) => d > c.floors[i])
+      ? [
+          ...c.depths.map(
+            (d, i) => `${telemetryX(c, i).toFixed(1)},${telemetryY(d).toFixed(1)}`
+          ),
+          ...c.depths
+            .map((_, i) => c.depths.length - 1 - i)
+            .map(
+              (i) =>
+                `${telemetryX(c, i).toFixed(1)},${telemetryY(c.floors[i] ?? 1).toFixed(1)}`
+            ),
+        ].join(' ')
+      : '';
+  const stageBands = stageCurves
+    .map((c) => ({ points: bandOf(c), color: c.color, active: c.active }))
+    .filter((b) => b.points !== '');
   const bandBuckets =
     activeCurve && activeCurve.floors.length === activeCurve.depths.length
       ? activeCurve.depths.reduce((acc, d, i) => acc + (d > activeCurve.floors[i] ? 1 : 0), 0)
       : 0;
   const bandVisible = bandBuckets > 0;
-  const bandPoints = !activeCurve || !bandVisible
-    ? ''
-    : [
-        ...activeCurve.depths.map(
-          (d, i) => `${telemetryX(activeCurve, i).toFixed(1)},${telemetryY(d).toFixed(1)}`
-        ),
-        ...activeCurve.depths
-          .map((_, i) => activeCurve.depths.length - 1 - i)
-          .map(
-            (i) =>
-              `${telemetryX(activeCurve, i).toFixed(1)},${telemetryY(activeCurve.floors[i] ?? 1).toFixed(1)}`
-          ),
-      ].join(' ');
+
+  // 火焰轨恒 <=160 根竖条：1334 帧不再挂 1334 个 DOM，投递后那一笔提交因此变轻
+  const flameBuckets = useMemo(
+    () => buildFlameBuckets(frames, breakpoints, traceMetrics.hotspotLine, currentFrameIdx),
+    [frames, breakpoints, traceMetrics.hotspotLine, currentFrameIdx]
+  );
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -2858,7 +3039,10 @@ export default function App() {
         </div>
 
         {/* Center Segmented Preset Selector — 唯一可横向滚动的压缩区 */}
-        <div className="flex items-center bg-zinc-900/90 p-0.5 rounded-md border border-zinc-800/90 min-w-0 flex-1 overflow-x-auto no-scrollbar">
+        <div
+          data-scroll-x-owner="true"
+          className="flex items-center bg-zinc-900/90 p-0.5 rounded-md border border-zinc-800/90 min-w-0 flex-1 overflow-x-auto no-scrollbar"
+        >
           {PRESETS.map((p) => {
             const active = selectedPresetId === p.id;
             return (
@@ -2951,6 +3135,7 @@ export default function App() {
       {tourPhase !== 'idle' && (
         <div
           data-tour-bar
+          data-scroll-x-owner="true"
           className="shrink-0 border-b border-amber-500/40 bg-[#170F04] px-3 py-1 flex items-center gap-2 text-[11px] font-mono overflow-x-auto no-scrollbar"
         >
           <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-200 font-semibold whitespace-nowrap">
@@ -3076,7 +3261,10 @@ export default function App() {
           </div>
 
           {/* Code Body */}
-          <div className="flex-1 min-h-0 overflow-auto font-mono text-xs relative">
+          <div
+            data-scroll-x-owner="true"
+            className="flex-1 min-h-0 overflow-auto font-mono text-xs relative"
+          >
             {codeTab === 'ast' ? (
               <pre className="p-3 text-[11px] leading-relaxed text-amber-200/80 whitespace-pre-wrap select-text">
                 {instrumentedPreview}
@@ -3404,13 +3592,14 @@ export default function App() {
                       <text x={2} y={TELEMETRY_TOP + 3} fill="#71717a" fontSize={8} fontFamily="monospace">
                         {telemetryMaxDepth}
                       </text>
-                      {bandVisible && (
+                      {stageBands.map((b, i) => (
                         <polygon
-                          points={bandPoints}
-                          fill={activeCurve?.color ?? '#10b981'}
-                          opacity={0.26}
+                          key={`band-${i}`}
+                          points={b.points}
+                          fill={b.color}
+                          opacity={b.active ? 0.26 : 0.09}
                         />
-                      )}
+                      ))}
                       {stageCurves.map((c) => {
                         const pts = c.depths
                           .map((d, i) => `${telemetryX(c, i).toFixed(1)},${telemetryY(d).toFixed(1)}`)
@@ -3607,7 +3796,10 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="mb-2 flex items-center gap-2 text-[10px] font-mono text-zinc-500 whitespace-nowrap overflow-x-auto no-scrollbar">
+                  <div
+                    data-scroll-x-owner="true"
+                    className="mb-2 flex items-center gap-2 text-[10px] font-mono text-zinc-500 whitespace-nowrap overflow-x-auto no-scrollbar"
+                  >
                     <span className="flex items-center gap-1 shrink-0">
                       <span className="h-2 w-2 rounded bg-sky-500/60" />
                       active
@@ -3651,6 +3843,7 @@ export default function App() {
                   {treeView === 'svg' ? (
                     <div
                       ref={svgScrollRef}
+                      data-scroll-x-owner="true"
                       className="max-h-[232px] overflow-auto rounded border border-zinc-800/70 bg-[#090B10]"
                     >
                       <svg
@@ -3942,7 +4135,10 @@ export default function App() {
                       </span>
                     </div>
 
-                    <div className="flex items-end gap-1.5 pt-2 pb-1 overflow-x-auto">
+                    <div
+                      data-scroll-x-owner="true"
+                      className="flex items-end gap-1.5 pt-2 pb-1 overflow-x-auto"
+                    >
                       {arr.data.map((val, idx) => {
                         const matchingPointers = Object.entries(
                           categorizedVars.numericPointers
@@ -4089,7 +4285,10 @@ export default function App() {
 
           {/* BOTTOM RIGHT (42%): AI SURGICAL COMPLEXITY PROFILER & CODE DIFF */}
           <div className="h-[42%] flex flex-col min-h-0 bg-[#0B0D13]">
-            <div className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between gap-2 whitespace-nowrap overflow-x-auto no-scrollbar">
+            <div
+              data-scroll-x-owner="true"
+              className="h-9 px-3 border-b border-zinc-800/80 bg-[#0E1118] flex items-center justify-between gap-2 whitespace-nowrap overflow-x-auto no-scrollbar"
+            >
               <div className="flex items-center gap-2 shrink-0">
                 <Sparkles className="w-3.5 h-3.5 text-violet-400 shrink-0" />
                 <span className="text-xs font-medium text-zinc-200 whitespace-nowrap">
@@ -4150,7 +4349,10 @@ export default function App() {
 
             {/* Verified refactor benchmark: measured before/after on the same sandbox */}
             {benchmarkDelta && (
-              <div className="shrink-0 px-3 py-1.5 border-b border-emerald-500/40 bg-emerald-500/10 flex items-center gap-2 font-mono text-[10px] text-emerald-300 overflow-x-auto">
+              <div
+                data-scroll-x-owner="true"
+                className="shrink-0 px-3 py-1.5 border-b border-emerald-500/40 bg-emerald-500/10 flex items-center gap-2 font-mono text-[10px] text-emerald-300 overflow-x-auto"
+              >
                 <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 font-semibold text-emerald-200">
                   VERIFIED REFACTOR BENCHMARK
                 </span>
@@ -4301,7 +4503,10 @@ export default function App() {
                     {aiReport?.optimizationGain}
                   </span>
                 </div>
-                <pre className="flex-1 p-2.5 overflow-y-auto font-mono text-[11px] leading-relaxed text-emerald-300/90 select-text">
+                <pre
+                  data-scroll-x-owner="true"
+                  className="flex-1 p-2.5 overflow-y-auto font-mono text-[11px] leading-relaxed text-emerald-300/90 select-text"
+                >
                   {aiReport?.optimizedCode || '// No refactoring required'}
                 </pre>
               </div>
@@ -4373,47 +4578,49 @@ export default function App() {
           </button>
         </div>
 
-        {/* Interactive Call-Stack Flamegraph Bar Scrubber */}
-        <div className="flex-1 flex flex-col justify-center">
+        {/* Interactive Call-Stack Flamegraph Bar Scrubber — 恒 <=160 根竖条，长轨迹按桶聚合 */}
+        <div className="flex-1 min-w-0 flex flex-col justify-center">
           <div className="h-7 w-full bg-zinc-900/90 rounded border border-zinc-800 px-1 flex items-end gap-[1px] overflow-hidden cursor-pointer relative">
-            {frames.map((f, idx) => {
-              const isCurr = idx === currentFrameIdx;
-              const isPast = idx < currentFrameIdx;
+            {flameBuckets.map((b, idx) => {
+              const isPast = b.endFrame < currentFrameIdx;
               const stackRatio = Math.max(
                 0.22,
-                Math.min(1, f.callStack.length / Math.max(2, traceMetrics.maxStackDepth))
+                Math.min(1, b.maxDepth / Math.max(2, traceMetrics.maxStackDepth))
               );
-              const isHotspot = f.line === traceMetrics.hotspotLine;
-              const isBreakpointFrame = breakpoints.has(f.line);
+              const title =
+                b.startFrame === b.endFrame
+                  ? `Frame ${b.startFrame + 1} · depth ${b.maxDepth}`
+                  : `Frames ${b.startFrame + 1}-${b.endFrame + 1} · peak depth ${b.maxDepth} → #${b.repFrame}`;
 
               return (
                 <div
                   key={idx}
+                  title={title}
                   onClick={() => {
                     setIsPlaying(false);
-                    setCurrentFrameIdx(idx);
+                    setCurrentFrameIdx(b.repFrame);
                   }}
                   onMouseEnter={(e) => {
                     if (e.buttons === 1) {
                       setIsPlaying(false);
-                      setCurrentFrameIdx(idx);
+                      setCurrentFrameIdx(b.repFrame);
                     }
                   }}
                   style={{ height: `${Math.round(stackRatio * 100)}%` }}
                   className={`relative flex-1 min-w-[2px] transition-colors ${
-                    isCurr
+                    b.active
                       ? 'bg-amber-400'
-                      : isHotspot && isPast
+                      : b.hasHotspot && isPast
                         ? 'bg-rose-500/80'
                         : isPast
                           ? 'bg-sky-500/70'
                           : 'bg-zinc-700/50 hover:bg-zinc-600'
                   }`}
                 >
-                  {isBreakpointFrame && (
+                  {b.hasBreakpoint && (
                     <span
-                      className={`absolute left-0 right-0 top-0 h-[3px] ${isCurr ? 'bg-zinc-950' : 'bg-rose-400'}`}
-                      title={`Breakpoint at L${f.line}`}
+                      className={`absolute left-0 right-0 top-0 h-[3px] ${b.active ? 'bg-zinc-950' : 'bg-rose-400'}`}
+                      title={`Breakpoint in frames ${b.startFrame + 1}-${b.endFrame + 1}`}
                     />
                   )}
                 </div>
@@ -4463,7 +4670,10 @@ export default function App() {
               </button>
             </div>
             {/* Spec tabs */}
-            <div className="px-4 py-2 border-b border-zinc-800 flex items-center gap-1 bg-[#0B0E14] overflow-x-auto no-scrollbar">
+            <div
+              data-scroll-x-owner="true"
+              className="px-4 py-2 border-b border-zinc-800 flex items-center gap-1 bg-[#0B0E14] overflow-x-auto no-scrollbar"
+            >
               <button
                 onClick={() => setSpecTab('arch')}
                 className={`px-2.5 py-1 rounded text-[11px] font-mono transition shrink-0 whitespace-nowrap ${
@@ -4591,6 +4801,35 @@ export default function App() {
                       scroll container in the self-check, turns the 128-bucket sample into a peak-and-trough
                       Min-Max band, cancels superseded sandbox runs so an abandoned act stops in about 30ms,
                       and carries hand-edited or Draft source through the permalink as Base64URL code.
+                      <br />• M20 virtualizes the flame track to a constant 160 bars, replaces the class-based
+                      horizontal-scroll exemption with an explicit data-scroll-x-owner contract, draws the
+                      Min-Max band for inactive stages too, lets code and stage coexist in one permalink, and
+                      closes v1.0 with a 9th self-check assertion.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-teal-400 font-semibold">
+                      20. Flame Virtualization, Explicit Scroll Contract &amp; v1.0 Seal (M20)
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The flame track stops mounting one node per frame: buildFlameBuckets aggregates any trace
+                      longer than MAX_FLAME_BARS = 160 into exactly 160 seamless buckets that keep the real
+                      breakpoint and hotspot evidence (repFrame prefers a breakpoint hit, otherwise the deepest
+                      frame). Measured on the 1334-frame fuse scene: bars 1334 to 160 (-88.0%), the row box 4009px
+                      to 197px, footer 4572/770 to 770/770, whole document 451 elements - and this also removed a
+                      genuine overflow the M19 audit had missed, because a flex footer is not an overflow-y box.
+                      <br />• Self-check 6 no longer guesses scrollers from class names: the #12b owners are
+                      marked with data-scroll-x-owner="true", the exemption reads that attribute, and the
+                      assertion requires the marked set to equal the legacy class set (measured 7 == 7), so
+                      renaming a class can no longer widen the exemption silently.
+                      <br />• Sampling honesty was not bought with a latency claim. Skipping after the heavy
+                      trace is delivered still costs 324 / 332 / 361 / 365 / 370 / 372ms, unchanged from M19,
+                      while the flame commit alone measures 56ms with zero long tasks - so M19 attributed the
+                      residual too narrowly and this build reports it as still open.
+                      <br />• Inactive stages now draw their own Min-Max band at opacity 0.09 (active keeps
+                      0.26), so a LAZY 354-frame Stage 0 shows its unwind troughs beside the active stage, and
+                      code plus stage may share one permalink - the source carried is the evolution's starting
+                      point, measured restoring a hand-edited dbl(6) scene as Stage 0 17f plus Stage 1 14f.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
