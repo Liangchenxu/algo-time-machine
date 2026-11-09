@@ -158,7 +158,10 @@ Key 仅驻留内存，不写入 localStorage。
   Stage 2 翠绿 `#10b981`，激活阶段加粗），高 64px；**横轴双口径** `X: Abs Frames ⇄ Norm %`
   （absolute 按 `frameCount / maxStageFrames` 占宽，实测 467f / 75f / 25f 阶段占 `100% / 16% / 5%`；
   normalized 铺满同宽只比波形）、**纵轴双口径** `Y: Linear ⇄ Sqrt`（sqrt 只压缩绘制高度，不改任何数值）；
-  激活曲线当前帧画圆点 + 竖向游标，点击横轴按**当前模式**逆映射并 clamp 到激活阶段的合法帧区间；
+  激活曲线当前帧**分两层指示**：实心圆点取该帧真实 `callStack.length`，抽样桶峰值只以 dash 空心环 +
+  竖向细线共存显示，仅在 `bucketDepth > exactDepth`（本桶真的折叠过）时出现，控制行回显
+  `frame depth X (bucket peak Y)`；LAZY 阶段手里没有帧时实心点回落桶峰值，不凭空画新真相。
+  点击横轴按**当前模式**逆映射并 clamp 到激活阶段的合法帧区间；
   容器宽度先同步读 `clientWidth`，`ResizeObserver` 与 `resize` 只作兜底（遮挡环境下 RO 可能不投递）。
   **非确定性重放守卫**：源码含 `Math.random(` / `Date.now(` / `performance.now(` / `new Date` /
   `crypto.getRandomValues(` / `crypto.randomUUID(`
@@ -168,25 +171,32 @@ Key 仅驻留内存，不写入 localStorage。
   **编辑态防覆盖**：历史栈存在时手改源码 → 横幅显示 `UNSAVED EDIT DRAFT` 并隐藏 Apply；
   `Compile & Trace` 以手改代码为新基准清空历史；点击阶段胶囊会先把手改代码真实跑成
   `Draft` 临时阶段再切换（诊断走 `skipDelay=true`，实测 22.6ms），绝不静默丢弃。
-- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 23)**：6 项确定性微基准
+- Spec 弹窗第 3 页签 **Live Kernel Self-Check (`KERNEL_INVARIANT_COUNT` Invariants，当前 24)**：8 项确定性微基准
   （`__mtmTdz` 闭包 + 可解析 / `[FUSE_*]` 前缀 / 递归 A-A′-B 三档 / 槽位与交错折半 /
-  矩阵读写分离 / 窄视口 `scrollWidth == clientWidth`），每项显示 PASS/FAIL 与实测 ms，
-  夹具纯浏览器执行，不使用 Worker、网络或 API Key。页签条可横滚，三个页签在 770px 下均可达。
+  矩阵读写分离 / 窄视口 `scrollWidth == clientWidth` / 128 点保峰分桶 / Permalink 哈希解析与清洗），
+  每项显示 PASS/FAIL 与实测 ms，夹具纯浏览器执行，不使用 Worker、网络或 API Key。
+  页签条可横滚，三个页签在 770px 下均可达。
 - 评委七幕自动导览（顶栏 `Tour`，覆盖全部 7 个内置预设）：`tourTokenRef` 驱动的真实内核编排，逐幕 =
   熔断现场抢救 → fib 三级火箭（DUP → HIT → 1D dp）→ comb 递归树转二维矩阵十字准星 → 自适应 `dp[4][2] === 6`
   芯片 + `→T` 观察点瞬移 → `dp-matrix` 2D→1D 滚动压缩 + `fast-power` 槽位折半消栈 →
   `rainwater` 双指针水柱 + `binary-search` 区间折半 → Spec 自检台点亮。
   幕间只等**真实运行条件**（帧数 / `isAnalyzing` / `stageHistory.length` / 自检结果对象变化），
+  等待本身是**事件驱动**的：每次 React 提交与 `Skip Act` / `Stop Tour` / 幕外 `pointerdown` 都直接唤醒等待者
+  （`tourWakeRef`），定时器只作兜底——轻提交场景一次跳幕实测 19ms（M17 的 60ms 轮询在本环境是 977ms），
+  与 1334 帧重提交同批的 ACT 1 仍要 ~304ms，残余来源未隔离，不得写成全场景 <20ms；
   且导览期间诊断走 `skipDelay=true`，判据与轨迹实测 12~56ms 内齐备（导览外手动切预设仍有 380ms 差异）；
   `Skip Act →` 是**幕级**取消：一次点击让本幕剩下的驻留、条件等待与 Apply 全部让位（实测 ACT 2 内点一次
   即进 ACT 3，不再需要连点 3 次），幕开始前与暂停/Dismiss 都必须复位该标识；
   `Stop Tour (Act k/N)` 与字幕条外的任意 `pointerdown` 暂停到当前幕并记下 `pausedTourAct`，
   字幕条给出 `Resume Act k/N` / `Restart` / `Dismiss ×`；handler 一律经 `liveActionsRef` 取最新渲染，
   避免异步串联里的过期闭包把错误源码冻结成 Stage 0。幕数、按钮与字幕文案全部由 `TOUR_ACTS.length` 驱动。
-- 现场分享（WATCH 行 `Share`）：把 `preset` + `frame`（0 基帧号）+ `watch` 断言写进 `window.location.hash`
-  （用 `history.replaceState`，直接改 `location.hash` 会触发锚点滚动），并复制链接；
+- 现场分享（WATCH 行 `Share`）：把 `preset` + `stage`（只承诺可用确定性 Apply 复现的 1..2 级）+
+  `frame`（0 基帧号）+ `bp`（升序正整数、去重、最多 16 个且不超过预设行数）+ `watch` 断言写进
+  `window.location.hash`（用 `history.replaceState`，直接改 `location.hash` 会触发锚点滚动），并复制链接；
   剪贴板被拒时按钮显示 `Link in URL` 而不是谎报 `Copied!`。首屏解析到合法 `preset` 才改初始状态，
-  非法即整体忽略回默认预设；帧号等轨迹就绪后再定位。分享回来的表达式仍只经 `evalWatchExpression`
+  非法即整体忽略回默认预设；带 `stage` 的链接会**自动按序真实 Apply** 演进到目标阶段
+  （`autoEvolveRef` 走零延迟通道，某级不涨级即停止、不伪造阶段），实测重载后 484ms 到 Stage 2、500ms 定位帧号；
+  帧号必须等演进结束再按当时真实帧数 clamp。分享回来的表达式仍只经 `evalWatchExpression`
   三道闸门求值（#13d / #14d 不因 URL 输入放宽）。控件放在可折行的 WATCH 行，不占顶栏预算（#21c 不变）。
 
 - 调用树剪枝取证：重复激活按纯拓扑二分为 `DUP`（玫红，首次曾展开子树且本次也展开）与
@@ -198,7 +208,7 @@ Key 仅驻留内存，不写入 localStorage。
 
 ## 工程记忆与实测基线
 
-- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M17 各一篇，共 23 条不变量）。
+- 里程碑复盘、系统不变量清单、已修复问题核对表：`docs/devlogs/INDEX.md`（M1–M18 各一篇，共 24 条不变量）。
 - 重构收益以同沙箱重跑的实测为准（`VERIFIED REFACTOR BENCHMARK` 横幅），不采用文案宣称值。
 - 已知未闭合项（线性深递归仍标 `O(2^n)`）记录在 `docs/devlogs/M4-...md` 末节，勿在代码里默默绕过。
 

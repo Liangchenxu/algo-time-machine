@@ -159,7 +159,7 @@ const buildSelfCheckFrame = (
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 不变量登记簿条数：页签与导览文案的唯一来源，避免写死数字随里程碑过期 */
-const KERNEL_INVARIANT_COUNT = 23;
+const KERNEL_INVARIANT_COUNT = 24;
 
 /** 评委导览的七幕脚本：每一幕都驱动真实内核，不做假动画，note 里点名本幕负责的预设 */
 const TOUR_ACTS: { title: string; note: string }[] = [
@@ -189,7 +189,7 @@ const TOUR_ACTS: { title: string; note: string }[] = [
   },
   {
     title: `Live Kernel Self-Check (${KERNEL_INVARIANT_COUNT} Invariants)`,
-    note: '6 deterministic micro-benchmarks executed in this tab',
+    note: '8 deterministic micro-benchmarks executed in this tab',
   },
 ];
 
@@ -349,25 +349,45 @@ console.log("Unreachable:", anomalySum);`,
   },
 ];
 
-/** `#preset=<id>&frame=<frameIndex>&watch=<expr|expr>` 还原出的可复现现场 */
+/** `#preset=<id>&stage=<1|2>&frame=<frameIndex>&bp=<L1,L2>&watch=<expr|expr>` 还原出的可复现现场 */
 interface ShareState {
   preset: PresetItem;
+  stage: number | null;
   frame: number | null;
+  bp: number[];
   watch: string[];
 }
 
+/** 分享链接里最多带 16 个断点，避免把手工堆出来的行号列表整份塞进 URL */
+const SHARE_BP_LIMIT = 16;
+
 /**
- * 解析分享哈希。预设名不合法就整体忽略（回到默认预设），
- * watch 表达式只写进断言列表，求值仍然只走 evalWatchExpression 的三道闸门。
+ * 解析分享哈希。预设名不合法就整体忽略（回到默认预设），其余字段各自独立校验：
+ * stage 只认 1..2（能靠确定性 Apply 复现的级数）、bp 只取正整数行号并截到 16 个、
+ * watch 最多 4 条且仍只在 evalWatchExpression 的闸门内求值。
  */
 const parseShareHash = (raw: string): ShareState | null => {
   const params = new URLSearchParams(raw.replace(/^#/, ''));
   const preset = PRESETS.find((p) => p.id === params.get('preset'));
   if (!preset) return null;
+  const stage = Number.parseInt(params.get('stage') ?? '', 10);
   const frame = Number.parseInt(params.get('frame') ?? '', 10);
+  const lineCount = preset.code.split('\n').length;
+  const bp = [
+    ...new Set(
+      (params.get('bp') ?? '')
+        .split(',')
+        .map((v) => Number.parseInt(v, 10))
+        .filter((v) => Number.isInteger(v) && v >= 1 && v <= lineCount)
+    ),
+  ]
+    .sort((a, b) => a - b)
+    .slice(0, SHARE_BP_LIMIT);
   return {
     preset,
-    frame: Number.isFinite(frame) && frame >= 0 ? frame : null,
+    stage: Number.isInteger(stage) && stage >= 1 && stage <= 2 ? stage : null,
+    frame: Number.isInteger(frame) && frame >= 0 ? frame : null,
+    bp,
     watch: (params.get('watch') ?? '').split('|').filter(Boolean).slice(0, 4),
   };
 };
@@ -1152,7 +1172,7 @@ const DEVLOGS: DevlogEntry[] = [
   },
   {
     tag: 'M17',
-    commit: '本次提交',
+    commit: '7a3b96a',
     doc: 'docs/devlogs/M17-dual-axis-envelope-and-act-skip.md',
     title: '包络图双轴切换、128 点保峰抽样、一键整幕跳过与全预设导览',
     why: 'M16 的六条遗留里有四条卡在同一个根因上：包络图只有一种显示口径——横轴归一化让 11 帧与 41 帧看起来一样长，纵轴线性让 150 层深递归把 1 层迭代压成直线；depthCurve 逐帧存整数，1334 帧就是 1334 个数字；Skip Next 只结束当前驻留，ACT 2 里要点 3 次才走得掉；Rain 与 Binary 两个预设至今不在导览里。另外评委看完想要的「把这个现场发我」还没有入口。',
@@ -1184,6 +1204,37 @@ const DEVLOGS: DevlogEntry[] = [
       'URL 分享：comb 第 6 帧 + dp[4][2] === 6 → #preset=pascal-comb&frame=5&watch=…；带哈希重载自动选中预设、FRAME 6/13、断言回显（Stage 0 无 dp 故 ERROR，符合 #16e）；非法哈希回落默认 Trapping Rain Water（FRAME 1/40）且断言列表为空。',
       '全预设回归（770×553）：Rain 40 帧 Two-Pointer、DP 29 帧 O(M*N) Matrix DP、Binary 10 帧 O(log n) Logarithmic Halving、Fast Power 13 帧 O(log n) Logarithmic Recursion、fib 31 帧 O(2^n)、comb 13 帧 O(2^n)、infinite-loop 1334 帧 [FUSE_STEP_LIMIT]；边界 dp[99][0] === 1 → ERROR。',
       '布局与纪律：新增两枚轴模式芯片与 Share 后实测 header 44px / 770 == 770、footer 52px / 770 == 770、h-9 子标题栏 321 == 321 与 448 == 448、包络面板 412 == 412、body 770 == 770；npm run build 零报错、src emoji 0 命中、18 篇文档表格列数一致、23 条不变量、控制台无 error/warn。',
+    ],
+  },
+  {
+    tag: 'M18',
+    commit: '本次提交',
+    doc: 'docs/devlogs/M18-exact-cursor-and-full-permalink.md',
+    title: '抽样游标真实栈深对齐、全状态 URL 自动演进、零延迟跳幕与 8 项内核自检',
+    why: 'M17 的三条技术遗留都来自同一个动作——为了让长轨迹便宜而只保峰值，代价是游标、链接与等待节拍三处都开始与真相差一点：游标画在桶峰值上（第 140 帧真实深度 7 却显示 10）、链接只能带 preset/frame/watch（复现 Stage 2 必须手点两次 Apply）、条件等待期跳幕要等一个轮询周期（限频环境实测 977ms）。而自检台停在 6 项，也让抽样保峰与哈希解析这两条新契约没有活体证据。',
+    what: [
+      'App.tsx：包络图游标拆成两层——markerExactDepth 取 frames[markerFrame].callStack.length 画实心点，markerBucketDepth 取该桶峰值画 dash 1.6 1.4 的空心环，中间补一段竖向细线；只在发生深度折叠（bucket > exact）时画环，并在面板控制行回显 frame depth X (bucket peak Y)。',
+      'App.tsx：parseShareHash 扩到 preset / stage / frame / bp / watch 五字段。stage 只认 1..2（能用确定性 Apply 序列复现的级数）；bp 过滤正整数、去重、升序、最多 SHARE_BP_LIMIT = 16 个，且不得越过该预设的实际行数。handleShareSnapshot 在 stageHistory.length > 1 且 activeStage 属于 1..2 时写 stage，断点非空时写 bp。',
+      'App.tsx：首屏自动演进——pendingShareStageRef 记下目标级数，Stage 0 就绪后按序真实跑 1..stage 次 Apply（autoEvolveRef 让 executeCode 走 skipDelay=true 零延迟通道）；某一级 Apply 不涨级就停在那里而不是伪造阶段，最后按当时的真实帧数 clamp 定位帧号。帧号 effect 在演进未清空前一律不动游标。',
+      'App.tsx：waitUntil 改事件驱动——tourWakeRef 注册唤醒器，每次 React 提交后 wakeTourWaiters()，skipTourAct / pauseJudgeTour / dismissJudgeTour 也直接唤醒，500ms 定时器只作兜底；tourWaitFor 把幕级取消与令牌失效放在同级让位条件上。',
+      'App.tsx：Live Kernel Self-Check 由 6 项扩到 8 项——第 7 项 Peak-Preserving 128-Bucket Downsampler（500 帧、#333 注入栈深 42，断言长度 128、首尾帧保留、max === 42），第 8 项 Permalink Hash Parser & Sanitizer（合法哈希解析出五字段 + 非法预设返回 null）；KERNEL_INVARIANT_COUNT 升至 24。',
+    ],
+    conflicts: [
+      '抽样保峰是对的，游标却不该跟着抽样：实心点一度画在 depths[curveIdx] 上，第 140 帧真实栈深 7 被显示成桶峰值 10。改成「实心点 = 该帧 callStack.length，空心环 = 桶峰值」，只在折叠时出环，两条信息都不撒谎。',
+      '真实深度只有手里有帧才谈得上：LAZY 阶段没有 frames，markerExactDepth 必须回落桶峰值，否则会凭空画出一个不可证的深度。',
+      'stage 不能照实写进链接：Draft 阶段与第 3 级以后无法靠固定 Apply 序列复现，硬写会让同事演到一个不存在的阶段；因此导出侧限定 1..2，解析侧同样拒绝越界值。',
+      'bp 是外部输入的行号：必须限成正整数、去重、升序、最多 16 个，并且不越过该预设的实际行数，否则哈希能把断点写到不存在的行上，火焰轨出现永远命中不了的标记。',
+      '演进与帧定位有先后依赖：帧号 effect 原本只等 frames.length > 0，会在 Stage 0 就绪时就把游标按 Stage 2 的帧号钉死；改为演进未清空前不动游标，演进结束再按当时真实帧数 clamp。',
+      'StrictMode 会把首屏演进来回跑两遍：靠 effect 清理来取消会让第二次进场重复 Apply 而超演。改成 shareBootstrapStartedRef 只允许一趟真正跑，清理不做反向操作。',
+      '事件驱动的唤醒点在 React 提交之后：ACT 2 那种轻提交下跳幕实测 19ms；ACT 1 正等 1334 帧熔断轨迹落地，DOM 变更要和那次昂贵提交一起出现，实测仍要 304ms（M17 是 977ms 轮询周期）。同一 iframe 内 MessageChannel / rAF / setTimeout(0) 延迟实测 0ms，可排除调度器限频；而单独切到 infinite-loop 从点击到 FRAME 1 / 1334 只要 55ms，说明这 304ms 不是纯粹的 1334 帧渲染成本——具体来源尚未隔离，只写已证的部分（轮询周期已消失）与未证的部分（残余归因待定）。',
+    ],
+    impact: [
+      '游标对齐（手写 fib(12)，467 帧抽样 128 点）：点击 30% → FRAME 140 / 467，实心点 cy 28（真实深度 7）+ 空心环 cy 19（桶峰值 10）+ 芯片 frame depth 7 (bucket peak 10)；37% → FRAME 173 为 9 vs 10；44% → FRAME 206 真实深度等于桶峰值 10，环与芯片自动消失。三次读数与底部火焰轨高度 54% / 69% / 77%（× 峰值 13）逐一对上。',
+      '全状态链接：comb 演到 Stage 2、第 7 帧、L7 断点 + dp[4][2] === 6 → #preset=pascal-comb&stage=2&frame=6&bp=7&watch=…，与指令给出的形态逐字段一致。',
+      '首屏自动演进：带该链接重载，MutationObserver 实测 boot 284ms → Stage 0/1 胶囊 421ms → Stage 2 就绪 484ms → 帧号定位 FRAME 7 / 17 于 500ms；落地态复核 3 枚胶囊（13f / 37f / 17f）、2D Matrix dp [5×3]、Cursor [3][1]、L7 按钮标题变为 Remove breakpoint at L7、断言回显 FALSE（第 7 帧尚未写入 dp[4][2]）。',
+      '零延迟跳幕：ACT 2 条件等待期点一次 Skip Act → 到 ACT 3 实测 19ms（M17 为 977ms 轮询周期）；ACT 1 三轮复测 304 / 322 / 324 / 330ms，尚未隔离出残余来源（同 iframe 内 MessageChannel / rAF / setTimeout(0) 实测 0ms，单独切 infinite-loop 到 FRAME 1/1334 为 55ms）。',
+      '内核自检：页签标题 Live Kernel Self-Check (24 Invariants)，实测 8/8 PASS（FAIL 0），逐项毫秒 TDZ 9.2 / Fuse 0.8 / Recursion 0.6 / Halving 0.6 / Matrix 0.0 / Viewport 0.8 / Downsampler 0.1 / Permalink 0.1（TDZ 冷启动首轮 16.0ms）；新增两项 detail 为 500 frames -> 128 points · peak 42 (injected 42 @ #333) · first 2 · last 2 与 preset pascal-comb · stage 2 · frame 6 · bp 5,9 · watch 1。',
+      '回归与纪律：DP 29 帧 O(M*N) Matrix DP（Apply 可见）、Binary 10 帧 O(log n) Logarithmic Halving（Apply 隐藏）、Fast Power 13 帧（Apply 可见）、Rain 40 帧 Two-Pointer（Apply 隐藏）、fib 31 帧 O(2^n)（Apply 可见）、infinite-loop 1334 帧 [FUSE_STEP_LIMIT]；边界 dp[99][0] === 1 → ERROR。header 44px / 770 == 770、footer 52px / 770 == 770、h-9 行 321 == 321 与 448 == 448、body 770 == 770；npm run build 零报错、src emoji 0 命中、19 篇文档表格列数一致、24 条不变量、控制台无 error/warn。',
     ],
   },
 ];
@@ -1224,6 +1275,17 @@ export default function App() {
   const tourSkipRef = useRef<(() => void) | null>(null);
   // 幕级取消：记录「第 k 幕已被一键跳过」，该幕剩余子步骤与条件等待全部立即让位
   const tourActSkipRef = useRef<number>(0);
+  // 事件驱动等待的唤醒器：Skip / Stop / 外部暂停以及每次 React 提交都要立即唤醒它
+  const tourWakeRef = useRef<(() => void) | null>(null);
+  const wakeTourWaiters = () => {
+    const wake = tourWakeRef.current;
+    tourWakeRef.current = null;
+    wake?.();
+  };
+  // 导览与首屏自动演进读的都是渲染后的 state，因此提交本身就是最准确的唤醒时机
+  useEffect(() => {
+    wakeTourWaiters();
+  });
   const tourRunningRef = useRef<boolean>(false);
   const tourActRef = useRef<number>(0);
   const tourRunning = tourPhase === 'running';
@@ -1239,13 +1301,18 @@ export default function App() {
   const hydrateTokenRef = useRef(0);
 
   // 行级断点：行号集合，切换预设时清空（行号语义随源码改变）
-  const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set<number>());
+  const [breakpoints, setBreakpoints] = useState<Set<number>>(
+    () => new Set<number>(shareBoot?.bp ?? [])
+  );
   const [treeView, setTreeView] = useState<'svg' | 'list'>('svg');
   // Watch 守卫栏：置顶变量 + 条件断言（断言只在当前帧的快照数据上求值）
   const [pinnedVars, setPinnedVars] = useState<Set<string>>(new Set<string>());
   const [watchExprs, setWatchExprs] = useState<string[]>(() => shareBoot?.watch ?? []);
-  // 分享链接里的帧号要等轨迹真的跑出来才能定位，先寄存在 ref 里
+  // 分享链接里的阶段与帧号都要等轨迹真的跑出来才能定位，先寄存在 ref 里
+  const pendingShareStageRef = useRef<number | null>(shareBoot?.stage ?? null);
   const pendingShareFrameRef = useRef<number | null>(shareBoot?.frame ?? null);
+  // 首屏自动演进期间同样走零延迟诊断通道，不叠加 380ms 人工思考延迟
+  const autoEvolveRef = useRef<boolean>(shareBoot?.stage != null);
   const [shareState, setShareState] = useState<'idle' | 'copied' | 'blocked'>('idle');
   const shareResetRef = useRef<number>(0);
   const [watchDraft, setWatchDraft] = useState<string>('');
@@ -1273,8 +1340,14 @@ export default function App() {
     }
 
     setIsAnalyzing(true);
-    // 导览期间跳过 380ms 人工思考延迟：判据只等诊断本身，不与新轨迹之间留下秒级空档
-    const report = await runAIDiagnostics(codeToRun, res.frames || [], res.error, apiKey, tourRunningRef.current);
+    // 导览与首屏自动演进期间跳过 380ms 人工思考延迟：判据只等诊断本身，不与新轨迹之间留下秒级空档
+    const report = await runAIDiagnostics(
+      codeToRun,
+      res.frames || [],
+      res.error,
+      apiKey,
+      tourRunningRef.current || autoEvolveRef.current
+    );
     setAiReport(report);
     setIsAnalyzing(false);
 
@@ -1290,7 +1363,7 @@ export default function App() {
     };
   };
 
-  // 浏览器端内核自检：6 项确定性微基准，不经 Worker、不发网络请求
+  // 浏览器端内核自检：8 项确定性微基准，不经 Worker、不发网络请求
   const runKernelSelfCheck = async () => {
     if (selfCheckRunning) return;
     setSelfCheckRunning(true);
@@ -1448,6 +1521,44 @@ export default function App() {
       };
     });
 
+    await measure('downsample', 'Peak-Preserving 128-Bucket Downsampler', () => {
+      const trace: TraceFrame[] = [];
+      for (let i = 0; i < 500; i++) {
+        trace.push(mk(i, i === 333 ? new Array(42).fill('f()') : ['main()', 'f()']));
+      }
+      const curve = buildDepthCurve(trace);
+      const firstKept = curve[0] === trace[0].callStack.length;
+      const lastKept = curve[curve.length - 1] === trace[trace.length - 1].callStack.length;
+      const peakKept = Math.max(...curve) === 42;
+      return {
+        pass: curve.length === 128 && firstKept && lastKept && peakKept,
+        detail: `500 frames -> ${curve.length} points · peak ${Math.max(...curve)} (injected 42 @ #333) · first ${curve[0]} · last ${curve[curve.length - 1]}`,
+      };
+    });
+
+    await measure('permalink', 'Permalink Hash Parser & Sanitizer', () => {
+      const full = parseShareHash(
+        '#preset=pascal-comb&stage=2&frame=6&bp=5,9&watch=dp[4][2]%3D%3D%3D6'
+      );
+      const hostile = parseShareHash('#preset=not-a-preset&stage=9&frame=-3&bp=0,-2,9999&watch=');
+      const pass =
+        !!full &&
+        full.preset.id === 'pascal-comb' &&
+        full.stage === 2 &&
+        full.frame === 6 &&
+        full.bp.length === 2 &&
+        full.bp[0] === 5 &&
+        full.bp[1] === 9 &&
+        full.watch.length === 1 &&
+        hostile === null;
+      return {
+        pass,
+        detail: pass
+          ? `preset ${full?.preset.id} · stage ${full?.stage} · frame ${full?.frame} · bp ${full?.bp.join(',')} · watch ${full?.watch.length}`
+          : `expected a clean parse of preset/stage/frame/bp/watch, got ${JSON.stringify(full)} / hostile ${JSON.stringify(hostile)}`,
+      };
+    });
+
     setSelfCheckResults(results);
     setSelfCheckRunning(false);
   };
@@ -1457,18 +1568,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 分享链接的帧号必须等真实轨迹就绪后才定位，否则会把不存在的帧号写进游标
+  // 分享链接的帧号要等阶段演进到位后再定位：Stage 0 的第 7 帧与 Stage 2 的第 7 帧不是同一个现场
   useEffect(() => {
     const pending = pendingShareFrameRef.current;
     if (pending === null || frames.length === 0) return;
+    if (pendingShareStageRef.current !== null) return;
     pendingShareFrameRef.current = null;
     setIsPlaying(false);
     setCurrentFrameIdx(Math.max(0, Math.min(frames.length - 1, pending)));
-  }, [frames.length]);
+  }, [frames.length, stageHistory.length]);
 
-  /** 一键分享现场：预设 + 帧号 + 断言列表编进 URL 哈希，再把完整链接送进剪贴板 */
+  /** 一键分享现场：预设 + 阶段 + 帧号 + 断点 + 断言列表编进 URL 哈希，再把完整链接送进剪贴板 */
   const handleShareSnapshot = async () => {
-    const parts = [`preset=${selectedPresetId}`, `frame=${currentFrameIdx}`];
+    const parts = [`preset=${selectedPresetId}`];
+    // 只有能靠确定性 Apply 复现的 1..2 级才写进 URL；Draft 分支与更深的历史不在承诺范围内
+    if (stageHistory.length > 1 && activeStage >= 1 && activeStage <= 2) {
+      parts.push(`stage=${activeStage}`);
+    }
+    parts.push(`frame=${currentFrameIdx}`);
+    if (breakpoints.size > 0) {
+      parts.push(`bp=${[...breakpoints].sort((a, b) => a - b).slice(0, SHARE_BP_LIMIT).join(',')}`);
+    }
     if (watchExprs.length > 0) parts.push(`watch=${encodeURIComponent(watchExprs.join('|'))}`);
     const hash = `#${parts.join('&')}`;
     // replaceState 而不是 location.hash 赋值：后者会触发锚点滚动，把当前视图顶走
@@ -2106,6 +2226,41 @@ export default function App() {
     selfCheck: runKernelSelfCheck,
   };
 
+  // 首屏自动演进：链接里的 stage=N 要真实跑 N 次确定性 Apply（零延迟通道），到位后再交帧定位
+  const shareBootstrapStartedRef = useRef(false);
+  useEffect(() => {
+    if (shareBootstrapStartedRef.current || pendingShareStageRef.current === null) return;
+    shareBootstrapStartedRef.current = true;
+    void (async () => {
+      autoEvolveRef.current = true;
+      await waitUntil(
+        () => liveActionsRef.current.frames.length > 0 && !liveActionsRef.current.isAnalyzing,
+        12000
+      );
+      const target = pendingShareStageRef.current ?? 0;
+      for (let step = 1; step <= target; step++) {
+        await liveActionsRef.current.apply();
+        const grown = await waitUntil(
+          () => liveActionsRef.current.stageHistory.length >= step + 1,
+          12000
+        );
+        // Apply 不涨级就说明这一段不可确定性复现，停在这里而不是伪造阶段
+        if (!grown) break;
+      }
+      autoEvolveRef.current = false;
+      pendingShareStageRef.current = null;
+      const ready = liveActionsRef.current.frames;
+      const pendingFrame = pendingShareFrameRef.current;
+      if (pendingFrame !== null && ready.length > 0) {
+        pendingShareFrameRef.current = null;
+        setIsPlaying(false);
+        setCurrentFrameIdx(Math.max(0, Math.min(ready.length - 1, pendingFrame)));
+      }
+      wakeTourWaiters();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** 幕级取消是否已对当前幕生效：Skip Act 之后本幕剩下的动作与等待都必须立即让位 */
   const tourActHalted = () =>
     tourActSkipRef.current !== 0 && tourActSkipRef.current === tourActRef.current;
@@ -2130,12 +2285,31 @@ export default function App() {
       tourSkipRef.current = finish;
     });
 
-  const tourWaitFor = async (token: number, cond: () => boolean, timeoutMs: number) => {
+  /**
+   * 事件驱动等待：条件满足靠 React 提交后的唤醒，不靠定时器轮询。
+   * fallback 只是兜底节拍（防止条件在无重渲染的情况下变化），不是主循环周期。
+   */
+  const waitUntil = async (cond: () => boolean, timeoutMs: number, abort?: () => boolean) => {
     const t0 = Date.now();
-    while (tourTokenRef.current === token && !tourActHalted() && !cond()) {
+    for (;;) {
+      if (cond()) return true;
+      if (abort?.()) return false;
       if (Date.now() - t0 > timeoutMs) return false;
-      await sleepMs(60);
+      await new Promise<void>((resolve) => {
+        let fallback = 0;
+        const finish = () => {
+          tourWakeRef.current = null;
+          window.clearTimeout(fallback);
+          resolve();
+        };
+        tourWakeRef.current = finish;
+        fallback = window.setTimeout(finish, 500);
+      });
     }
+  };
+
+  const tourWaitFor = async (token: number, cond: () => boolean, timeoutMs: number) => {
+    await waitUntil(cond, timeoutMs, () => tourTokenRef.current !== token || tourActHalted());
     return tourTokenRef.current === token && !tourActHalted() && cond();
   };
 
@@ -2147,6 +2321,7 @@ export default function App() {
     const releaseHold = tourSkipRef.current;
     tourSkipRef.current = null;
     releaseHold?.();
+    wakeTourWaiters();
     tourRunningRef.current = false;
     tourActRef.current = 0;
     setTourPhase('paused');
@@ -2159,6 +2334,7 @@ export default function App() {
     const releaseHold = tourSkipRef.current;
     tourSkipRef.current = null;
     releaseHold?.();
+    wakeTourWaiters();
     tourRunningRef.current = false;
     tourActRef.current = 0;
     setTourPhase('idle');
@@ -2172,6 +2348,7 @@ export default function App() {
     if (!tourRunningRef.current) return;
     tourActSkipRef.current = tourActRef.current >= 1 ? tourActRef.current : 1;
     tourSkipRef.current?.();
+    wakeTourWaiters();
   };
 
   // 七幕状态机：全部复用真实 handler 与真实沙箱轨迹，不播放预录动画；fromAct 支持断点续播
@@ -2277,7 +2454,7 @@ export default function App() {
         await selectAndTrace('binary-search');
         await tourHold(token, 1500);
       },
-      // ACT 7 · 打开 Spec 弹窗并跑完 6 项内核自检
+      // ACT 7 · 打开 Spec 弹窗并跑完 8 项内核自检
       async () => {
         const previousChecks = liveActionsRef.current.selfCheckResults;
         setShowArchModal(true);
@@ -2402,8 +2579,13 @@ export default function App() {
       )
     : 0;
   const markerCurveIdx = activeCurve ? curveIndexOf(activeCurve, markerFrame) : 0;
+  const markerBucketDepth = activeCurve ? activeCurve.depths[markerCurveIdx] ?? 1 : 1;
+  // 抽样折线只保证桶内峰值；实心游标必须回到这一帧真实的 callStack.length
+  const markerExactDepth = frames[markerFrame]?.callStack.length ?? markerBucketDepth;
   const markerX = activeCurve ? telemetryX(activeCurve, markerCurveIdx) : 0;
-  const markerY = activeCurve ? telemetryY(activeCurve.depths[markerCurveIdx] ?? 1) : 0;
+  const markerY = telemetryY(markerExactDepth);
+  const markerPeakY = telemetryY(markerBucketDepth);
+  const markerFolded = !!activeCurve && markerBucketDepth > markerExactDepth;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#090A0F] text-zinc-200 flex flex-col font-sans select-none">
@@ -3007,6 +3189,30 @@ export default function App() {
                             strokeWidth={0.8}
                             opacity={0.55}
                           />
+                          {/* 桶内发生过深度折叠：空心环留在桶峰值上，实心点降到该帧真实栈深 */}
+                          {markerFolded && (
+                            <>
+                              <line
+                                x1={markerX}
+                                y1={markerPeakY}
+                                x2={markerX}
+                                y2={markerY}
+                                stroke="#e4e4e7"
+                                strokeWidth={0.9}
+                                opacity={0.5}
+                              />
+                              <circle
+                                cx={markerX}
+                                cy={markerPeakY}
+                                r={3.4}
+                                fill="none"
+                                stroke="#a1a1aa"
+                                strokeWidth={1}
+                                strokeDasharray="1.6 1.4"
+                                opacity={0.6}
+                              />
+                            </>
+                          )}
                           <circle
                             cx={markerX}
                             cy={markerY}
@@ -3065,6 +3271,14 @@ export default function App() {
                     >
                       Y: {telemetryYMode === 'sqrt' ? 'Sqrt' : 'Linear'} ⇄
                     </button>
+                    {markerFolded && (
+                      <span
+                        title="The filled dot sits at this frame's real callStack.length; the dashed ring stays at the bucket peak because 128-point sampling only preserves peaks"
+                        className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400 whitespace-nowrap"
+                      >
+                        frame depth {markerExactDepth} (bucket peak {markerBucketDepth})
+                      </span>
+                    )}
                   </div>
                   <div className="mt-1.5 flex items-center gap-1 flex-wrap">
                     {stageCurves.map((c) => (
@@ -4101,6 +4315,39 @@ export default function App() {
                       or sqrt depth), peak-preserving 128-sample curve bucketing, one-click act skipping,
                       a seven-act tour covering all seven built-in presets, and a URL hash permalink that
                       reproduces preset + frame + watch expressions.
+                      <br />• M18 splits the envelope cursor into an exact-depth dot plus a bucket-peak ring,
+                      extends permalinks to stage + breakpoints with automatic first-paint evolution, replaces
+                      the 60ms tour poll with event-driven wakeups, and grows the self-check to 8 assertions.
+                    </p>
+                  </div>
+                  <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
+                    <div className="text-lime-400 font-semibold">
+                      18. Exact Cursor, Full Permalink &amp; Event-Driven Skip (M18)
+                    </div>
+                    <p className="text-zinc-400 text-[11px]">
+                      The envelope cursor is now two marks: the filled dot sits at this frame&apos;s real
+                      callStack.length while a dashed ring stays at the bucket peak, joined by a thin vertical
+                      segment, and the panel reads frame depth 7 (bucket peak 10). Measured on the 467-frame
+                      sampled fib(12) stage: 30% gives 7 vs 10, 37% gives 9 vs 10, 44% gives 10 vs 10 where the
+                      ring and the chip disappear, and each dot height cross-checks with the flame track
+                      (54% / 69% / 77% of peak 13).
+                      <br />• Permalinks carry the whole scene: preset, stage (only 1..2, the levels a
+                      deterministic Apply sequence can reproduce), frame, sorted positive breakpoints capped at
+                      16 and never past the preset line count, plus watch expressions. Exporting
+                      #preset=pascal-comb&amp;stage=2&amp;frame=6&amp;bp=7&amp;watch=... and reloading it
+                      evolves on its own - boot 284ms, stage capsules 421ms, Stage 2 ready 484ms, FRAME 7 / 17
+                      at 500ms, landing on dp [5x3] with Cursor [3][1] and the L7 breakpoint already set.
+                      <br />• Waiting became event-driven: every React commit wakes the waiter, and Skip Act,
+                      Stop Tour and an outside pointerdown wake it directly. One skip inside a live condition
+                      wait reached the next act in 19ms (M17 needed a full poll cycle, measured 977ms); the
+                      fuse act still shows about 304ms because that DOM change ships together with the
+                      1334-frame commit - MessageChannel, requestAnimationFrame and setTimeout(0) all measure
+                      0ms in the same frame, so the scheduler is not the bottleneck and the residual is
+                      recorded as not yet isolated.
+                      <br />• The self-check tab runs 8 deterministic assertions (24 Invariants): the new pair
+                      proves a 500-frame trace downsamples to exactly 128 points keeping the injected peak 42
+                      and both endpoints, and that the parser reads all five fields while an unknown preset
+                      returns null.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">
@@ -4187,7 +4434,8 @@ export default function App() {
                       commit is 22.6ms while the sandbox still runs for snapshot consistency.
                       <br />• The third Spec tab executes 6 deterministic micro-benchmarks in the browser
                       (TDZ closure, fuse prefixes, recursion A/A&apos;/B, positional and interleaved halving,
-                      matrix write separation, 770px viewport reachability) with PASS/FAIL and per-check ms.
+                      matrix write separation, 770px viewport reachability) with PASS/FAIL and per-check ms;
+                      M18 grows this list to 8, see card 18.
                     </p>
                   </div>
                   <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800 space-y-1">

@@ -1,6 +1,6 @@
 # M17 · 包络图双轴切换、128 点保峰抽样、一键整幕跳过与全预设导览
 
-Commit：本次提交（`git log -1`）— feat(observability): 完成 Milestone 17 包络图双轴切换、128点保峰抽样、一键整幕跳过与全预设导览
+Commit：`7a3b96a` — feat(observability): 完成 Milestone 17 包络图双轴切换、128点保峰抽样、一键整幕跳过与全预设导览
 
 ## Why · 背景动机
 
