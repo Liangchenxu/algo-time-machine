@@ -1,3 +1,5 @@
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/Liangchenxu/badge.svg)](https://hub.xerj.org/contributors/Liangchenxu)
+
 # AlgoTimeMachine
 
 > 浏览器端 AST 自动插桩时间旅行调试器 · AI 复杂度显微镜 · 零后端单页应用
@@ -5,6 +7,9 @@
 面向算法教学与代码评审的**可验证工程**。全部能力跑在一个标签页里：Babel AST 编译插桩 → Blob Web Worker
 沙箱执行 → 逐帧时间旅行回放 → 运行时证据驱动的复杂度诊断 → 等价重构代码一键重跑 → 浏览器内内核自检。
 没有 Node 服务、没有数据库、没有 Python 后端。
+
+本项目已正式上线收录至 **XERJ Corpus Hub**，语料标识 `CORPUS LIANGCHENXU--ALGO-TIME-MACHINE`。
+贡献者主页与收录凭证：<https://hub.xerj.org/contributors/Liangchenxu>。
 
 ```bash
 npm install
